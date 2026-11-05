@@ -165,7 +165,8 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     report.sources = source_stats
     report.collected = len(raw_streams)
     if not raw_streams:
-        log("! 采集结果为空，终止")
+        report.published = _previous_published(settings)
+        log("! 采集结果为空，保留上一次的列表，终止")
         return report
 
     streams = _dedupe(raw_streams)
@@ -224,6 +225,19 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     m3u_path = out_dir / "result.m3u"
     txt_path = out_dir / "result.txt"
     json_path = out_dir / "result.json"
+
+    summary = writers.summarize(channels)
+    report.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    report.elapsed = time.monotonic() - started
+
+    prev_published = _previous_published(settings)
+    if summary["streams"] == 0 and prev_published > 0:
+        # 上游集体抽风或被限流时也会走到这里。宁可留着上一轮能用的列表，
+        # 也不能把它覆盖成空文件——那会让正在播的客户端当场全断。
+        report.published = prev_published
+        log("! 本轮 0 条可用流，保留上一次的列表不覆盖，下一轮再试")
+        return report
+
     report.published = writers.write_m3u(
         channels,
         m3u_path,
@@ -232,13 +246,8 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
         relay_base=settings.public_url,
     )
     writers.write_txt(channels, txt_path, relay_base=settings.public_url)
-
-    report.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    report.elapsed = time.monotonic() - started
     writers.write_json(channels, json_path, report)
     writers.write_json(channels, out_dir / "latest.json", report)
-
-    summary = writers.summarize(channels)
     log(
         f"[完成] {summary['channels']} 个频道 / {summary['streams']} 条流，"
         f"画质分布 {summary['by_grade']}，耗时 {report.elapsed:.1f}s"
@@ -247,6 +256,14 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     if not summary["streams"]:
         log("! 没有可用结果：检查探测门槛、模板频道名是否与源一致")
     return report
+
+
+def _previous_published(settings: Settings) -> int:
+    """上一轮发布了几条，用于判断能不能拿旧列表顶着。"""
+    try:
+        return int((load_result(settings).get("report") or {}).get("published") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def load_result(settings: Settings) -> dict:

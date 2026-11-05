@@ -5,8 +5,16 @@
 自己的 UA，于是主清单能打开、画面却出不来——表现就是"列表里只有一个台能播"。
 
 中转层用正确的 UA 向上游取，把 m3u8 里的每一行改写成 ``/relay/...`` 形式的
-本地地址，分片也是本机转手。播放器只跟本机说话，UA 不再是问题；地址临近
-过期时，播放器下一次刷新清单会拿到新换的地址，过期问题也一并消失。
+本地地址，分片也是本机转手。播放器只跟本机说话，UA 不再是问题。
+
+**关于地址刷新**：早先这里按固定时间（3 分钟）重解析一次，这是错的——
+上游地址其实能活很久，定时重解析等于定时去敲接口，敲几次就被限流；
+一旦某次解析失败，播放器当场跳下一个频道，表现就是"看十来分钟开始狂跳"。
+现在的策略是：
+
+- 拿到地址后一直用，**不按时间主动重解析**
+- 只有上游真的拒绝（401/403/404/410）才换新地址
+- 换地址有冷却，短时间内只试一次，避免失败时把接口敲爆
 
 安全：中转目标只允许上游自己的域名，避免变成一个可以访问任意地址的代理。
 """
@@ -26,6 +34,9 @@ ALLOW_SUFFIX = (".cctv.cn", ".cctv.com", ".ysp.cctv.cn", ".cztv.com", ".cztvclou
 
 # m3u8 里的 URI 属性（#EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等）
 _URI_ATTR = re.compile(r'URI="([^"]+)"')
+
+# 视为「地址已失效」的状态码
+_GONE = (401, 403, 404, 410)
 
 
 def allowed(url: str) -> bool:
@@ -72,33 +83,88 @@ class Relay:
     自己的实现，测试里可以塞假的。
     """
 
-    def __init__(self, resolver, *, ttl: float = 180.0, timeout: float = 12.0):
+    def __init__(self, resolver, *, timeout: float = 12.0, retry_gap: float = 45.0):
         self._resolver = resolver
-        self._ttl = ttl
         self._timeout = timeout
+        self._retry_gap = retry_gap
         self._lock = threading.Lock()
-        self._cache: dict[str, tuple[float, str, str]] = {}  # slug -> (时间, 地址, UA)
+        self._cache: dict[str, tuple[float, str, str]] = {}   # slug -> (时间, 地址, UA)
+        self._failed: dict[str, float] = {}                   # slug -> 上次换地址失败的时间
+        self._errors: dict[str, str] = {}                     # slug -> 最近一次错误
+        self.failures = 0                                     # 累计失败次数
 
     # ---------------- 上游 ----------------
     def upstream(self, slug: str, *, fresh: bool = False) -> tuple[str, str]:
-        """取该频道当前可用的上游地址与 UA，过期或要求强制刷新时重新解析。"""
+        """取该频道当前可用的上游地址与 UA。
+
+        ``fresh=True`` 表示「刚被上游拒绝，想换一个」，受冷却时间约束：
+        短时间内重复失败只试一次，避免把接口敲到限流。
+        """
         now = time.time()
         with self._lock:
             hit = self._cache.get(slug)
-            if hit and not fresh and now - hit[0] < self._ttl:
-                return hit[1], hit[2]
+            cooling = now - self._failed.get(slug, 0.0) < self._retry_gap
 
-        url, ua = self._resolver(slug)
+        if hit and not fresh:
+            return hit[1], hit[2]
+
+        if cooling:
+            # 冷却期内不再敲门：有旧地址就继续用，没有就把上次的错抛出去
+            if hit:
+                return hit[1], hit[2]
+            raise RelayError(self._errors.get(slug, "上游暂时不可用，稍后自动重试"))
+
+        try:
+            url, ua = self._resolver(slug)
+        except Exception as exc:  # noqa: BLE001 - 解析失败要能兜住
+            message = str(exc) or type(exc).__name__
+            with self._lock:
+                self._failed[slug] = now
+                self._errors[slug] = message
+                self.failures += 1
+                stale = self._cache.get(slug)
+            if stale:
+                return stale[1], stale[2]
+            raise RelayError(message) from exc
+
         if not url:
+            with self._lock:
+                self._failed[slug] = now
+                self._errors[slug] = "解析结果为空"
             raise RelayError(f"{slug} 没有解析出可用地址")
+
         with self._lock:
             self._cache[slug] = (now, url, ua)
+            self._failed.pop(slug, None)
+            self._errors.pop(slug, None)
         return url, ua
 
     def forget(self, slug: str) -> None:
-        """丢掉缓存，下次请求重新换地址。"""
+        """丢掉缓存，下次请求时换新地址。"""
         with self._lock:
             self._cache.pop(slug, None)
+
+    def _mark_failed(self, slug: str, message: str) -> None:
+        """记一次失败并进入冷却。
+
+        冷却不只是防接口被敲爆：一个频道的分片请求是并发来的，失败时若不加
+        冷却，每个分片都会触发一次重新解析，几十个请求瞬间堆上去。
+        """
+        with self._lock:
+            self._failed[slug] = time.time()
+            self._errors[slug] = message
+            self.failures += 1
+            self._cache.pop(slug, None)
+
+    def stats(self) -> dict:
+        """给面板看的简况。"""
+        now = time.time()
+        with self._lock:
+            return {
+                "cached": {k: round(now - v[0]) for k, v in self._cache.items()},
+                "errors": dict(self._errors),
+                "failures": self.failures,
+            }
 
     def _fetch(self, url: str, ua: str) -> tuple[int, dict, bytes]:
         request = urllib.request.Request(url, headers={"User-Agent": ua or "qqlive"})
@@ -138,11 +204,12 @@ class Relay:
         """返回改写后的 m3u8 文本。"""
         url, ua = self.upstream(slug)
         status, _, body = self._fetch(url, ua)
-        if status in (401, 403, 410):
-            # 地址可能已失效，换一个新的再来一次
+        if status in _GONE:
+            # 地址失效：换一个新的再来一次
             url, ua = self.upstream(slug, fresh=True)
             status, _, body = self._fetch(url, ua)
         if status != 200 or not body:
+            self._mark_failed(slug, f"上游返回 {status}")
             raise RelayError(f"上游返回 {status}，取不到播放清单")
 
         text = body.decode("utf-8", "replace")
@@ -151,7 +218,7 @@ class Relay:
         return self._rewrite(text, url, slug)
 
     def resource(self, slug: str, token: str) -> tuple[str, bytes]:
-        """转发一个分片 / 密钥，返回 (Content-Type, 内容)。"""
+        """转发一个分片 / 密钥 / 子清单，返回 (Content-Type, 内容)。"""
         url = decode(token)
         if not url:
             raise RelayError("转发地址无法解析")
@@ -161,12 +228,17 @@ class Relay:
         # slug 只用来做失效清理，未知频道也能转（分片地址自带上游签名）
         try:
             _, ua = self.upstream(slug)
-        except (RelayError, KeyError):
+        except RelayError:
             ua = "qqlive"
 
         status, headers, body = self._fetch(url, ua)
-        if status in (403, 404, 410):
-            self.forget(slug)
+        if status in _GONE:
+            # 上游偶发拒绝很常见，稍等一下再试一次，通常就过了
+            time.sleep(0.3)
+            status, headers, body = self._fetch(url, ua)
+        if status in _GONE:
+            self._mark_failed(slug, f"分片被拒（{status}）")
+            raise RelayError(f"上游返回 {status}")
         if status != 200:
             raise RelayError(f"上游返回 {status}")
 

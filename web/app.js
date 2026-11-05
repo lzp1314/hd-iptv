@@ -22,6 +22,7 @@ async function loadStatus() {
     const r = await fetch("/api/status", { cache: "no-store" });
     const d = await r.json();
     $("version").textContent = "v" + (d.version || "-");
+    if ($("curVersion")) $("curVersion").textContent = "v" + (d.version || "-");
     const rep = d.report || {};
 
     setDot(d.running ? "busy" : (d.last_error ? "err" : "ok"));
@@ -108,6 +109,33 @@ async function triggerUpdate() {
   setTimeout(refresh, 600);
 }
 
+async function checkUpdate() {
+  const btn = $("btnCheckUpdate");
+  const out = $("updateResult");
+  btn.disabled = true;
+  out.className = "update-result";
+  out.textContent = "检查中…";
+  try {
+    const r = await fetch("/api/version?check=1", { cache: "no-store" });
+    const d = await r.json();
+    if (d.error) {
+      out.className = "update-result err";
+      out.textContent = "检查失败：" + d.error;
+    } else if (d.has_update) {
+      out.className = "update-result warn";
+      out.textContent = `有新版 v${d.latest}，换新镜像重启即可`;
+    } else {
+      out.className = "update-result ok";
+      out.textContent = `已是最新（仓库 v${d.latest}）`;
+    }
+  } catch (e) {
+    out.className = "update-result err";
+    out.textContent = "检查失败：" + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function refresh() {
   await loadStatus();
   await loadChannels();
@@ -120,6 +148,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   $("btnUpdate").addEventListener("click", triggerUpdate);
   $("btnRefresh").addEventListener("click", refresh);
+  $("btnCheckUpdate").addEventListener("click", checkUpdate);
   $("search").addEventListener("input", () => renderChannels(cache));
 
   document.querySelectorAll("[data-copy]").forEach((btn) => {

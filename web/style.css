@@ -161,6 +161,12 @@ main { max-width: 1080px; margin: 0 auto; padding: 20px 22px 40px; }
 }
 .empty { color: var(--muted); font-size: 13px; }
 
+.update-result { margin-left: 10px; }
+.update-result.ok { color: #15803d; }
+.update-result.warn { color: #b45309; }
+.update-result.err { color: #b91c1c; }
+.mono { font-family: ui-monospace, Consolas, monospace; }
+
 footer {
   text-align: center;
   color: var(--muted);

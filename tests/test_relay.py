@@ -41,6 +41,47 @@ class FakeRelay(Relay):
         return status, {"Content-Type": "application/vnd.apple.mpegurl"}, text.encode()
 
 
+class CountingRelay(Relay):
+    """解析次数可数的替身，用来验证「不按时间主动重解析」。"""
+
+    def __init__(self):
+        self.calls = 0
+        super().__init__(self._resolver)
+
+    def _resolver(self, slug):
+        self.calls += 1
+        return "https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/index.m3u8", "qqlive"
+
+    def _fetch(self, url, ua):  # noqa: ANN001
+        return 200, {"Content-Type": "application/vnd.apple.mpegurl"}, MASTER.encode()
+
+
+class FlakyResolver(Relay):
+    """解析必失败，验证冷却期内不会反复敲门。"""
+
+    def __init__(self):
+        self.calls = 0
+        super().__init__(self._resolver)
+
+    def _resolver(self, slug):
+        self.calls += 1
+        raise RuntimeError("iretcode=14")
+
+
+class RescuingRelay(Relay):
+    """第一次分片被拒，第二次放行，验证重试。"""
+
+    def __init__(self):
+        super().__init__(lambda slug: ("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8", "qqlive"))
+        self.attempts = 0
+
+    def _fetch(self, url, ua):  # noqa: ANN001
+        self.attempts += 1
+        if self.attempts == 1:
+            return 403, {}, b""
+        return 200, {"Content-Type": "video/mp2t"}, b"TS-DATA"
+
+
 class RelayTest(unittest.TestCase):
     def test_allowlist(self):
         self.assertTrue(allowed("https://hlsliveali-cdn.ysp.cctv.cn/A/1.m3u8"))
@@ -119,6 +160,39 @@ class WriterRelayTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
         self.assertIn("ysp.cctv.cn", text)
         self.assertIn("EXTVLCOPT:http-user-agent=qqlive", text)
+
+
+class RelayPolicyTest(unittest.TestCase):
+    def test_address_is_reused_not_refreshed(self):
+        """曾经每 3 分钟重解析一次，几次就把接口敲到限流，这里锁死行为。"""
+        relay = CountingRelay()
+        relay.playlist("cctv1")
+        relay.playlist("cctv1")
+        relay.playlist("cctv1")
+        self.assertEqual(relay.calls, 1)
+
+    def test_failed_resolve_enters_cooldown(self):
+        relay = FlakyResolver()
+        for _ in range(5):
+            with self.assertRaises(RelayError):
+                relay.upstream("cctv1")
+        self.assertEqual(relay.calls, 1)  # 冷却期内只敲一次
+        self.assertEqual(relay.failures, 1)
+
+    def test_segment_retries_before_giving_up(self):
+        relay = RescuingRelay()
+        token = encode("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/seg-1.ts")
+        ctype, body = relay.resource("cctv1", token)
+        self.assertEqual(body, b"TS-DATA")
+        self.assertIn("mp2t", ctype)
+        self.assertEqual(relay.attempts, 2)
+
+    def test_stats_shape(self):
+        relay = CountingRelay()
+        relay.playlist("cctv1")
+        stats = relay.stats()
+        self.assertEqual(stats["failures"], 0)
+        self.assertIn("cctv1", stats["cached"])
 
 
 if __name__ == "__main__":

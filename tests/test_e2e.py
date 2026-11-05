@@ -192,6 +192,25 @@ enabled = true
             # 分辨率来自主播放列表的 RESOLUTION，不是靠猜
             self.assertTrue(any("1080" in line for line in logs))
 
+    def test_keeps_previous_list_when_nothing_usable(self):
+        """上游集体失败时，不能把上一轮能用的列表覆盖成空。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._make_project(root)
+            settings = load_settings(root)
+
+            first = run_update(settings, log=lambda _m: None)
+            self.assertGreater(first.published, 0)
+            before = (root / "output" / "result.m3u").read_text(encoding="utf-8")
+
+            # 模拟订阅地址整体挂掉
+            self.fixture.routes.pop("/list.m3u", None)
+
+            second = run_update(settings, log=lambda _m: None)
+            self.assertEqual(second.published, first.published)
+            after = (root / "output" / "result.m3u").read_text(encoding="utf-8")
+            self.assertEqual(before, after, "0 条时不应覆盖已有列表")
+
     def test_allow_unknown_keeps_unmeasured(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

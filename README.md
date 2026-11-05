@@ -76,27 +76,7 @@ python -m iptvhd --root examples update
 
 输出在 `examples/output/result.m3u`。它会识别出 1080P 并保留，360P 直接丢掉。
 
-### 1. 直接开跑（不用配任何源）
-
-`config/sources.toml` 里默认开着两个取源器，跑完就有央视和卫视：
-
-```bash
-python -m iptvhd update
-```
-
-它会现场向平台要地址，探测完输出到 `output/result.m3u`。**第一次要一分多钟**——取源和探测都要控制节奏，发太快会被上游挡掉。这是后台任务，不用盯着等。
-
-想确认某个地址到底什么画质，单独探一下：
-
-```bash
-python -m iptvhd probe "https://cdn.example.com/zjws/1080p.m3u8"
-```
-
-```
-可用    1080P 0x1080  33.3Mbps  505ms  https://cdn.example.com/zjws/1080p.m3u8
-```
-
-### 2. 扩充来源
+### 1. 扩充来源
 
 `config/sources.toml` 里三种方式任选：开一个自己的订阅、加一个省广电模块、或者用 `template` 填 URL 模板。
 
@@ -108,7 +88,7 @@ url = "https://example.com/list.m3u"
 enabled = true
 ```
 
-### 3. 自检
+### 2. 自检
 
 ```bash
 python -m iptvhd doctor
@@ -116,13 +96,13 @@ python -m iptvhd doctor
 
 它会告诉你：模板载入了几个频道、有几个源启用、输出目录能不能写、门槛设成多少。有 ✗ 就先修 ✗。
 
-### 4. 跑一次
+### 3. 跑一次
 
 ```bash
 python -m iptvhd update
 ```
 
-### 5. 起服务（可选，推荐）
+### 4. 起服务（推荐）
 
 ```bash
 python -m iptvhd serve --port 9797
@@ -138,7 +118,7 @@ python -m iptvhd serve --port 9797
 | 单台播放 | `http://NAS_IP:9797/live/cctv1.m3u8` |
 | 可用 slug 清单 | `http://NAS_IP:9797/api/live` |
 
-填进 TiviMate / ysc / Kodi / 影视仓 / PotPlayer 都能直接用。
+填进 TiviMate / ysc / Kodi / 影视仓 / PotPlayer 都能直接用。面板上有「检查更新」，点一下会跟仓库比版本，升级方式也写在旁边。
 
 **两种用法怎么选：**
 
@@ -146,51 +126,6 @@ python -m iptvhd serve --port 9797
 - **单台地址 `/live/<slug>.m3u8`** —— 每个频道一个固定地址，服务端现换地址再转发，永远不会失效。
 
 `slug` 就是频道名的小写形式，比如 `cctv1`、`cctv5`、`hnws`（湖南卫视）、`zjws`（浙江卫视），完整清单看 `/api/live`。
-
-## 配置
-
-三个文件，各管一件事。
-
-### `config/config.toml` —— 全局参数
-
-```toml
-[probe]
-concurrency = 24           # 并发探测数，NAS 建议 8~16
-min_height = 720           # 高清门槛：低于此分辨率直接丢；填 1080 就是「只留 FHD」
-max_height = 1080          # 画质上限：高于此分辨率直接丢。不要 4K 就保持默认，想全收填 0
-min_speed_mbps = 1.5       # 最低速率
-max_per_channel = 4        # 每个频道保留几个源
-allow_unknown_resolution = false   # 允许分辨率未知的流（脚本类源常见，开了会混进标清）
-
-[output]
-epg_url = ""               # 填了才会在 m3u 头里写 x-tvg-url
-logo_base = ""             # 台标库根地址，留空则用源自带的 tvg-logo
-```
-
-完整项见文件内注释。所有项都支持环境变量覆盖：`HDIPTV_MIN_HEIGHT` `HDIPTV_MAX_HEIGHT` `HDIPTV_CONCURRENCY` `HDIPTV_INTERVAL_HOURS` `HDIPTV_SUBSCRIBE` 等。
-
-### `config/channels.txt` —— 频道模板
-
-决定**输出哪些频道、怎么分组、按什么顺序**。模板里没有的频道一律不输出。
-
-```
-央视,#genre#
-CCTV-1,央视一套,中央一套
-CCTV-5+
-CCTV-4K,CCTV4K超高清
-
-卫视,#genre#
-湖南卫视
-东方卫视
-```
-
-逗号后面是别名，源里叫法不同（`央视一套` / `中央一台` / `CCTV1综合`）时靠它兜底。内置了央视 1~17 套的常见叫法映射；繁体（`湖南衛視`）、画质后缀（`_HD` `FHD` `1080P` `50FPS`）、各种分隔符都会在匹配前被清洗掉。
-
-匹配有边界保护：`CCTV1` 不会误吞 `CCTV11`。
-
-### `config/sources.toml` —— 采集源
-
-可选的源类型、字段含义和示例都写在文件注释里，照着改即可。默认只启用两个取源器，其余是注释状态。
 
 ## 部署
 
@@ -316,13 +251,15 @@ $ python -m iptvhd probe "https://cdn.example.com/zjws/1080p.m3u8"
 
 | 路径 | 说明 |
 |---|---|
-| `/` | 网页面板 |
+| `/` | 网页面板（含版本检查） |
 | `/m3u` `/txt` `/json` | 结果文件 |
 | `/api/status` | 运行状态、统计、最近日志 |
 | `/api/channels` | 频道与源明细 |
 | `/live/<slug>.m3u8` | 单频道播放列表，服务端现换地址并转发 |
 | `/relay/<slug>/p/<token>` | 中转内部地址，播放器自动请求，不用手填 |
 | `/api/live` | 可用频道清单 |
+| `/api/version?check=1` | 当前版本，顺便跟仓库比一下有没有新版 |
+| `/api/relay` | 中转缓存与最近错误，排查播放问题用 |
 | `POST /api/update` | 手动触发一次更新 |
 | `/health` | 健康检查（给 Docker HEALTHCHECK 用） |
 
@@ -344,7 +281,7 @@ http://192.168.1.10:9797/live/cctv1.m3u8
 python -m unittest discover -s tests -t . -v
 ```
 
-60 个用例，包含一个端到端测试：本地起一个伪造的 HLS 服务器（主列表 + 分片 + 一个 404），跑完整管线，断言 1080P 被保留、360P 与 404 被丢弃，输出格式正确。
+71 个用例，包含一个端到端测试：本地起一个伪造的 HLS 服务器（主列表 + 分片 + 一个 404），跑完整管线，断言 1080P 被保留、360P 与 404 被丢弃，输出格式正确。
 
 ## 常见问题
 

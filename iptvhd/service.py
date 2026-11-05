@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .pipeline import load_result, run_update
@@ -191,6 +191,7 @@ def make_handler(state: State):
                             "live": "/live/<slug>.m3u8",
                             "live_list": "/api/live",
                             "relay": "/relay/<slug>/p/<token>",
+                            "version": "/api/version?check=1",
                         },
                     }
                 )
@@ -199,6 +200,13 @@ def make_handler(state: State):
                 self._json({"generated_at": result.get("generated_at", ""), "channels": result.get("channels", [])})
             elif path == "/health":
                 self._json({"ok": True, "running": state.running})
+            elif path == "/api/version":
+                from .updater import check
+
+                force = "1" in parse_qs(urlsplit(self.path).query).get("check", [])
+                self._json(check(__version__, force=force))
+            elif path == "/api/relay":
+                self._json(state.relay.stats())
             elif path.startswith("/relay/"):
                 self._relay(path)
             elif path.startswith(("/live/", "/ysp/")) and path.endswith(".m3u8"):

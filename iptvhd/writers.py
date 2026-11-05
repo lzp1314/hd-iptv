@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from .models import Channel, RunReport, Stream
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """先写临时文件再替换，避免播放器读到写了一半的列表。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=path.suffix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _logo(channel: Channel, logo_base: str) -> str:
@@ -50,7 +65,14 @@ def write_m3u(
         if not ch.streams:
             continue
         logo = _logo(ch, logo_base)
+        seen: set[str] = set()
         for idx, stream in enumerate(ch.streams, start=1):
+            # 走转发时，同一个台的多个源会塌缩成同一个地址；重复条目会让
+            # 播放器在两条一模一样的记录之间来回跳，先去掉
+            target = _play_url(stream, relay_base)
+            if target in seen:
+                continue
+            seen.add(target)
             # 一个频道多个源时，在名字后面标注画质，方便播放器里区分
             suffix = ""
             if multi_source_mark and len(ch.streams) > 1 and stream.height:
@@ -66,11 +88,10 @@ def write_m3u(
             lines.append(f'#EXTINF:-1 {" ".join(attrs)},{ch.name}{suffix}')
             if stream.user_agent and not (relay_base and stream.slug):
                 lines.append(f"#EXTVLCOPT:http-user-agent={stream.user_agent}")
-            lines.append(_play_url(stream, relay_base))
+            lines.append(target)
             count += 1
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _atomic_write(path, "\n".join(lines) + "\n")
     return count
 
 
@@ -88,8 +109,7 @@ def write_txt(channels: list[Channel], path: Path, *, relay_base: str = "") -> i
         for stream in ch.streams:
             lines.append(f"{ch.name},{_play_url(stream, relay_base)}")
             count += 1
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _atomic_write(path, "\n".join(lines) + "\n")
     return count
 
 
@@ -120,8 +140,7 @@ def write_json(channels: list[Channel], path: Path, report: RunReport | None = N
             if ch.streams
         ],
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _attr(value: str) -> str:
