@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import __version__
 from .pipeline import load_sources, run_update
-from .settings import load_settings
+from .settings import ensure_defaults, load_settings
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -170,6 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
+
+    # 配置目录为空时补默认值：Docker 挂载空目录后也能直接跑起来
+    if args.command in {"update", "serve", "doctor"} and not args.config:
+        created = ensure_defaults(root)
+        if created:
+            print(f"[初始化] 已写入默认配置：{', '.join(created)} → {root / 'config'}")
 
     if args.command == "update":
         return cmd_update(root, args.config, args.quiet)

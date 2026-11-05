@@ -10,6 +10,7 @@ from iptvhd import hls
 from iptvhd.collectors import parse_m3u, parse_txt, parse_list
 from iptvhd.models import Channel, Stream
 from iptvhd.normalize import ChannelMatcher, normalize, parse_channels
+from iptvhd.settings import ensure_defaults, load_settings
 from iptvhd.writers import write_m3u, write_txt
 
 MASTER = """#EXTM3U
@@ -156,6 +157,39 @@ class TestWriters(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("央视,#genre#", text)
             self.assertIn("CCTV-1,http://a/4k.m3u8", text)
+
+
+class DefaultsTest(unittest.TestCase):
+    """空 config/ 目录（Docker 挂载成空的样子）必须能自动补齐。"""
+
+    def test_fills_empty_config_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir()
+            created = ensure_defaults(root)
+            self.assertEqual(sorted(created), ["channels.txt", "config.toml", "sources.toml"])
+            # 补齐后能真正加载出频道，不是空模板
+            settings = load_settings(root)
+            self.assertTrue(settings.channels_file.exists())
+            self.assertGreater(len(parse_channels(settings.channels_file.read_text(encoding="utf-8"))), 10)
+
+    def test_keeps_user_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir()
+            mine = root / "config" / "channels.txt"
+            mine.write_text("央视,#genre#\nCCTV-1\n", encoding="utf-8")
+            created = ensure_defaults(root)
+            self.assertNotIn("channels.txt", created)
+            self.assertEqual(mine.read_text(encoding="utf-8"), "央视,#genre#\nCCTV-1\n")
+            # 缺的那个仍然补上
+            self.assertIn("sources.toml", created)
+
+    def test_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ensure_defaults(root)
+            self.assertEqual(ensure_defaults(root), [])
 
 
 if __name__ == "__main__":

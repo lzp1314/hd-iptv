@@ -2,7 +2,8 @@
 
 **高清直播源自动采集 / 清洗 / 测速 / 分发工具。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![CI](https://github.com/yourname/hd-iptv/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![CI](https://github.com/__OWNER__/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/__OWNER__/hd-iptv/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/__OWNER__/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
@@ -12,6 +13,8 @@
 
 **所以它开箱就能用**：默认配置跑完就有 55 个央视和卫视频道，全部 1080P，不需要你去找任何订阅源。
 仓库里不含任何直播地址——每个地址都是运行时现换的，这也是它和「搬运列表」类项目的根本区别。
+
+> 仅供个人学习与家庭内网自用。请勿用于公开转播、二次分发或任何商业用途，详见文末[合规声明](#合规声明)。
 
 ```
 取源器（向官方要）          采集器（收别人的）
@@ -37,7 +40,7 @@
 | 判断能不能播 | 只看 HTTP 200 | 主列表能开、子清单 404 也算死；还要真读一段分片，拿不到字节就不算活 |
 | 依赖 | 一堆 pip 包 + ffmpeg | 只用 Python 标准库，`python -m iptvhd` 直接跑 |
 | 采集扩展 | 改代码 | 四种源类型靠配置拼，加源不用碰 Python |
-| 部署 | CLI 一把梭 | CLI + 网页面板 + Docker + GitHub Actions |
+| 部署 | CLI 一把梭 | CLI + 网页面板 + Docker Compose（含多架构镜像） |
 
 ## 内置取源器与覆盖范围
 
@@ -89,7 +92,7 @@ TEA 本身不难，难的是那个二进制包的字段顺序和两段固定密�
 仓库自带一个演示项目，用的是公开的 HLS 测试流，跟版权内容无关：
 
 ```bash
-git clone https://github.com/yourname/hd-iptv.git
+git clone https://github.com/__OWNER__/hd-iptv.git
 cd hd-iptv
 python -m iptvhd --root examples update
 ```
@@ -109,11 +112,11 @@ python -m iptvhd update
 想确认某个地址到底什么画质，单独探一下：
 
 ```bash
-python -m iptvhd probe "https://ali-xwl.cztv.com/live/channel011080Pnew.m3u8"
+python -m iptvhd probe "https://cdn.example.com/zjws/1080p.m3u8"
 ```
 
 ```
-可用    1080P 0x1080  33.3Mbps  505ms  https://ali-xwl.cztv.com/live/channel011080Pnew.m3u8
+可用    1080P 0x1080  33.3Mbps  505ms  https://cdn.example.com/zjws/1080p.m3u8
 ```
 
 ### 2. 扩充来源
@@ -296,48 +299,121 @@ name_group = 2
 
 ## 部署
 
-### Docker Compose（NAS / 服务器通用）
+两种方式，按需选一种：
+
+| 方式 | 适合谁 | 命令 |
+|---|---|---|
+| **源码构建** | 想改代码、看得到源码 | `docker compose up -d --build` |
+| **拉现成镜像** | 只想跑起来 | `docker run ... ghcr.io/__OWNER__/hd-iptv:latest` |
+
+镜像在 GitHub Actions 里自动构建，`amd64` 和 `arm64` 都有，推 `main` 或打 `v*` 标签各出一版。
+
+### 方式一：Docker Compose（推荐）
 
 ```bash
-git clone https://github.com/yourname/hd-iptv.git
+git clone https://github.com/__OWNER__/hd-iptv.git
 cd hd-iptv
-# 先按上面的步骤配好 config/，再启动
-docker compose up -d
+docker compose up -d --build
 ```
 
-或者不克隆，直接跑镜像：
+起来后直接访问 `http://NAS_IP:8080`。**配置不用先准备**——`config/` 是空的也没关系，首次启动会自动写入一份默认配置（央视频 + 浙江广电，1080P）。
+
+要改端口 / 目录 / 局域网地址，复制一份 `.env` 再改，别动 yml：
+
+```bash
+cp .env.example .env
+```
+
+```ini
+HOST_PORT=8080
+CONFIG_DIR=/vol2/1000/docker/hd-iptv/config
+OUTPUT_DIR=/vol2/1000/docker/hd-iptv/output
+PUBLIC_URL=http://192.168.1.10:8080
+```
+
+改完 `docker compose up -d` 重来一次即可（改环境变量会重建容器，不会重装镜像）。
+
+### 方式二：直接跑镜像
 
 ```bash
 docker run -d --name hd-iptv --restart unless-stopped \
   -p 8080:8080 \
   -v /vol2/1000/docker/hd-iptv/config:/app/config \
   -v /vol2/1000/docker/hd-iptv/output:/app/output \
-  -e HDIPTV_INTERVAL_HOURS=6 \
+  -e HDIPTV_INTERVAL_HOURS=3 \
+  -e HDIPTV_MIN_HEIGHT=1080 \
+  -e HDIPTV_MAX_HEIGHT=1080 \
   -e PUBLIC_URL=http://192.168.1.10:8080 \
-  ghcr.io/yourname/hd-iptv:latest
+  ghcr.io/__OWNER__/hd-iptv:latest
 ```
+
+`/vol2/1000/docker/...` 是飞牛的路径，换成你自己的即可，两个目录不存在会自动创建。
 
 ### 飞牛 fnOS
 
-1. 文件管理里建目录 `/vol2/1000/docker/hd-iptv/`，下面建 `config` 和 `output`
-2. 把仓库的 `config/` 三个文件拷进去，改好订阅源
-3. Docker → Compose → 新建项目，粘贴 `docker-compose.yml`，**卷映射务必写绝对路径**
-4. 启动后浏览器开 `http://NAS_IP:8080`
+飞牛的 Docker 面板对 compose 支持得不错，两条路：
 
-> 踩坑提醒：`docker restart` 不会重新加载卷映射。改过挂载路径后必须删容器重建（或 `docker compose up -d --force-recreate`）。
+**A. 面板里贴 compose（不用 SSH）**
+
+1. 文件管理建目录：`/vol2/1000/docker/hd-iptv/`，里面再建 `config`、`output`
+2. Docker → Compose → 新建项目，项目目录选 `/vol2/1000/docker/hd-iptv`
+3. compose 内容用仓库里的 `docker-compose.yml`，但把 `build: .` 改成 `image: ghcr.io/__OWNER__/hd-iptv:latest`（面板里没有源码，构建不了）
+4. 卷映射写**绝对路径**：`/vol2/1000/docker/hd-iptv/config:/app/config`
+5. 启动，浏览器开 `http://飞牛IP:8080`
+
+**B. SSH 拉源码构建（能改配置、升级方便）**
+
+```bash
+cd /vol2/1000/docker
+git clone https://github.com/__OWNER__/hd-iptv.git
+cd hd-iptv
+docker compose up -d --build
+```
+
+> **两个必看的坑**
+> 1. `docker restart` **不会**重新读卷映射。改过挂载路径必须删容器重建：`docker compose up -d --force-recreate`。
+> 2. 挂载的 `config` 目录如果指向别处（比如匿名卷 `/vol2/docker/volumes/<hash>/_data`），你在宿主机上改的配置根本没进容器。用 `docker inspect hd-iptv --format '{{json .Mounts}}'` 核对一下 Source 是不是你以为的目录。
 
 ### 群晖 / 极空间 / 威联通
 
-同 Docker 思路，把 `config` 和 `output` 两个目录映射出去即可，架构支持 `amd64` 与 `arm64`。
+把 `config` 和 `output` 两个目录映射出去即可，`amd64`（群晖 x86 机型）和 `arm64`（部分 ARM 机型）都有镜像。群晖的 Container Manager 支持直接导入 `docker-compose.yml`。
 
-### GitHub Actions（不占自己带宽）
+### 镜像仓库里能搜到吗
 
-1. Fork 本仓库
-2. Settings → Secrets 添加 `IPTV_SUBSCRIBE`（订阅地址，多个用逗号分隔）
-3. Settings → Pages → Source 选 `GitHub Actions`
-4. 手动跑一次 `Update playlists` 工作流
+分三种情况：
 
-之后每天北京时间 05:30 自动更新，结果发布在 `https://你的用户名.github.io/hd-iptv/`。
+| 位置 | 能不能搜到 | 怎么用 |
+|---|---|---|
+| **GHCR**（`ghcr.io`） | 仓库 push 后自动构建，但包默认是**私有**的 | 到 GitHub → 你的头像 → Your profile → Packages → `hd-iptv` → Package settings → Change visibility → Public，之后任何人可 `docker pull` |
+| **Docker Hub** | 配好之后能在 hub.docker.com 搜到 | 仓库 Settings → Variables 加 `DOCKERHUB_USERNAME`，Secrets 加 `DOCKERHUB_TOKEN`，再推一次代码即可 |
+| 本地构建 | 只在你自己机器上 | `docker images` 里能看到 `hd-iptv:local` |
+
+**不打算公开发布镜像的话，用方式一（本地构建）最省事**，也不需要考虑仓库可见性。
+
+## 发布到 GitHub
+
+仓库已经在本地提交好了，只差一个远程地址。在 GitHub 上新建一个**空仓库**（不要勾 README / .gitignore / License），然后：
+
+```bash
+cd hd-iptv
+git remote add origin https://github.com/你的用户名/hd-iptv.git
+git branch -M main
+git push -u origin main
+```
+
+推上去之后会自动发生两件事：
+
+1. **CI**（`.github/workflows/ci.yml`）在 3.11 / 3.12 / 3.13 上跑 51 个测试
+2. **Docker image**（`.github/workflows/docker.yml`）构建多架构镜像推到 GHCR
+
+想发版本就打标签，镜像会同时得到 `1.0.0` 和 `latest` 两个 tag：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+> 仓库里**没有任何定时抓取并发布到 Pages 的工作流**。这是故意的：抓到的地址有时效，公开挂出去既不稳定，也超出了「家庭自用」的边界。要定时更新就在自己 NAS 上跑，别放到公网。
 
 ## 命令行
 
@@ -353,8 +429,8 @@ python -m iptvhd --version
 `probe` 是接新平台时的第一件工具。找到一个候选地址，先探一下再写进配置，比跑整轮更新快得多：
 
 ```bash
-$ python -m iptvhd probe "https://ali-xwl.cztv.com/live/channel011080Pnew.m3u8"
-可用    1080P 0x1080  33.3Mbps  505ms  https://ali-xwl.cztv.com/...
+$ python -m iptvhd probe "https://cdn.example.com/zjws/1080p.m3u8"
+可用    1080P 1920x1080  33.3Mbps  505ms  https://cdn.example.com/...
 ```
 
 通用参数 `--root <目录>` 可以指向任意项目目录，用来跑多套配置。
@@ -388,9 +464,21 @@ http://b.example.com/cctv1.m3u8
 python -m unittest discover -s tests -t . -v
 ```
 
-15 个用例，包含一个端到端测试：本地起一个伪造的 HLS 服务器（主列表 + 分片 + 一个 404），跑完整管线，断言 1080P 被保留、360P 与 404 被丢弃，输出格式正确。
+51 个用例，包含一个端到端测试：本地起一个伪造的 HLS 服务器（主列表 + 分片 + 一个 404），跑完整管线，断言 1080P 被保留、360P 与 404 被丢弃，输出格式正确。
 
 ## 常见问题
+
+**容器起来了，但网页里一个频道都没有**
+先看日志头一行有没有 `[初始化] 已写入默认配置`。没有的话，多半是挂载没落到你改的那个目录上——程序在容器里往 `/app/config` 写，你在宿主机改的是另一份。核对实际挂载：
+
+```bash
+docker inspect hd-iptv --format '{{json .Mounts}}' | python -m json.tool
+```
+
+看 `Source` 是不是你预期的路径。改完挂载必须重建容器，`docker restart` 不生效。
+
+**8080 端口被占了**
+改 `.env` 里的 `HOST_PORT=8081`（或 compose 里 `"8081:8080"`），然后 `docker compose up -d`。容器内始终是 8080，只改左边。
 
 **更新后是空的 / 0 条**
 1. `doctor` 看有没有启用的源

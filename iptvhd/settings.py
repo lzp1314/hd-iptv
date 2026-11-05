@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# 包内自带的配置模板。容器里把 config/ 挂载成空目录时（最常见的一种翻车方式），
+# 靠它把默认配置补齐，否则频道模板为空会直接产出 0 个频道。
+DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
+DEFAULT_FILES = ("config.toml", "channels.txt", "sources.toml")
+DEFAULT_CONFIG_DIRNAME = "config"
 
 DEFAULT_CONFIG = """\
 [app]
@@ -125,6 +132,34 @@ class Settings:
     @property
     def run_on_start(self) -> bool:
         return bool(self.get("update", "run_on_start", True))
+
+
+def ensure_defaults(root: Path | str) -> list[str]:
+    """把缺失的默认配置补进 <root>/config/，已有文件一律不动。
+
+    针对的场景：Docker 把宿主机上的空目录挂到 /app/config，镜像里原来那份
+    配置被整个遮住，程序起来发现频道模板为空，一声不响地产出空结果。
+    """
+    cfg_dir = Path(root) / DEFAULT_CONFIG_DIRNAME
+    created: list[str] = []
+    try:
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return created
+
+    for name in DEFAULT_FILES:
+        target = cfg_dir / name
+        if target.exists():
+            continue
+        source = DEFAULTS_DIR / name
+        if not source.exists():
+            continue
+        try:
+            shutil.copyfile(source, target)
+        except OSError:
+            continue
+        created.append(name)
+    return created
 
 
 def load_settings(root: Path | str = ".", config_file: str | Path | None = None) -> Settings:

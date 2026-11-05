@@ -1,0 +1,117 @@
+# 采集源配置。每个 [[source]] 是一个源，按顺序采集。
+#
+# type 支持两类共七种：
+#
+#   采集器（别人的列表）
+#     subscription —— m3u / txt 订阅地址
+#     local        —— 本地文件或目录（txt / m3u）
+#     api          —— 通用 JSON 接口，字段映射自己配
+#     webpage      —— 通用网页正则抽取
+#
+#   取源器（自己向官方要地址）
+#     yangshipin   —— 央视频加密接口，央视 + 全国卫视 1080P，覆盖最全
+#     cctv         —— 央视官方 CDN，程序内生成，零配置
+#     zhejiang     —— 浙江广电官网接口，签名换地址，1080P
+#     template     —— URL 模板，任何「地址有规律」的平台都能接
+#
+# enabled = false 的源会被跳过，保留在文件里方便随时开关。
+
+# ======================= 取源器 =======================
+
+# ---------------- 央视频：加密接口（主源） ----------------
+# 一个接口覆盖央视全部频道 + 全国卫视，默认要 1080P（fhd 档）。
+# 这是目前唯一能稳定拿到「全部央视频道 1080P」的路子，也是本项目的默认主源。
+#
+# 只想要一部分：channels 列 slug（见 iptvhd/ysp.py 里的 CHANNELS）
+#   channels = ["cctv1", "cctv5", "hnws", "zjws"]
+# 只要央视频道：groups = ["央视"]      只要卫视：groups = ["卫视"]
+# 想省点流量可以降到 720P：defn = "shd"
+[[source]]
+name = "央视频"
+type = "yangshipin"
+enabled = true
+workers = 4
+# groups = ["央视", "卫视"]
+# channels = ["cctv1", "hnws"]
+
+# ---------------- 央视：官方 CDN（备用线路） ----------------
+# 这条 CDN 对 17 个台都返回 200，但实测只有 CCTV-1 和 CCTV-13 是真流，
+# 其余是指向 404 的空壳。开启后会为这两个台多加几条备份线路，代价是多探
+# 100 多条无效地址（约多花 1 分钟）。默认关闭，需要冗余时再打开。
+[[source]]
+name = "央视官方"
+type = "cctv"
+group = "央视"
+enabled = false
+
+# ---------------- 浙江：官网签名接口 ----------------
+# 拉官方频道表 → 逐台换 1080P 签名地址。
+# channels 留空会收录浙江全省 10 个台（含钱江都市、浙江民生等地方台）；
+# 频道模板里只有「央视 + 卫视」，所以这里只取浙江卫视，省掉无谓的探测。
+[[source]]
+name = "浙江广电"
+type = "zhejiang"
+quality = "1080P"
+group = "卫视"
+enabled = true
+channels = ["浙江卫视"]
+
+# ---------------- 通用模板：自己接一个平台 ----------------
+# 下面是一个「假设某省卫视地址有规律」的样板，把 url_template 和 channels
+# 换成你验证过的真实地址即可。规则：{code} 会被 channels 里的字段替换。
+[[source]]
+name = "示例：某省卫视"
+type = "template"
+url_template = "https://cdn.example.com/live/{code}.m3u8"
+group = "卫视"
+enabled = false
+channels = [
+  { code = "a", name = "某卫视" },
+]
+
+# ======================= 采集器 =======================
+
+# ---------------- 订阅源 ----------------
+# 想在央视/卫视之外补几条备用线路时用。留空不影响主流程。
+[[source]]
+name = "我的订阅"
+type = "subscription"
+url = ""
+enabled = false
+# ua = "okhttp/3.12.0"          # 该源需要特定 UA 时填
+# headers = { Referer = "https://example.com/" }
+
+# ---------------- 本地文件 / 目录 ----------------
+[[source]]
+name = "本地源目录"
+type = "local"
+path = "config/local"
+enabled = false
+
+# ---------------- 通用 JSON 接口 ----------------
+# 适用于返回 JSON 的站点：把「列表在哪、哪个字段是名字、哪个字段是地址」写清楚即可
+[[source]]
+name = "示例JSON接口"
+type = "api"
+url = "https://example.com/api/channels?type=live"
+enabled = false
+json_path = "data.list"        # 支持 a.b.c 与 list[0] 形式
+name_field = "name"
+url_field = "play_url"
+group_field = "category"
+# url_template = "https://cdn.example.com/{url}"   # 需要拼接时用，{url} 会替换成 url_field 的值
+# headers = { Referer = "https://example.com/" }
+
+# ---------------- 通用网页正则 ----------------
+# 适用于页面上直接内嵌 m3u8 链接的站点：抓页面 → 正则抽链接
+[[source]]
+name = "示例网页抽取"
+type = "webpage"
+url = "https://example.com/live"
+enabled = false
+regex = '<a[^>]+href="([^"]+\.m3u8)"[^>]*>([^<]+)</a>'
+url_group = 1                  # 第几个捕获组是地址
+name_group = 2                 # 第几个捕获组是频道名
+group = "网页"
+# headers = { Referer = "https://example.com/" }
+# base_url = "https://example.com/"   # 相对地址的基准，默认用 url
