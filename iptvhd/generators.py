@@ -336,6 +336,7 @@ class YangshipinCollector(Collector):
                 url=url,
                 raw_name=name,
                 group=_ysp_group(slug),
+                slug=slug,
                 tvg_id=name.split()[0].replace("-", ""),
                 hint_height=ysp.DEFN_HEIGHT.get(target_defn, 1080),
                 user_agent=ysp.UA,

@@ -229,8 +229,9 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
         m3u_path,
         epg_url=settings.epg_url,
         logo_base=settings.logo_base,
+        relay_base=settings.public_url,
     )
-    writers.write_txt(channels, txt_path)
+    writers.write_txt(channels, txt_path, relay_base=settings.public_url)
 
     report.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report.elapsed = time.monotonic() - started

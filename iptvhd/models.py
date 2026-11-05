@@ -30,6 +30,7 @@ class Stream:
     tvg_id: str = ""
     logo: str = ""
     source: str = ""            # 来自哪个采集器
+    slug: str = ""              # 上游频道标识，用于本机转发地址
     user_agent: str = ""        # 该条流需要指定的 UA（可选）
     hint_height: int = 0        # 采集端已知的分辨率（媒体清单里读不到时用）
     first_segment: str = ""     # 采集端已验证过的首个分片地址（省一次列表请求）

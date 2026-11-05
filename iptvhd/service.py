@@ -12,9 +12,20 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .pipeline import load_result, run_update
+from .relay import Relay, RelayError
 from .settings import Settings
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+# 中转层拿不到频道表之外的地址，这里的解析器只认 ysp 里的台
+def _ysp_resolver(slug: str) -> tuple[str, str]:
+    from . import ysp
+
+    row = ysp.CHANNEL_BY_SLUG.get(slug.lower())
+    if row is None:
+        raise RelayError(f"未知频道: {slug}")
+    url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=2)
+    return url, ysp.UA
 
 
 class State:
@@ -29,8 +40,8 @@ class State:
         self.last_error = ""
         self.report: dict = {}
         self.logs: list[str] = []
-        # 实时跳转用的地址缓存：slug -> (解析时间, 地址)
-        self.live_cache: dict[str, tuple[float, str]] = {}
+        # 清单与分片的中转：播放器只跟本机说话，UA 由服务端代劳
+        self.relay = Relay(_ysp_resolver)
 
     def log(self, message: str) -> None:
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
@@ -104,31 +115,42 @@ def make_handler(state: State):
             self.end_headers()
 
         def _live(self, slug: str) -> None:
-            """实时跳转：每次请求现场换一个可用的新地址。
+            """返回改写后的播放清单，分片同样走本机转发。
 
-            播放地址带时效，静态列表放久了会失效；用这个端点，播放器拿到的
-            永远是刚换出来的地址。地址缓存 5 分钟，避免每次刷新都去打扰接口。
+            早先这里是 302 跳到上游地址，但跳转只能换地址、换不了 User-Agent：
+            播放器取 HLS 子清单和分片时用的仍是自己的 UA，照样被上游拒掉，
+            现象就是列表里只有一个台能放。改成整条链路本机转发之后，
+            播放器用什么 UA 都无所谓了。
             """
             from . import ysp
 
-            row = ysp.CHANNEL_BY_SLUG.get(slug.lower())
+            key = slug.lower()
+            row = ysp.CHANNEL_BY_SLUG.get(key)
             if row is None:
                 self._json({"error": f"未知频道: {slug}", "hint": "/api/live 可列出全部"}, 404)
                 return
-
-            cached = state.live_cache.get(row[0])
-            if cached and time.time() - cached[0] < 300:
-                self._redirect(cached[1])
-                return
-
             try:
-                url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=2)
-            except Exception as exc:  # noqa: BLE001 - 失败要给出可读原因
+                text = state.relay.playlist(key)
+            except RelayError as exc:
                 self._json({"error": str(exc), "channel": row[1]}, 502)
                 return
+            except Exception as exc:  # noqa: BLE001 - 失败要给出可读原因
+                self._json({"error": f"{type(exc).__name__}: {exc}", "channel": row[1]}, 502)
+                return
+            self._send(200, text.encode("utf-8"), "application/vnd.apple.mpegurl; charset=utf-8")
 
-            state.live_cache[row[0]] = (time.time(), url)
-            self._redirect(url)
+        def _relay(self, path: str) -> None:
+            """/relay/<slug>/p/<token>：转发子清单、分片和密钥。"""
+            parts = path.strip("/").split("/")
+            if len(parts) != 4 or parts[0] != "relay" or parts[2] != "p":
+                self._json({"error": "地址格式应为 /relay/<slug>/p/<token>"}, 400)
+                return
+            try:
+                ctype, body = state.relay.resource(parts[1], parts[3])
+            except RelayError as exc:
+                self._json({"error": str(exc)}, 502)
+                return
+            self._send(200, body, ctype)
 
         def log_message(self, fmt: str, *args) -> None:  # 静音，避免刷屏
             return
@@ -168,6 +190,7 @@ def make_handler(state: State):
                             "json": "/json",
                             "live": "/live/<slug>.m3u8",
                             "live_list": "/api/live",
+                            "relay": "/relay/<slug>/p/<token>",
                         },
                     }
                 )
@@ -176,13 +199,15 @@ def make_handler(state: State):
                 self._json({"generated_at": result.get("generated_at", ""), "channels": result.get("channels", [])})
             elif path == "/health":
                 self._json({"ok": True, "running": state.running})
+            elif path.startswith("/relay/"):
+                self._relay(path)
             elif path.startswith(("/live/", "/ysp/")) and path.endswith(".m3u8"):
                 slug = path.rsplit("/", 1)[-1][: -len(".m3u8")]
                 self._live(slug)
             elif path == "/api/live":
                 from . import ysp
                 self._json({
-                    "hint": "把 /live/<slug>.m3u8 填进播放器，每次请求都会换一个新地址",
+                    "hint": "把 /live/<slug>.m3u8 填进播放器，由本机转发，任何播放器都能放",
                     "channels": [{"slug": r[0], "name": r[1], "url": f"/live/{r[0]}.m3u8"}
                                  for r in ysp.CHANNELS],
                 })
@@ -229,6 +254,9 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
 
     httpd = ThreadingHTTPServer((host, port), make_handler(state))
     state.log(f"服务已启动：http://{host}:{port}  （订阅地址 /m3u）")
+    if not settings.public_url:
+        state.log("提示：未设置 PUBLIC_URL，列表里会给上游直连地址；"
+                  "播放器若不认 UA 会卡住，建议设成 http://<本机IP>:%d" % port)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

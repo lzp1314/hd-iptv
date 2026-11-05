@@ -18,6 +18,17 @@ def _logo(channel: Channel, logo_base: str) -> str:
     return f"{logo_base.rstrip('/')}/{channel.name}.png"
 
 
+def _play_url(stream: Stream, relay_base: str) -> str:
+    """优先给本机转发地址。
+
+    直连地址对 UA 敏感、且有寿命；走本机转发后播放器用什么客户端都能放，
+    地址也不会过期。``relay_base`` 为空时退回直连，便于离线导出。
+    """
+    if relay_base and stream.slug:
+        return f"{relay_base.rstrip('/')}/live/{stream.slug}.m3u8"
+    return stream.url
+
+
 def write_m3u(
     channels: list[Channel],
     path: Path,
@@ -25,6 +36,7 @@ def write_m3u(
     epg_url: str = "",
     logo_base: str = "",
     multi_source_mark: bool = True,
+    relay_base: str = "",
 ) -> int:
     """生成 m3u。返回写入的流条数。"""
     lines = []
@@ -52,9 +64,9 @@ def write_m3u(
             if logo:
                 attrs.append(f'tvg-logo="{_attr(logo)}"')
             lines.append(f'#EXTINF:-1 {" ".join(attrs)},{ch.name}{suffix}')
-            if stream.user_agent:
+            if stream.user_agent and not (relay_base and stream.slug):
                 lines.append(f"#EXTVLCOPT:http-user-agent={stream.user_agent}")
-            lines.append(stream.url)
+            lines.append(_play_url(stream, relay_base))
             count += 1
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,7 +74,7 @@ def write_m3u(
     return count
 
 
-def write_txt(channels: list[Channel], path: Path) -> int:
+def write_txt(channels: list[Channel], path: Path, *, relay_base: str = "") -> int:
     """生成 txt 列表（按分组分段）。"""
     lines: list[str] = []
     count = 0
@@ -74,7 +86,7 @@ def write_txt(channels: list[Channel], path: Path) -> int:
             current_group = ch.group
             lines.append(f"{ch.group},#genre#")
         for stream in ch.streams:
-            lines.append(f"{ch.name},{stream.url}")
+            lines.append(f"{ch.name},{_play_url(stream, relay_base)}")
             count += 1
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

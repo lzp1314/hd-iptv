@@ -32,7 +32,8 @@ services:
       # 画质区间：只要 1080P 就两头都写 1080
       HDIPTV_MIN_HEIGHT: ${HDIPTV_MIN_HEIGHT:-1080}
       HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-1080}
-      # 局域网访问地址，填 NAS 的 IP，用于面板和结果里的链接
+      # 局域网访问地址，填 NAS 的 IP。列表里的地址靠它拼成本机转发地址，
+      # 留空则给上游直连地址，部分播放器会放不出来
       PUBLIC_URL: ${PUBLIC_URL:-}
 
     # Dockerfile 里已有同样的 HEALTHCHECK，这里显式写一份方便肉眼确认
