@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hd-iptv · 高清直播源控制台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="statusDot"></span>
+    <h1>hd-iptv</h1>
+    <span class="ver" id="version">-</span>
+  </div>
+  <div class="actions">
+    <button id="btnUpdate" class="btn primary">立即更新</button>
+    <button id="btnRefresh" class="btn">刷新</button>
+  </div>
+</header>
+
+<main>
+  <section class="cards">
+    <div class="card"><span class="label">频道</span><strong id="statChannels">-</strong></div>
+    <div class="card"><span class="label">直播流</span><strong id="statStreams">-</strong></div>
+    <div class="card"><span class="label">4K / 1080P</span><strong id="statGrades">-</strong></div>
+    <div class="card"><span class="label">上次生成</span><strong id="statTime" class="small">-</strong></div>
+  </section>
+
+  <section class="panel" id="subscribePanel">
+    <h2>订阅地址</h2>
+    <p class="hint">把这几个地址填进播放器（TiviMate / ysc / Kodi / 影视 / PotPlayer 均可）。</p>
+    <div class="url-row">
+      <span class="tag">M3U</span>
+      <input id="urlM3u" readonly value="/m3u">
+      <button class="btn" data-copy="urlM3u">复制</button>
+    </div>
+    <div class="url-row">
+      <span class="tag">TXT</span>
+      <input id="urlTxt" readonly value="/txt">
+      <button class="btn" data-copy="urlTxt">复制</button>
+    </div>
+    <div class="url-row">
+      <span class="tag">JSON</span>
+      <input id="urlJson" readonly value="/json">
+      <button class="btn" data-copy="urlJson">复制</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>频道列表</h2>
+      <input id="search" class="search" placeholder="搜索频道 / 分组">
+    </div>
+    <div id="channelList" class="channel-list">
+      <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>运行日志</h2>
+    <pre id="log" class="log"></pre>
+  </section>
+</main>
+
+<footer>
+  <span>hd-iptv · 仅用于个人学习与家庭内网使用，请遵守当地法律法规与内容授权要求</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

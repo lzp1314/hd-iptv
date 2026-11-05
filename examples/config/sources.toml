@@ -1,0 +1,6 @@
+# 演示采样源：公开 HLS 测试流（Big Buck Bunny 多码率），没有任何版权内容
+[[source]]
+name = "演示测试流"
+type = "local"
+path = "demo.m3u"
+enabled = true

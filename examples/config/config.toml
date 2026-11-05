@@ -1,0 +1,30 @@
+# 演示项目：不依赖任何私人订阅源，用公开的 HLS 测试流跑通全流程。
+# 用法：在本仓库根目录执行
+#   python -m iptvhd --root examples update
+#   python -m iptvhd --root examples serve --port 8090
+
+[app]
+name = "hd-iptv-demo"
+data_dir = "output"
+
+[update]
+interval_hours = 0
+run_on_start = true
+
+[fetch]
+timeout = 10
+retries = 2
+
+[probe]
+enabled = true
+concurrency = 4
+sample_bytes = 262144
+min_speed_mbps = 0.5
+min_height = 720
+max_per_channel = 3
+allow_unknown_resolution = false
+
+[output]
+epg_url = ""
+logo_base = ""
+public_url = ""

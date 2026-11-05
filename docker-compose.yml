@@ -1,0 +1,23 @@
+services:
+  hd-iptv:
+    image: ghcr.io/yourname/hd-iptv:latest   # 本地构建时注释掉，改用 build: .
+    build: .
+    container_name: hd-iptv
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # 配置目录：频道模板、采集源、config.toml 都放这里
+      - ./config:/app/config
+      # 结果目录：result.m3u / result.txt / result.json
+      - ./output:/app/output
+    environment:
+      - TZ=Asia/Shanghai
+      # 定时更新间隔（小时），0 表示只在启动时跑一次
+      - HDIPTV_INTERVAL_HOURS=6
+      # 对外地址，用于结果里的链接拼接（局域网填 NAS 的 IP）
+      - PUBLIC_URL=http://192.168.1.10:8080
+      # 可选：临时追加订阅源，多个用英文逗号分隔
+      # - HDIPTV_SUBSCRIBE=https://example.com/a.m3u,https://example.com/b.txt
+      # 可选：NAS 性能较弱时降并发
+      # - HDIPTV_CONCURRENCY=8

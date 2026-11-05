@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 运行结果不入库
+output/
+examples/output/
+
+# 本地私有源（放自己的订阅文件，别提交）
+config/local/
+*.local.m3u
