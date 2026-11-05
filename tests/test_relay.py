@@ -273,6 +273,14 @@ class RelayStabilityTest(unittest.TestCase):
         self.assertEqual(body, b"")
         self.assertTrue(extra["Content-Range"].endswith("/10"))
 
+    def test_multi_range_gets_full_body(self):
+        """多段范围不支持，但要回整段而不是 416——416 会让播放器直接放弃这条流。"""
+        relay = SegRelay()
+        token = encode("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/seg-1.ts")
+        code, _ctype, body, extra = relay.resource("cctv1", token, "bytes=0-1,3-4")
+        self.assertEqual((code, body), (200, b"0123456789"))
+        self.assertEqual(extra, {})
+
     def test_parse_range(self):
         self.assertEqual(parse_range("bytes=0-9", 100), (0, 9))
         self.assertEqual(parse_range("bytes=90-", 100), (90, 99))

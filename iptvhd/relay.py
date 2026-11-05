@@ -415,19 +415,21 @@ class Relay:
 
     @staticmethod
     def _slice(ctype: str, body: bytes, range_spec: str) -> tuple[int, str, bytes, dict]:
-        span = parse_range(range_spec, len(body)) if range_spec else None
-        if span is None:
-            if range_spec:
-                # 范围不可满足，如实回 416，播放器会改用整段请求
+        if range_spec:
+            span = parse_range(range_spec, len(body))
+            if span is not None:
+                start, end = span
+                return (
+                    206,
+                    ctype,
+                    body[start : end + 1],
+                    {"Content-Range": f"bytes {start}-{end}/{len(body)}"},
+                )
+            if "," not in range_spec:
+                # 单段范围但不可满足：如实回 416，播放器会改用整段请求
                 return 416, ctype, b"", {"Content-Range": f"bytes */{len(body)}"}
-            return 200, ctype, body, {}
-        start, end = span
-        return (
-            206,
-            ctype,
-            body[start : end + 1],
-            {"Content-Range": f"bytes {start}-{end}/{len(body)}"},
-        )
+            # 多段范围（极少见）不支持，直接给整段，比回 416 安全
+        return 200, ctype, body, {}
 
 
 def _is_playlist(url: str, headers: dict, body: bytes) -> bool:
