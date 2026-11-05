@@ -15,3 +15,6 @@ examples/output/
 # 本地私有源（放自己的订阅文件，别提交）
 config/local/
 *.local.m3u
+
+# 运行日志
+*.log
