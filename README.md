@@ -2,8 +2,8 @@
 
 **高清直播源自动采集 / 清洗 / 测速 / 分发工具。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![CI](https://github.com/__OWNER__/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/__OWNER__/hd-iptv/actions/workflows/ci.yml)
-[![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/__OWNER__/hd-iptv/pkgs/container/hd-iptv)
+[![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
@@ -11,7 +11,7 @@
 
 更关键的是，它不只会「收集」——`yangshipin`、`zhejiang` 这类**取源器**直接向官方接口现场要地址，不需要任何人维护现成列表。
 
-**所以它开箱就能用**：默认配置跑完就有 55 个央视和卫视频道，全部 1080P，不需要你去找任何订阅源。
+**所以它开箱就能用**：默认配置跑完就有 55 个左右的央视和卫视频道，全部 1080P，不需要你去找任何订阅源。
 仓库里不含任何直播地址——每个地址都是运行时现换的，这也是它和「搬运列表」类项目的根本区别。
 
 > 仅供个人学习与家庭内网自用。请勿用于公开转播、二次分发或任何商业用途，详见文末[合规声明](#合规声明)。
@@ -48,7 +48,7 @@
 
 | 取源器 | 机制 | 实测产出 |
 |---|---|---|
-| `yangshipin` | 央视频加密接口：自造 cKey 换直播地址 | **实测 55 个频道 / 56 条流，全部 1080P**（央视 23 个含 6 路 CGTN + 卫视 32 个，CCTV-10 被官方限制） |
+| `yangshipin` | 央视频加密接口：自造 cKey 换直播地址 | **实测 55~56 个频道 / 56~57 条流，全部 1080P**（央视 23 个含 6 路 CGTN + 卫视 32 个，CCTV-10 被官方限制） |
 | `cctv` | 央视官方 CDN，程序内拼地址 | 只有 CCTV-1、CCTV-13 有真流，其余是 540P 占位清单（子清单 404），默认关闭 |
 | `zhejiang` | 浙江广电官网签名接口 | 浙江卫视 1080P，作为央视频之外的第二条独立来源 |
 | `template` | 你自己填 URL 模板，配置即接入 | 取决于你填的地址 |
@@ -92,7 +92,7 @@ TEA 本身不难，难的是那个二进制包的字段顺序和两段固定密�
 仓库自带一个演示项目，用的是公开的 HLS 测试流，跟版权内容无关：
 
 ```bash
-git clone https://github.com/__OWNER__/hd-iptv.git
+git clone https://github.com/lzp1314/hd-iptv.git
 cd hd-iptv
 python -m iptvhd --root examples update
 ```
@@ -304,14 +304,14 @@ name_group = 2
 | 方式 | 适合谁 | 命令 |
 |---|---|---|
 | **源码构建** | 想改代码、看得到源码 | `docker compose up -d --build` |
-| **拉现成镜像** | 只想跑起来 | `docker run ... ghcr.io/__OWNER__/hd-iptv:latest` |
+| **拉现成镜像** | 只想跑起来 | `docker run ... ghcr.io/lzp1314/hd-iptv:latest` |
 
 镜像在 GitHub Actions 里自动构建，`amd64` 和 `arm64` 都有，推 `main` 或打 `v*` 标签各出一版。
 
 ### 方式一：Docker Compose（推荐）
 
 ```bash
-git clone https://github.com/__OWNER__/hd-iptv.git
+git clone https://github.com/lzp1314/hd-iptv.git
 cd hd-iptv
 docker compose up -d --build
 ```
@@ -344,7 +344,7 @@ docker run -d --name hd-iptv --restart unless-stopped \
   -e HDIPTV_MIN_HEIGHT=1080 \
   -e HDIPTV_MAX_HEIGHT=1080 \
   -e PUBLIC_URL=http://192.168.1.10:8080 \
-  ghcr.io/__OWNER__/hd-iptv:latest
+  ghcr.io/lzp1314/hd-iptv:latest
 ```
 
 `/vol2/1000/docker/...` 是飞牛的路径，换成你自己的即可，两个目录不存在会自动创建。
@@ -357,7 +357,7 @@ docker run -d --name hd-iptv --restart unless-stopped \
 
 1. 文件管理建目录：`/vol2/1000/docker/hd-iptv/`，里面再建 `config`、`output`
 2. Docker → Compose → 新建项目，项目目录选 `/vol2/1000/docker/hd-iptv`
-3. compose 内容用仓库里的 `docker-compose.yml`，但把 `build: .` 改成 `image: ghcr.io/__OWNER__/hd-iptv:latest`（面板里没有源码，构建不了）
+3. compose 内容用仓库里的 `docker-compose.yml`，但把 `build: .` 改成 `image: ghcr.io/lzp1314/hd-iptv:latest`（面板里没有源码，构建不了）
 4. 卷映射写**绝对路径**：`/vol2/1000/docker/hd-iptv/config:/app/config`
 5. 启动，浏览器开 `http://飞牛IP:8080`
 
@@ -365,7 +365,7 @@ docker run -d --name hd-iptv --restart unless-stopped \
 
 ```bash
 cd /vol2/1000/docker
-git clone https://github.com/__OWNER__/hd-iptv.git
+git clone https://github.com/lzp1314/hd-iptv.git
 cd hd-iptv
 docker compose up -d --build
 ```
@@ -392,11 +392,11 @@ docker compose up -d --build
 
 ## 发布到 GitHub
 
-仓库已经在本地提交好了，只差一个远程地址。在 GitHub 上新建一个**空仓库**（不要勾 README / .gitignore / License），然后：
+仓库已经在本地提交好了，只差一个远程地址。先在 GitHub 上建一个**空仓库**（名字 `hd-iptv`，不要勾 README / .gitignore / License），然后：
 
 ```bash
 cd hd-iptv
-git remote add origin https://github.com/你的用户名/hd-iptv.git
+git remote add origin https://github.com/lzp1314/hd-iptv.git
 git branch -M main
 git push -u origin main
 ```
@@ -412,6 +412,8 @@ git push -u origin main
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
+> 换了 GitHub 账号？`python scripts/set-owner.py 新用户名` 会把 README 里的仓库地址一次性改掉。
 
 > 仓库里**没有任何定时抓取并发布到 Pages 的工作流**。这是故意的：抓到的地址有时效，公开挂出去既不稳定，也超出了「家庭自用」的边界。要定时更新就在自己 NAS 上跑，别放到公网。
 
