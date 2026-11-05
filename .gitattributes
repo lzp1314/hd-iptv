@@ -1,0 +1,7 @@
+# 统一换行，避免 Windows 上检出后被改成 CRLF 影响 Docker 构建与 Shell 脚本
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
