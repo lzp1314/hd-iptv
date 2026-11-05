@@ -79,6 +79,8 @@ def normalize(text: str) -> str:
         return ""
     s = unicodedata.normalize("NFKC", text)
     s = to_simplified(s).lower()
+    # 「+」是频道名的一部分：CCTV-5+ 和 CCTV-5 是两个台，不能当分隔符抹掉
+    s = s.replace("+", "plus")
     s = _NOISE.sub("", s)
     s = _SPLIT.sub("", s)
     return s.strip()

@@ -28,6 +28,11 @@ CCTV-15,CCTV15,央视十五套,CCTV-15 音乐
 CCTV-16,CCTV16,央视十六套,CCTV-16 奥林匹克
 CCTV-17,CCTV17,央视十七套,CCTV-17 农业农村
 CGTN,CGTN外语,CCTV英语,CGTN英语
+CGTN 法语,CGTN法语,CGTN French
+CGTN 俄语,CGTN俄语,CGTN Russian
+CGTN 阿拉伯语,CGTN阿语,CGTN Arabic
+CGTN 西班牙语,CGTN西语,CGTN Spanish
+CGTN 纪录,CGTN纪录频道,CGTN Documentary
 
 卫视,#genre#
 湖南卫视

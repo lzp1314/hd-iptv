@@ -102,6 +102,23 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(matcher.match("CCTV-11 戏曲").channel.name, "CCTV-11")
         self.assertEqual(matcher.match("CCTV-1 综合").channel.name, "CCTV-1")
 
+    def test_plus_sign_is_meaningful(self):
+        # CCTV-5 和 CCTV-5+ 是两个不同的台，不能因为「+」被当成标点就合并
+        self.assertNotEqual(normalize("CCTV-5+"), normalize("CCTV-5"))
+        channels = parse_channels("央视,#genre#\nCCTV-5\nCCTV-5+\n")
+        matcher = ChannelMatcher(channels)
+        self.assertEqual(matcher.match("CCTV-5").channel.name, "CCTV-5")
+        self.assertEqual(matcher.match("CCTV5+").channel.name, "CCTV-5+")
+
+    def test_cgtn_languages_stay_apart(self):
+        # 没有独立词条时，CGTN 法语会被「包含」规则吞进 CGTN
+        channels = parse_channels(
+            "央视,#genre#\nCGTN\nCGTN 法语\nCGTN 俄语\nCGTN 纪录\n"
+        )
+        matcher = ChannelMatcher(channels)
+        for name in ("CGTN", "CGTN 法语", "CGTN 俄语", "CGTN 纪录"):
+            self.assertEqual(matcher.match(name).channel.name, name)
+
     def test_alias_and_builtin(self):
         channels = parse_channels("央视,#genre#\nCCTV-1,央视一套\n")
         matcher = ChannelMatcher(channels)
