@@ -10,6 +10,11 @@ ENV PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
     TZ=Asia/Shanghai
 
+# slim 镜像里没有 zoneinfo，只设 TZ 不会生效，日志会走 UTC、比北京时间慢 8 小时
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # 只拷贝运行所需文件；项目零第三方依赖，无需 pip install
