@@ -4,33 +4,37 @@
 #   频道名                 只按名称匹配
 #   频道名,别名1,别名2    额外的匹配别名（源里的叫法不同时很有用）
 # 注意：模板里没有的频道不会被输出；名字匹配不上的源会被丢弃。
+#
+# 这一份只保留「央视 + 卫视」。地方台、港澳台、体育赛事、平台直播都不在
+# 范围里——频道越少，每轮探测越快，结果也越稳定。
 
 央视,#genre#
-CCTV-1,央视一套,中央一套,CCTV1综合
-CCTV-2,央视二套,CCTV2财经
-CCTV-3,央视三套,CCTV3综艺
-CCTV-4,央视四套,CCTV4中文国际
-CCTV-5,央视五套,CCTV5体育
-CCTV-5+,央视五加,CCTV5PLUS
-CCTV-6,央视六套,CCTV6电影
-CCTV-7,央视七套,CCTV7国防军事
-CCTV-8,央视八套,CCTV8电视剧
-CCTV-9,央视九套,CCTV9纪录
-CCTV-10,央视十套,CCTV10科教
-CCTV-11,央视十一套,CCTV11戏曲
-CCTV-12,央视十二套,CCTV12社会与法
-CCTV-13,央视十三套,CCTV13新闻
-CCTV-14,央视十四套,CCTV14少儿
-CCTV-15,央视十五套,CCTV15音乐
-CCTV-16,央视十六套,CCTV16奥林匹克
-CCTV-17,央视十七套,CCTV17农业农村
-CGTN,CCTV英语
+CCTV-1,CCTV1,央视一套,中央一套,CCTV-1 综合
+CCTV-2,CCTV2,央视二套,CCTV-2 财经
+CCTV-3,CCTV3,央视三套,CCTV-3 综艺
+CCTV-4,CCTV4,央视四套,CCTV-4 中文国际
+CCTV-5,CCTV5,央视五套,CCTV-5 体育
+CCTV-5+,CCTV5+,央视五加,CCTV-5+ 体育赛事
+CCTV-6,CCTV6,央视六套,CCTV-6 电影
+CCTV-7,CCTV7,央视七套,CCTV-7 国防军事
+CCTV-8,CCTV8,央视八套,CCTV-8 电视剧
+CCTV-9,CCTV9,央视九套,CCTV-9 纪录
+CCTV-10,CCTV10,央视十套,CCTV-10 科教
+CCTV-11,CCTV11,央视十一套,CCTV-11 戏曲
+CCTV-12,CCTV12,央视十二套,CCTV-12 社会与法
+CCTV-13,CCTV13,央视十三套,CCTV-13 新闻
+CCTV-14,CCTV14,央视十四套,CCTV-14 少儿
+CCTV-15,CCTV15,央视十五套,CCTV-15 音乐
+CCTV-16,CCTV16,央视十六套,CCTV-16 奥林匹克
+CCTV-17,CCTV17,央视十七套,CCTV-17 农业农村
+CGTN,CGTN外语,CCTV英语,CGTN英语
 
 卫视,#genre#
 湖南卫视
 浙江卫视
 江苏卫视
 东方卫视
+上海卫视
 北京卫视
 广东卫视
 深圳卫视
@@ -65,37 +69,5 @@ CGTN,CCTV英语
 海峡卫视
 厦门卫视
 大湾区卫视
-
-地方,#genre#
-北京新闻,北京新闻频道
-上海新闻综合
-广东珠江
-广东体育
-广州综合
-深圳都市
-湖南经视
-浙江民生
-江苏城市
-南京新闻综合
-
-专题,#genre#
-CCTV-4K,CCTV4K超高清
-CCTV-8K,CCTV8K超高清
-CCTV风云剧场
-CCTV第一剧场
-CCTV怀旧剧场
-CCTV风云音乐
-CCTV世界地理
-CCTV央视文化精品
-CCTV女性时尚
-CCTV央视台球
-CCTV高尔夫网球
-CCTV卫生健康
-CCTV电视指南
-CCTV兵器科技
-CCTV戏曲
-CCTV发现之旅
-CCTV老故事
-CCTV中学生
-CCTV早期教育
-CCTV英语电视
+延边卫视
+农林卫视

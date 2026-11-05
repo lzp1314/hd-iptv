@@ -12,6 +12,10 @@ from urllib.parse import urljoin
 
 _QUALITY_HINT = re.compile(r"(?i)(?<![a-z0-9])(2160p?|4k|1440p?|2k|1080p?|720p?|576p?|480p?)(?![a-z0-9])")
 
+# 宽松版：很多直播地址把档位嵌在词中间（channel011080Pnew、live_720p_hd），
+# 严格边界匹配不到，作为兜底再扫一遍。
+_QUALITY_LOOSE = re.compile(r"(?i)(2160p|1440p|1080p|720p|576p|480p)")
+
 _HINT_HEIGHT = {
     "2160p": 2160, "2160": 2160, "4k": 2160,
     "1440p": 1440, "1440": 1440, "2k": 1440,
@@ -159,4 +163,11 @@ def guess_height(*texts: str) -> int:
             height = _HINT_HEIGHT.get(match.group(1).lower())
             if height:
                 return height
+    # 严格匹配全部落空，再用宽松规则扫一遍
+    for text in texts:
+        if not text:
+            continue
+        match = _QUALITY_LOOSE.search(text)
+        if match:
+            return _HINT_HEIGHT.get(match.group(1).lower(), 0)
     return 0

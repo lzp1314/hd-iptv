@@ -240,16 +240,31 @@ _REGISTRY = {
 }
 
 
+def _full_registry() -> dict:
+    """采集器 + 取源器。
+
+    generators 依赖本模块的 Collector，所以放在函数里延迟导入，避免循环依赖。
+    """
+    registry = dict(_REGISTRY)
+    try:
+        from .generators import GENERATORS
+    except Exception:  # noqa: BLE001 - 取源器不可用不应拖垮基础采集
+        return registry
+    registry.update(GENERATORS)
+    return registry
+
+
 def build_collectors(sources: list[dict]) -> list[Collector]:
     """按配置构建采集器列表，忽略 disabled 项和未知类型。"""
     collectors: list[Collector] = []
+    registry = _full_registry()
     for item in sources:
         if not isinstance(item, dict):
             continue
         if not item.get("enabled", True):
             continue
         kind = str(item.get("type", "")).strip().lower()
-        cls = _REGISTRY.get(kind)
+        cls = registry.get(kind)
         if cls is None:
             continue
         collectors.append(

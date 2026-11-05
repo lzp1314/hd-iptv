@@ -8,22 +8,20 @@
 
 它做的事只有一件：把你手上一堆来源不同、命名混乱、三天两头失效的直播源，整理成一份**只保留高清、只保留能播、按时自动刷新**的订阅列表。
 
+更关键的是，它不只会「收集」——`cctv`、`zhejiang` 这类**取源器**直接从官方站点现场要地址，不需要任何人维护现成列表。
+
 ```
-订阅源 / 本地文件 / JSON 接口 / 网页
-        │
-        ▼   采集
-   统一成候选流
-        │
-        ▼   清洗 + 匹配        ← 频道模板决定留谁、怎么分组
+取源器（向官方要）          采集器（收别人的）
+央视 CDN / 省广电接口   ←→   订阅 / 本地 / JSON 接口 / 网页
+        │                        │
+        └──────────┬─────────────┘
+                   ▼   统一成候选流
+                   ▼   清洗 + 匹配        ← 频道模板决定留谁、怎么分组
    湖南卫视_HD → 湖南卫视
-        │
-        ▼   探测 + 测速        ← 解析 m3u8 主列表拿分辨率，读分片测真实速率
+                   ▼   探测 + 测速        ← 解析 m3u8 主列表拿分辨率，读分片测真实速率
    1920x1080 / 6.2Mbps / 28ms
-        │
-        ▼   过滤
-   丢掉 360P、丢掉超时、丢掉 404
-        │
-        ▼   输出
+                   ▼   过滤                ← 720P 以下丢、1080P 以上丢、超时丢、404 丢
+                   ▼   输出
    result.m3u ── result.txt ── result.json ── HTTP 订阅地址 + 网页面板
 ```
 
@@ -31,11 +29,27 @@
 
 | | 常见做法 | hd-iptv |
 |---|---|---|
+| 源从哪来 | 聚合别人整理好的列表，列表死了就断供 | 内置**取源器**直接向官方要地址，另有四种采集器兜底 |
 | 判分辨率 | 调 ffprobe 解码，慢且吃 CPU | 直接读 HLS 主列表的 `RESOLUTION`，毫秒级，容器不用装 ffmpeg |
-| 判断能不能播 | 只看 HTTP 200 | 还要把播放列表指向的**第一个分片**真读一段，拿不到字节就不算活 |
+| 判断能不能播 | 只看 HTTP 200 | 主列表能开、子清单 404 也算死；还要真读一段分片，拿不到字节就不算活 |
 | 依赖 | 一堆 pip 包 + ffmpeg | 只用 Python 标准库，`python -m iptvhd` 直接跑 |
 | 采集扩展 | 改代码 | 四种源类型靠配置拼，加源不用碰 Python |
 | 部署 | CLI 一把梭 | CLI + 网页面板 + Docker + GitHub Actions |
+
+## 内置取源器与覆盖范围
+
+这块我把实测结论直接写出来，省得你踩同样的坑。
+
+| 取源器 | 机制 | 实测产出 |
+|---|---|---|
+| `cctv` | 央视官方 CDN，程序内拼地址，6 条线路并发 | **CCTV-1、CCTV-13 有真实 1080P**；其余 15 个台官方返回的是 540P 占位清单，子清单 404，会被判死 |
+| `zhejiang` | 拉官网频道表 → 按官网播放器算法签名 → 换 1080P 地址 | 浙江卫视 1080P 稳定；其余 9 个地方台也能取，但模板默认不收录 |
+| `template` | 你自己填 URL 模板，配置即接入 | 取决于你填的地址 |
+
+**为什么央视只出来两个台？** 不是代码写错。央视网对每个 `cdrmldcctv*` 路径都返回 200，但只有 CCTV-1 / CCTV-13 是真流，其余返回一个 540P 主清单，指向的 `/cdrmldcctv2_1_hd.m3u8` 直接 404。用一个不存在的名字 `cdrmldabcxyz_1` 去请求，返回的是一模一样的占位清单——这就是证据。想拿全部央视频道的高清信号，必须走央视频 App 的 TEA 加密握手，那是另一个量级的工程量。
+
+**所以卫视要一个个加。** 每个省广电官网的接口形态都不一样，没有通用解。`zhejiang` 那个模块就是模板，照着改一个省大概是几十行的活，改完用 `python -m iptvhd probe <地址>` 一验就知道通不通。
+
 
 ## 快速开始
 
@@ -51,9 +65,29 @@ python -m iptvhd --root examples update
 
 输出在 `examples/output/result.m3u`。它会识别出 1080P 并保留，360P 直接丢掉。
 
-### 1. 配一个自己的源
+### 1. 直接开跑（不用配任何源）
 
-编辑 `config/sources.toml`，把 `enabled = false` 改成 `true` 并填地址：
+`config/sources.toml` 里内置的两个取源器默认就是开着的：
+
+```bash
+python -m iptvhd update
+```
+
+它会现场向央视和浙江广电要地址，探测完输出到 `output/result.m3u`。第一次大约十几秒。
+
+想确认某个地址到底什么画质，单独探一下：
+
+```bash
+python -m iptvhd probe "https://ali-xwl.cztv.com/live/channel011080Pnew.m3u8"
+```
+
+```
+可用    1080P 0x1080  33.3Mbps  505ms  https://ali-xwl.cztv.com/live/channel011080Pnew.m3u8
+```
+
+### 2. 扩充来源
+
+`config/sources.toml` 里三种方式任选：开一个自己的订阅、加一个省广电模块、或者用 `template` 填 URL 模板。
 
 ```toml
 [[source]]
@@ -63,7 +97,7 @@ url = "https://example.com/list.m3u"
 enabled = true
 ```
 
-### 2. 自检
+### 3. 自检
 
 ```bash
 python -m iptvhd doctor
@@ -71,13 +105,13 @@ python -m iptvhd doctor
 
 它会告诉你：模板载入了几个频道、有几个源启用、输出目录能不能写、门槛设成多少。有 ✗ 就先修 ✗。
 
-### 3. 跑一次
+### 4. 跑一次
 
 ```bash
 python -m iptvhd update
 ```
 
-### 4. 起服务（可选，推荐）
+### 5. 起服务（可选，推荐）
 
 ```bash
 python -m iptvhd serve --port 8080
@@ -103,6 +137,7 @@ python -m iptvhd serve --port 8080
 [probe]
 concurrency = 24           # 并发探测数，NAS 建议 8~16
 min_height = 720           # 高清门槛：低于此分辨率直接丢；填 1080 就是「只留 FHD」
+max_height = 1080          # 画质上限：高于此分辨率直接丢。不要 4K 就保持默认，想全收填 0
 min_speed_mbps = 1.5       # 最低速率
 max_per_channel = 4        # 每个频道保留几个源
 allow_unknown_resolution = false   # 允许分辨率未知的流（脚本类源常见，开了会混进标清）
@@ -112,7 +147,7 @@ epg_url = ""               # 填了才会在 m3u 头里写 x-tvg-url
 logo_base = ""             # 台标库根地址，留空则用源自带的 tvg-logo
 ```
 
-完整项见文件内注释。所有项都支持环境变量覆盖：`HDIPTV_MIN_HEIGHT` `HDIPTV_CONCURRENCY` `HDIPTV_INTERVAL_HOURS` `HDIPTV_SUBSCRIBE` 等。
+完整项见文件内注释。所有项都支持环境变量覆盖：`HDIPTV_MIN_HEIGHT` `HDIPTV_MAX_HEIGHT` `HDIPTV_CONCURRENCY` `HDIPTV_INTERVAL_HOURS` `HDIPTV_SUBSCRIBE` 等。
 
 ### `config/channels.txt` —— 频道模板
 
@@ -135,9 +170,40 @@ CCTV-4K,CCTV4K超高清
 
 ### `config/sources.toml` —— 采集源
 
-四种类型，按需组合。
+七种类型：三个**取源器**（自己向官方要地址），四个**采集器**（收别人的列表）。
 
 ```toml
+# ===== 取源器 =====
+
+# 0) 央视官方 CDN：零配置，开箱就有
+[[source]]
+name = "央视官方"
+type = "cctv"
+group = "央视"
+enabled = true
+# only = ["cctv1", "cctv13"]     # 只留指定台，其余不产出
+
+# 0) 省广电签名接口
+[[source]]
+name = "浙江广电"
+type = "zhejiang"
+quality = "1080P"                # 也可以 720P
+channels = ["浙江卫视"]          # 留空则收录该省全部频道
+enabled = true
+
+# 0) URL 模板：任何「地址有规律」的平台，配置即接入
+[[source]]
+name = "某省卫视"
+type = "template"
+url_template = "https://cdn.example.com/live/{code}.m3u8"
+group = "卫视"
+enabled = true
+channels = [
+  { code = "a", name = "某卫视" },
+]
+
+# ===== 采集器 =====
+
 # 1) 订阅：m3u / txt 地址
 [[source]]
 name = "订阅A"
@@ -230,7 +296,15 @@ python -m iptvhd update          # 跑一次完整更新
 python -m iptvhd update --quiet  # 只打印汇总
 python -m iptvhd serve --port 8080
 python -m iptvhd doctor          # 配置自检
+python -m iptvhd probe <地址...>  # 单条验证：能不能播、多少 P、多快
 python -m iptvhd --version
+```
+
+`probe` 是接新平台时的第一件工具。找到一个候选地址，先探一下再写进配置，比跑整轮更新快得多：
+
+```bash
+$ python -m iptvhd probe "https://ali-xwl.cztv.com/live/channel011080Pnew.m3u8"
+可用    1080P 0x1080  33.3Mbps  505ms  https://ali-xwl.cztv.com/...
 ```
 
 通用参数 `--root <目录>` 可以指向任意项目目录，用来跑多套配置。

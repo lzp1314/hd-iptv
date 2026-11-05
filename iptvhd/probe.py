@@ -43,7 +43,7 @@ def probe_one(stream: Stream, client: HttpClient, sample_bytes: int = 262144) ->
     # 非播放列表：直连 ts/flv/mp4，能下到字节即可认为可用
     stream.ok = bool(resp.body)
     stream.speed_mbps = resp.speed_mbps
-    stream.height = hls.guess_height(stream.url, stream.raw_name)
+    stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name)
     if not stream.ok:
         stream.error = "响应体为空"
     return stream
@@ -70,10 +70,10 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
             text = sub.text
             base = sub.url or variant.uri
         else:
-            # 变体地址拿不到子列表，但主列表本身是好的
-            stream.ok = True
-            stream.speed_mbps = sub.speed_mbps
-            stream.height = stream.height or hls.guess_height(stream.url, stream.raw_name)
+            # 主清单能打开、子清单却取不到，说明这只是一个空壳地址（点播台常见），
+            # 播放器切进去照样黑屏，不能算可用。
+            stream.ok = False
+            stream.error = f"变体清单不可用: {sub.error or sub.status}"
             return
 
     info = hls.parse_media(text, base)
@@ -93,7 +93,8 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
             stream.delay_ms = max(stream.delay_ms, seg.ttfb_ms)
 
     if not stream.height:
-        stream.height = hls.guess_height(stream.url, stream.raw_name, stream.raw_name)
+        # 媒体清单本身不带分辨率（单码率直播常见），优先用采集端已知的档位
+        stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name, stream.raw_name)
     stream.ok = True
 
 

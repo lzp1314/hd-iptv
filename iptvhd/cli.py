@@ -31,7 +31,56 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="环境与配置自检")
 
+    p_probe = sub.add_parser("probe", help="探测地址的真实画质与速率（判断源能不能用）")
+    p_probe.add_argument("urls", nargs="+", help="一个或多个 m3u8 地址")
+
     return parser
+
+
+def cmd_probe(root: Path, config: str | None, urls: list[str]) -> int:
+    """逐条探测地址：能不能出流、分辨率多少、速率多少。
+
+    用来在把某个平台接进取源器之前先验证——比直接跑整轮更新快得多。
+    """
+    from .models import Stream
+    from .net import build_client
+    from .probe import probe_one
+
+    settings = load_settings(root, config)
+    client = build_client(
+        user_agent=settings.user_agent,
+        timeout=settings.timeout,
+        retries=1,
+        proxy=settings.proxy,
+    )
+
+    bad = 0
+    print(f"{'结果':<6}{'画质':<10}{'速率':<12}{'延迟':<10}地址")
+    print("-" * 88)
+    for url in urls:
+        stream = Stream(url=url)
+        try:
+            probe_one(stream, client, settings.sample_bytes)
+        except Exception as exc:  # noqa: BLE001
+            print(f"{'异常':<6}{'-':<10}{'-':<12}{'-':<10}{url}  ({exc})")
+            bad += 1
+            continue
+
+        if stream.ok:
+            size = f"{stream.width}x{stream.height}" if stream.height else "未知"
+            print(
+                f"{'可用':<6}{stream.grade + ' ' + size:<10}"
+                f"{stream.speed_mbps:.1f}Mbps{'':<4}{stream.delay_ms}ms{'':<6}{url}"
+            )
+            if stream.height < settings.min_height:
+                print(f"       ↑ 低于门槛 {settings.min_height}P，更新时会被筛掉")
+            elif settings.max_height and stream.height > settings.max_height:
+                print(f"       ↑ 高于上限 {settings.max_height}P，更新时会被筛掉")
+        else:
+            print(f"{'不可用':<6}{'-':<10}{'-':<12}{'-':<10}{url}  ({stream.error})")
+            bad += 1
+
+    return 0 if bad < len(urls) else 2
 
 
 def cmd_update(root: Path, config: str | None, quiet: bool) -> int:
@@ -107,7 +156,10 @@ def cmd_doctor(root: Path, config: str | None) -> int:
         print(f"输出目录：{out} ✗ {exc}")
         ok = False
 
-    print(f"探测门槛：{settings.min_height}P 以上、{settings.min_speed_mbps}Mbps 以上，每频道最多 {settings.max_per_channel} 条")
+    print(
+        f"探测门槛：{settings.min_height}~{settings.max_height}P、"
+        f"{settings.min_speed_mbps}Mbps 以上，每频道最多 {settings.max_per_channel} 条"
+    )
     print(f"并发：{settings.concurrency}  超时：{settings.timeout}s")
 
     print("\n结论：" + ("配置可用，可以执行 update" if ok else "存在阻塞项，先按上面的 ✗ 修正"))
@@ -125,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(root, args.config, args.host, args.port)
     if args.command == "doctor":
         return cmd_doctor(root, args.config)
+    if args.command == "probe":
+        return cmd_probe(root, args.config, args.urls)
 
     parser.print_help()
     return 0

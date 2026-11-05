@@ -120,6 +120,7 @@ def _assign(streams: list[Stream], channels: list[Channel], matcher: ChannelMatc
 
 def _filter(streams: list[Stream], settings: Settings) -> list[Stream]:
     min_h = settings.min_height
+    max_h = settings.max_height
     min_speed = settings.min_speed_mbps
     allow_unknown = settings.allow_unknown
     kept: list[Stream] = []
@@ -128,6 +129,9 @@ def _filter(streams: list[Stream], settings: Settings) -> list[Stream]:
             continue
         if s.height:
             if s.height < min_h:
+                continue
+            # 画质上限：4K 对家用带宽和盒子的负担远大于收益，默认砍掉
+            if max_h and s.height > max_h:
                 continue
         elif not allow_unknown:
             continue
@@ -197,7 +201,10 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
 
     alive = _filter([s for s in candidates], settings)
     report.alive = len(alive)
-    log(f"[过滤] 可用 {len(alive)} 条（画质门槛 {settings.min_height}P，速率门槛 {settings.min_speed_mbps}Mbps）")
+    log(
+        f"[过滤] 可用 {len(alive)} 条"
+        f"（画质 {settings.min_height}~{settings.max_height}P，速率门槛 {settings.min_speed_mbps}Mbps）"
+    )
 
     kept_by_channel: dict[str, list[Stream]] = {}
     for s in alive:

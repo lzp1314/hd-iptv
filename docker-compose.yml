@@ -19,5 +19,8 @@ services:
       - PUBLIC_URL=http://192.168.1.10:8080
       # 可选：临时追加订阅源，多个用英文逗号分隔
       # - HDIPTV_SUBSCRIBE=https://example.com/a.m3u,https://example.com/b.txt
+      # 可选：画质上下限，默认 720~1080（不要 4K 就保持不动）
+      # - HDIPTV_MIN_HEIGHT=720
+      - HDIPTV_MAX_HEIGHT=1080
       # 可选：NAS 性能较弱时降并发
       # - HDIPTV_CONCURRENCY=8

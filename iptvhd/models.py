@@ -31,6 +31,7 @@ class Stream:
     logo: str = ""
     source: str = ""            # 来自哪个采集器
     user_agent: str = ""        # 该条流需要指定的 UA（可选）
+    hint_height: int = 0        # 采集端已知的分辨率（媒体清单里读不到时用）
 
     # ---- 探测结果 ----
     ok: bool = False

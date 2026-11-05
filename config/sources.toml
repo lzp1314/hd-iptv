@@ -1,16 +1,66 @@
 # 采集源配置。每个 [[source]] 是一个源，按顺序采集。
-# type 支持四种：
-#   subscription —— m3u / txt 订阅地址
-#   local        —— 本地文件或目录（txt / m3u）
-#   api          —— 通用 JSON 接口，字段映射自己配
-#   webpage      —— 通用网页正则抽取
+#
+# type 支持两类共七种：
+#
+#   采集器（别人的列表）
+#     subscription —— m3u / txt 订阅地址
+#     local        —— 本地文件或目录（txt / m3u）
+#     api          —— 通用 JSON 接口，字段映射自己配
+#     webpage      —— 通用网页正则抽取
+#
+#   取源器（自己向官方要地址）
+#     cctv         —— 央视官方 CDN，程序内生成，零配置
+#     zhejiang     —— 浙江广电官网接口，签名换地址，1080P
+#     template     —— URL 模板，任何「地址有规律」的平台都能接
+#
 # enabled = false 的源会被跳过，保留在文件里方便随时开关。
 
-# ---------------- 订阅源（最常用） ----------------
+# ======================= 取源器 =======================
+
+# ---------------- 央视：官方 CDN ----------------
+# 默认 17 个台（CCTV-1 ~ CCTV-17），每条产出 6 条 CDN 线路，
+# 探测阶段自动淘汰连不上的，不需要人工挑。
+# 只想要某几个台时，用 only 列出来，其余不产出：
+#   only = ["cctv1", "cctv5", "cctv13"]
 [[source]]
-name = "我的订阅A"
+name = "央视官方"
+type = "cctv"
+group = "央视"
+enabled = true
+
+# ---------------- 浙江：官网签名接口 ----------------
+# 拉官方频道表 → 逐台换 1080P 签名地址。
+# channels 留空会收录浙江全省 10 个台（含钱江都市、浙江民生等地方台）；
+# 频道模板里只有「央视 + 卫视」，所以这里只取浙江卫视，省掉无谓的探测。
+[[source]]
+name = "浙江广电"
+type = "zhejiang"
+quality = "1080P"
+group = "卫视"
+enabled = true
+channels = ["浙江卫视"]
+
+# ---------------- 通用模板：自己接一个平台 ----------------
+# 下面是一个「假设某省卫视地址有规律」的样板，把 url_template 和 channels
+# 换成你验证过的真实地址即可。规则：{code} 会被 channels 里的字段替换。
+[[source]]
+name = "示例：某省卫视"
+type = "template"
+url_template = "https://cdn.example.com/live/{code}.m3u8"
+group = "卫视"
+enabled = false
+channels = [
+  { code = "a", name = "某卫视" },
+]
+
+# ======================= 采集器 =======================
+
+# ---------------- 订阅源 ----------------
+# 想在央视/卫视之外补几条备用线路时用。留空不影响主流程。
+[[source]]
+name = "我的订阅"
 type = "subscription"
-url = "https://example.com/iptv/list.m3u"
+url = ""
 enabled = false
 # ua = "okhttp/3.12.0"          # 该源需要特定 UA 时填
 # headers = { Referer = "https://example.com/" }
