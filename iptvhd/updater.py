@@ -63,7 +63,10 @@ def check(current: str, *, force: bool = False) -> dict:
     }
 
     try:
-        data["latest"] = parse_version(_get(_RAW_VERSION, accept="text/plain"))
+        # 带上时间戳绕开 raw 的 5 分钟 CDN 缓存，否则刚发版时查不到新版
+        data["latest"] = parse_version(
+            _get(f"{_RAW_VERSION}?t={int(now)}", accept="text/plain")
+        )
         data["checked"] = bool(data["latest"])
     except Exception as exc:  # noqa: BLE001 - 检查更新失败不该影响主功能
         data["error"] = f"{type(exc).__name__}: {exc}"
