@@ -34,6 +34,7 @@ class Stream:
     user_agent: str = ""        # 该条流需要指定的 UA（可选）
     hint_height: int = 0        # 采集端已知的分辨率（媒体清单里读不到时用）
     first_segment: str = ""     # 采集端已验证过的首个分片地址（省一次列表请求）
+    segment_duration: float = 0.0  # 分片时长（秒），用来从分片大小推算码率
     playlist_only: bool = False  # 采集端能保证列表有效：分片被限流时不做否决
     note: str = ""              # 补充说明，不参与过滤
 

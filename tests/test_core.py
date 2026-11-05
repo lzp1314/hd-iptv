@@ -192,5 +192,49 @@ class DefaultsTest(unittest.TestCase):
             self.assertEqual(ensure_defaults(root), [])
 
 
+class BitrateTest(unittest.TestCase):
+    def _resp(self, size):
+        from iptvhd.net import Response
+
+        return Response(headers={"content-length": str(size)} if size else {})
+
+    def test_bitrate_from_segment_size(self):
+        from iptvhd.probe import _estimate_bitrate
+
+        stream = Stream(url="x", segment_duration=5.0)
+        _estimate_bitrate(stream, self._resp(3_000_000))   # 3MB / 5s
+        self.assertEqual(stream.bandwidth, 4_800_000)
+
+    def test_no_duration_no_guess(self):
+        from iptvhd.probe import _estimate_bitrate
+
+        stream = Stream(url="x")
+        _estimate_bitrate(stream, self._resp(3_000_000))
+        self.assertEqual(stream.bandwidth, 0)
+
+    def test_missing_content_length_is_ignored(self):
+        from iptvhd.probe import _estimate_bitrate
+
+        stream = Stream(url="x", segment_duration=6.0)
+        _estimate_bitrate(stream, self._resp(0))
+        self.assertEqual(stream.bandwidth, 0)
+
+    def test_existing_bandwidth_is_kept(self):
+        from iptvhd.probe import _estimate_bitrate
+
+        stream = Stream(url="x", segment_duration=5.0, bandwidth=6_000_000)
+        _estimate_bitrate(stream, self._resp(1_000_000))
+        self.assertEqual(stream.bandwidth, 6_000_000)
+
+    def test_reads_segment_seconds_from_playlist(self):
+        from iptvhd.ysp import _segment_seconds
+
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXTINF:5.000,\na.ts\n"
+        self.assertEqual(_segment_seconds(text), 5.0)
+        only_target = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"
+        self.assertEqual(_segment_seconds(only_target), 4.0)
+        self.assertEqual(_segment_seconds("#EXTM3U"), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

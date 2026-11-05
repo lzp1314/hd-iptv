@@ -35,7 +35,7 @@ concurrency = 24
 sample_bytes = 262144
 min_speed_mbps = 1.5
 min_height = 720
-max_height = 1080
+max_height = 2160
 max_per_channel = 4
 allow_unknown_resolution = false
 probe_playlist_children = true
@@ -102,8 +102,8 @@ class Settings:
 
     @property
     def max_height(self) -> int:
-        """画质上限。默认 1080：4K 流对家用带宽/盒子的负担远大于收益。"""
-        return int(os.environ.get("HDIPTV_MAX_HEIGHT") or self.get("probe", "max_height", 1080))
+        """画质上限。默认 2160：源里真有 4K 就取，没有也不影响。"""
+        return int(os.environ.get("HDIPTV_MAX_HEIGHT") or self.get("probe", "max_height", 2160))
 
     @property
     def max_per_channel(self) -> int:

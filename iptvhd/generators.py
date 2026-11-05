@@ -325,9 +325,10 @@ class YangshipinCollector(Collector):
         def resolve_one(row: tuple[str, str, str, str, str]) -> tuple[str, Stream | None, str]:
             slug, name, cnlid, livepid, defn = row
             target_defn = defn_override or defn
+            meta: dict = {}
             try:
                 url, info, first_seg = ysp.resolve(
-                    cnlid, livepid, target_defn, probe_client, verify_segment=verify)
+                    cnlid, livepid, target_defn, probe_client, verify_segment=verify, meta=meta)
             except ysp.YspUnavailable as exc:
                 return slug, None, f"{name}：{exc}"
             except Exception as exc:  # noqa: BLE001 - 单台失败不影响其余
@@ -339,6 +340,7 @@ class YangshipinCollector(Collector):
                 slug=slug,
                 tvg_id=name.split()[0].replace("-", ""),
                 hint_height=ysp.DEFN_HEIGHT.get(target_defn, 1080),
+                segment_duration=float(meta.get("segment_seconds") or 0.0),
                 user_agent=ysp.UA,
                 first_segment=first_seg,
                 playlist_only=True,

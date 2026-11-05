@@ -51,6 +51,38 @@ class CheckTest(unittest.TestCase):
         data = updater.check("0.2.0", force=True)
         self.assertFalse(data["has_update"])
 
+    def test_falls_back_to_next_source(self):
+        """jsDelivr 挂了要自动换 raw，而不是直接报错——这正是 NAS 上遇到的情况。"""
+        def flaky(url, **kw):
+            if "jsdelivr" in url:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            return '__version__ = "9.9.9"'
+
+        updater._get = flaky
+        data = updater.check("0.3.0", force=True)
+        self.assertTrue(data["checked"])
+        self.assertEqual(data["latest"], "9.9.9")
+        self.assertEqual(data["source"], "raw")
+        self.assertEqual(data["error"], "")
+
+    def test_reports_every_source_when_all_fail(self):
+        def boom(url, **kw):
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+        updater._get = boom
+        data = updater.check("0.3.0", force=True)
+        self.assertFalse(data["checked"])
+        for name in ("jsdelivr", "raw", "api"):
+            self.assertIn(name, data["error"])
+        self.assertIn("ConnectionResetError", data["error"])
+        self.assertTrue(data["error_hint"])  # 给使用者一句能看懂的话
+
+    def test_failure_does_not_raise_and_keeps_current(self):
+        updater._get = lambda url, **kw: "看起来是个网页"
+        data = updater.check("0.3.0", force=True)
+        self.assertEqual(data["current"], "0.3.0")
+        self.assertFalse(data["has_update"])
+
     def test_network_failure_is_reported_not_raised(self):
         def boom(url, **kw):
             raise TimeoutError("timed out")

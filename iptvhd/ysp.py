@@ -350,6 +350,25 @@ def seg_url(playlist_url: str, seg_line: str) -> str:
                        seg.query or base.query, ""))
 
 
+def _segment_seconds(text: str) -> float:
+    """从媒体清单里读分片时长：优先最后一个 EXTINF，否则用 TARGETDURATION。"""
+    last_extinf = 0.0
+    target = 0.0
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXTINF:"):
+            try:
+                last_extinf = float(line.split(":", 1)[1].split(",")[0])
+            except ValueError:
+                pass
+        elif line.startswith("#EXT-X-TARGETDURATION:"):
+            try:
+                target = float(line.split(":", 1)[1])
+            except ValueError:
+                pass
+    return last_extinf or target
+
+
 def parse_segments(text: str) -> list[str]:
     return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
 
@@ -362,6 +381,7 @@ def resolve(
     verify_segment: bool = False,
     attempts: int = 3,
     pause: float = 1.2,
+    meta: dict | None = None,
 ) -> tuple[str, dict, str]:
     """换一个当前确实能取到列表的地址，返回 (地址, 播放信息, 首个分片地址)。
 
@@ -371,6 +391,9 @@ def resolve(
 
     ``verify_segment`` 打开时连分片也取一小段（更严格，但请求量翻倍，
     批量跑时容易触发限流，默认只验证播放列表）。
+
+    传 ``meta`` 字典可以把顺手读到的清单信息带出来（分片时长等），
+    用来从分片大小推算真实码率，不必为它多发一次请求。
     """
     client = client or HttpClient(user_agent=UA, timeout=10, retries=2)
     last = "取流失败"
@@ -401,6 +424,9 @@ def resolve(
                 last = "列表为空"
                 continue
             first = seg_url(url, segs[0])
+            if meta is not None:
+                meta["segment_seconds"] = _segment_seconds(resp.text)
+                meta["segments"] = len(segs)
             if not verify_segment:
                 return url, info, first
             pace()

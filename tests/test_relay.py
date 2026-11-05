@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from iptvhd.relay import Relay, RelayError, allowed, decode, encode
+from iptvhd.relay import Relay, RelayError, allowed, decode, encode, parse_range
 from iptvhd.models import Channel, Stream
 from iptvhd.writers import write_m3u
 
@@ -35,7 +35,7 @@ class FakeRelay(Relay):
         self.pages = pages
         self.asked: list[str] = []
 
-    def _fetch(self, url, ua):  # noqa: ANN001 - 测试替身
+    def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001 - 测试替身
         self.asked.append(url)
         status, text = self.pages.get(url.rsplit("/", 1)[-1], (404, ""))
         return status, {"Content-Type": "application/vnd.apple.mpegurl"}, text.encode()
@@ -52,7 +52,7 @@ class CountingRelay(Relay):
         self.calls += 1
         return "https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/index.m3u8", "qqlive"
 
-    def _fetch(self, url, ua):  # noqa: ANN001
+    def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001
         return 200, {"Content-Type": "application/vnd.apple.mpegurl"}, MASTER.encode()
 
 
@@ -75,7 +75,7 @@ class RescuingRelay(Relay):
         super().__init__(lambda slug: ("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8", "qqlive"))
         self.attempts = 0
 
-    def _fetch(self, url, ua):  # noqa: ANN001
+    def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001
         self.attempts += 1
         if self.attempts == 1:
             return 403, {}, b""
@@ -108,8 +108,9 @@ class RelayTest(unittest.TestCase):
         # 再取子清单：分片和密钥也要一起改写
         token = text.split("/relay/cctv1/p/")[1].split("\n")[0].strip()
         self.assertTrue(decode(token).startswith("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/"))
-        ctype, body = relay.resource("cctv1", token)
+        code, ctype, body, _extra = relay.resource("cctv1", token)
         media = body.decode()
+        self.assertEqual(code, 200)
         self.assertIn("mpegurl", ctype)
         self.assertNotIn("ysp.cctv.cn", media)
         self.assertIn('URI="/relay/cctv1/p/', media)
@@ -182,7 +183,8 @@ class RelayPolicyTest(unittest.TestCase):
     def test_segment_retries_before_giving_up(self):
         relay = RescuingRelay()
         token = encode("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/seg-1.ts")
-        ctype, body = relay.resource("cctv1", token)
+        code, ctype, body, _extra = relay.resource("cctv1", token)
+        self.assertEqual(code, 200)
         self.assertEqual(body, b"TS-DATA")
         self.assertIn("mp2t", ctype)
         self.assertEqual(relay.attempts, 2)
@@ -193,6 +195,91 @@ class RelayPolicyTest(unittest.TestCase):
         stats = relay.stats()
         self.assertEqual(stats["failures"], 0)
         self.assertIn("cctv1", stats["cached"])
+
+
+
+class ToggleRelay(Relay):
+    """可以被「弄断」的替身，验证上游失败时用旧清单兜住。"""
+
+    def __init__(self, ttl: float = 0.0):
+        super().__init__(
+            lambda slug: ("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8", "qqlive"),
+            playlist_ttl=ttl,
+        )
+        self.down = False
+        self.fetches = 0
+
+    def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001
+        self.fetches += 1
+        if self.down:
+            raise RelayError("上游不可达：模拟断线")
+        return 200, {"Content-Type": "application/vnd.apple.mpegurl"}, MEDIA.encode()
+
+
+class SegRelay(Relay):
+    """分片替身，记录上游被请求了几次。"""
+
+    def __init__(self):
+        super().__init__(lambda slug: ("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8", "qqlive"))
+        self.fetches = 0
+
+    def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001
+        self.fetches += 1
+        return 200, {"Content-Type": "video/mp2t"}, b"0123456789"
+
+
+class RelayStabilityTest(unittest.TestCase):
+    def test_playlist_falls_back_to_last_good(self):
+        """上游断一下不能把 5xx 甩给播放器——那等于让它跳到下一个台。"""
+        relay = ToggleRelay()
+        first = relay.playlist("cctv1")
+        relay.down = True
+        second = relay.playlist("cctv1")
+        self.assertEqual(first, second)
+        self.assertEqual(relay.stale_served, 1)
+
+    def test_playlist_raises_when_never_succeeded(self):
+        relay = ToggleRelay()
+        relay.down = True
+        with self.assertRaises(RelayError):
+            relay.playlist("cctv1")
+
+    def test_playlist_refreshed_but_failure_keeps_serving(self):
+        relay = ToggleRelay()
+        for _ in range(5):
+            relay.playlist("cctv1")
+            relay.down = not relay.down
+        self.assertGreaterEqual(relay.fetches, 2)
+
+    def test_segment_cached_between_requests(self):
+        relay = SegRelay()
+        token = encode("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/seg-1.ts")
+        relay.resource("cctv1", token)
+        relay.resource("cctv1", token)
+        self.assertEqual(relay.fetches, 1)  # 第二次走缓存，不再打上游
+
+    def test_range_request_returns_partial(self):
+        relay = SegRelay()
+        token = encode("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/seg-1.ts")
+        code, _ctype, body, extra = relay.resource("cctv1", token, "bytes=2-4")
+        self.assertEqual((code, body), (206, b"234"))
+        self.assertEqual(extra["Content-Range"], "bytes 2-4/10")
+
+    def test_range_out_of_bounds_is_416(self):
+        relay = SegRelay()
+        token = encode("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/seg-1.ts")
+        code, _ctype, body, extra = relay.resource("cctv1", token, "bytes=100-200")
+        self.assertEqual(code, 416)
+        self.assertEqual(body, b"")
+        self.assertTrue(extra["Content-Range"].endswith("/10"))
+
+    def test_parse_range(self):
+        self.assertEqual(parse_range("bytes=0-9", 100), (0, 9))
+        self.assertEqual(parse_range("bytes=90-", 100), (90, 99))
+        self.assertEqual(parse_range("bytes=-10", 100), (90, 99))
+        self.assertIsNone(parse_range("", 100))
+        self.assertIsNone(parse_range("bytes=200-300", 100))
+        self.assertIsNone(parse_range("bytes=0-1,3-4", 100))
 
 
 if __name__ == "__main__":

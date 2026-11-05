@@ -21,8 +21,9 @@ enabled = true
 concurrency = 24             # 并发探测数，NAS 上建议 8~16，避免打满
 sample_bytes = 262144        # 测速采样字节数（256KB）
 min_speed_mbps = 1.5         # 最低速率，低于此值丢弃
-min_height = 1080             # 高清门槛：低于该分辨率丢弃；1080 就是「只留 FHD 以上」
-max_height = 1080            # 画质上限：高于该分辨率丢弃。要 4K 改成 2160，想全收填 0
+min_height = 720              # 画质下限：低于该分辨率丢弃。720 的意思是「1080P 优先，
+                              # 实在只有 720P 也留着」，设 1080 会让这类台整个消失
+max_height = 2160            # 画质上限：源里真有 4K 就取 4K；填 0 不限
 max_per_channel = 4          # 每个频道最终保留几个源
 allow_unknown_resolution = false  # 允许分辨率未知的流（脚本源常见，开了会混进标清）
 probe_playlist_children = true    # 是否继续探测 m3u8 的子播放列表和分片

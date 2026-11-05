@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -16,6 +17,21 @@ from .relay import Relay, RelayError
 from .settings import Settings
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+def _cache_bytes() -> int:
+    """分片缓存上限，默认 96MB。
+
+    缓存的意义不只是省流量：同一路直播有多个客户端在看时，上游只被请求一次，
+    才不会因为「同一 IP 并发取片」被限流——限流正是播放器跳台的主因。
+    """
+    raw = os.environ.get("HDIPTV_RELAY_CACHE_MB", "").strip()
+    try:
+        mb = float(raw) if raw else 96.0
+    except ValueError:
+        mb = 96.0
+    return max(0, int(mb * 1024 * 1024))
+
 
 # 中转层拿不到频道表之外的地址，这里的解析器只认 ysp 里的台
 def _ysp_resolver(slug: str) -> tuple[str, str]:
@@ -41,7 +57,7 @@ class State:
         self.report: dict = {}
         self.logs: list[str] = []
         # 清单与分片的中转：播放器只跟本机说话，UA 由服务端代劳
-        self.relay = Relay(_ysp_resolver)
+        self.relay = Relay(_ysp_resolver, cache_bytes=_cache_bytes())
 
     def log(self, message: str) -> None:
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
@@ -90,11 +106,16 @@ def make_handler(state: State):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("Accept-Ranges", "bytes")
             for key, value in (extra or {}).items():
                 self.send_header(key, value)
             self.end_headers()
             if self.command != "HEAD":
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    # 播放器拖动进度或切台时会直接断开，不是错误，别刷栈
+                    self.close_connection = True
 
         def _json(self, payload, code: int = 200) -> None:
             self._send(code, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -146,11 +167,16 @@ def make_handler(state: State):
                 self._json({"error": "地址格式应为 /relay/<slug>/p/<token>"}, 400)
                 return
             try:
-                ctype, body = state.relay.resource(parts[1], parts[3])
+                code, ctype, body, extra = state.relay.resource(
+                    parts[1], parts[3], self.headers.get("Range", "")
+                )
             except RelayError as exc:
                 self._json({"error": str(exc)}, 502)
                 return
-            self._send(200, body, ctype)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+                return
+            self._send(code, body, ctype, extra)
 
         def log_message(self, fmt: str, *args) -> None:  # 静音，避免刷屏
             return
@@ -174,6 +200,7 @@ def make_handler(state: State):
                 self._file(data_dir / "result.json", "application/json; charset=utf-8")
             elif path == "/api/status":
                 result = load_result(settings) or {}
+                relay_stats = state.relay.stats()
                 self._json(
                     {
                         "version": __version__,
@@ -184,6 +211,14 @@ def make_handler(state: State):
                         "generated_at": result.get("generated_at", ""),
                         "report": result.get("report", {}),
                         "logs": state.logs[-40:],
+                        # 上游被限流时面板要能说清楚，而不是只让用户看到画面卡住
+                        "relay": {
+                            "failures": relay_stats["failures"],
+                            "stale_served": relay_stats["stale_served"],
+                            "plays": len(relay_stats["cached"]),
+                            "errors": list(relay_stats["errors"].values())[:3],
+                            "segments": relay_stats["segments"],
+                        },
                         "endpoints": {
                             "m3u": "/m3u",
                             "txt": "/txt",
@@ -246,6 +281,18 @@ def _scheduler(state: State, interval_hours: float) -> None:
         time.sleep(interval)
 
 
+class Server(ThreadingHTTPServer):
+    """并发播放要留够线程与排队位。
+
+    一个频道同时有子清单、若干分片、密钥在跑，多开几个台就上两位数连接。
+    默认 backlog 只有 5，播放器会开始报「连接被拒绝」。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
+
+
 def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
     state = State(settings)
     report = load_result(settings).get("report", {})
@@ -260,8 +307,9 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
         threading.Thread(target=_scheduler, args=(state, interval), daemon=True).start()
         state.log(f"定时更新已启用：每 {interval} 小时一次")
 
-    httpd = ThreadingHTTPServer((host, port), make_handler(state))
+    httpd = Server((host, port), make_handler(state))
     state.log(f"服务已启动：http://{host}:{port}  （订阅地址 /m3u）")
+    state.log(f"分片缓存上限 {_cache_bytes() // (1024 * 1024)} MB，多客户端共用一个上游连接池")
     if not settings.public_url:
         state.log("提示：未设置 PUBLIC_URL，列表里会给上游直连地址；"
                   "播放器若不认 UA 会卡住，建议设成 http://<本机IP>:%d" % port)

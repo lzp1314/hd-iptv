@@ -23,9 +23,11 @@
   <section class="cards">
     <div class="card"><span class="label">频道</span><strong id="statChannels">-</strong></div>
     <div class="card"><span class="label">直播流</span><strong id="statStreams">-</strong></div>
-    <div class="card"><span class="label">4K / 1080P</span><strong id="statGrades">-</strong></div>
+    <div class="card"><span class="label">画质</span><strong id="statGrades" class="small">-</strong></div>
     <div class="card"><span class="label">上次生成</span><strong id="statTime" class="small">-</strong></div>
   </section>
+
+  <div id="relayBanner" class="banner" hidden></div>
 
   <section class="panel" id="subscribePanel">
     <h2>订阅地址</h2>
@@ -61,6 +63,7 @@
       <h2>频道列表</h2>
       <input id="search" class="search" placeholder="搜索频道 / 分组">
     </div>
+    <p class="hint">分辨率取自分片码流本身（不是接口标注），速率是实测采样速度，低于 2 Mbps 的台观感会明显发卡。</p>
     <div id="channelList" class="channel-list">
       <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
     </div>

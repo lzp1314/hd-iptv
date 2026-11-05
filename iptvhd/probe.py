@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable
 
-from . import hls
+from . import hls, videoinfo
 from .models import Stream
 from .net import HttpClient
 
@@ -61,6 +61,8 @@ def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> 
         stream.ok = True
         stream.speed_mbps = seg.speed_mbps
         stream.delay_ms = max(stream.delay_ms, seg.ttfb_ms)
+        _read_resolution(stream, seg.body)
+        _estimate_bitrate(stream, seg)
     elif seg.status in (403, 429):
         # 限流：播放列表在采集阶段已确认可用，播放器按正常节奏取片不会触发
         stream.ok = True
@@ -149,6 +151,8 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
     if info["segments"] <= 0:
         stream.error = "播放列表无分片"
         return
+    if not stream.segment_duration:
+        stream.segment_duration = info["segment_duration"] or info["target_duration"]
 
     # 读第一个分片，既验证真能出流，又顺带测速
     seg_url = info["first_segment"]
@@ -179,11 +183,48 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
         stream.speed_mbps = seg.speed_mbps
         if seg.ttfb_ms:
             stream.delay_ms = max(stream.delay_ms, seg.ttfb_ms)
+        _read_resolution(stream, seg.body)
+        _estimate_bitrate(stream, seg)
 
     if not stream.height:
         # 媒体清单本身不带分辨率（单码率直播常见），优先用采集端已知的档位
         stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name, stream.raw_name)
     stream.ok = True
+
+
+def _estimate_bitrate(stream: Stream, resp) -> None:
+    """用「分片大小 ÷ 分片时长」估算真实码率。
+
+    这个数字比下载测速更有意义：测速反映 NAS 能不能拉得动，码率反映这条流
+    本身有多重。1080P 直播通常在 4~8 Mbps，标清 1~2 Mbps。
+    服务端没给 Content-Length（分块传输）时跳过，不瞎猜。
+    """
+    if stream.bandwidth:
+        return
+    try:
+        size = int((resp.headers or {}).get("content-length") or 0)
+    except (TypeError, ValueError):
+        return
+    if size <= 0 or stream.segment_duration <= 0:
+        return
+    stream.bandwidth = int(size * 8 / stream.segment_duration)
+
+
+def _read_resolution(stream: Stream, data: bytes) -> None:
+    """从分片码流里读真实分辨率。
+
+    列表/接口上标的档位经常名不副实（720p 上变换冒充 1080P），只有 SPS 里的
+    宽高是准的。读不到就保留采集端的估计值，不因此判死。
+    """
+    found = videoinfo.probe(data)
+    if not found.ok:
+        return
+    stream.width = found.width
+    stream.height = found.height
+    if found.codec:
+        stream.codec = found.codec
+    if stream.hint_height and found.height < stream.hint_height:
+        stream.note = f"实际 {found.height}P（接口标 {stream.hint_height}P）"
 
 
 def probe_many(
