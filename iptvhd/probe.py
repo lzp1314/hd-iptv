@@ -20,10 +20,79 @@ from .net import HttpClient
 
 _OK_STATUS = (200, 206)
 
+# 全局节拍器：对「热门接口」类源（央视频）限速，避免并发探测触发对方的
+# 请求频率限制——被限流的表现是一律 403，和死链长得一模一样，很容易误杀。
+_pace_lock = threading.Lock()
+_pace_last = 0.0
+
+
+def _pace(min_gap: float = 0.25) -> None:
+    """串行化发出请求，保证相邻两次至少间隔 min_gap 秒。"""
+    global _pace_last
+    with _pace_lock:
+        now = time.monotonic()
+        wait = _pace_last + min_gap - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _pace_last = now
+
+
+def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> Stream:
+    """采集阶段已经验证过列表、并留下首个分片地址的流。
+
+    省掉一次列表请求，直接读分片测速；被限流时仍保留，只标记未测速。
+    """
+    from . import ysp
+
+    extra = {"User-Agent": stream.user_agent} if stream.user_agent else None
+    ysp.pace()
+    seg = client.get(stream.first_segment, limit=sample_bytes, headers=extra)
+    if seg.status in (403, 429):
+        for _ in range(2):
+            time.sleep(1.5)
+            ysp.pace()
+            seg = client.get(stream.first_segment, limit=sample_bytes, headers=extra)
+            if seg.status not in (403, 429):
+                break
+
+    stream.status = seg.status
+    if seg.status in _OK_STATUS and seg.body:
+        stream.ok = True
+        stream.speed_mbps = seg.speed_mbps
+        stream.delay_ms = max(stream.delay_ms, seg.ttfb_ms)
+    elif seg.status in (403, 429):
+        # 限流：播放列表在采集阶段已确认可用，播放器按正常节奏取片不会触发
+        stream.ok = True
+        stream.note = f"分片限流({seg.status})，未测速"
+    else:
+        stream.ok = False
+        stream.error = f"分片不可用: {seg.error or seg.status}"
+    if not stream.height:
+        stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name)
+    return stream
+
 
 def probe_one(stream: Stream, client: HttpClient, sample_bytes: int = 262144) -> Stream:
-    """探测单条流，结果写回 stream 自身。"""
-    resp = client.get(stream.url, limit=sample_bytes)
+    """探测单条流，结果写回 stream 自身。
+
+    部分平台（央视频）要求特定 UA 才放行分片，所以流自带 UA 时优先用它。
+    """
+    if stream.playlist_only and stream.first_segment:
+        return _probe_prefetched(stream, client, sample_bytes)
+
+    extra = {"User-Agent": stream.user_agent} if stream.user_agent else None
+    if stream.playlist_only:
+        _pace()
+    resp = client.get(stream.url, limit=sample_bytes, headers=extra)
+    if stream.playlist_only and resp.status in (403, 429):
+        # 这类源对突发请求敏感，退避后再试几次，别把限流误判成死链
+        for _ in range(3):
+            time.sleep(2.0)
+            _pace()
+            resp = client.get(stream.url, limit=sample_bytes, headers=extra)
+            if resp.status not in (403, 429):
+                break
     stream.status = resp.status
     stream.delay_ms = resp.ttfb_ms
 
@@ -83,9 +152,28 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
 
     # 读第一个分片，既验证真能出流，又顺带测速
     seg_url = info["first_segment"]
+    if seg_url and stream.playlist_only:
+        _pace()
     seg = client.get(seg_url, limit=sample_bytes) if seg_url else None
-    if seg is not None:
+    if seg is not None and (seg.status not in _OK_STATUS or not seg.body):
+        # 有些平台对同一 token 的高频请求返回 403（限流，不是死链）。这类源在
+        # 采集阶段已确认列表有效，播放器按正常节奏取片不会触发，所以不当死链处理，
+        # 只标记为「未测速」——保留但拿不到速率。
+        if stream.playlist_only and seg.status in (403, 429):
+            for _ in range(2):
+                time.sleep(1.5)
+                _pace()
+                again = client.get(seg_url, limit=sample_bytes)
+                if again.status in _OK_STATUS and again.body:
+                    seg = again
+                    break
         if seg.status not in _OK_STATUS or not seg.body:
+            if stream.playlist_only:
+                stream.note = f"分片限流({seg.status})，未测速"
+                if not stream.height:
+                    stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name)
+                stream.ok = True
+                return
             stream.error = f"分片不可用: {seg.error or seg.status}"
             return
         stream.speed_mbps = seg.speed_mbps

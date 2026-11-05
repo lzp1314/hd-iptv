@@ -6,7 +6,7 @@ name = "hd-iptv"
 data_dir = "output"          # 结果输出目录（相对项目根目录）
 
 [update]
-interval_hours = 6           # 定时更新间隔（小时），0 表示不自动更新
+interval_hours = 3           # 定时更新间隔（小时），0 表示不自动更新；取源地址带 token，别设太长
 run_on_start = true          # 启动时是否立刻跑一次
 
 [fetch]
@@ -21,7 +21,7 @@ enabled = true
 concurrency = 24             # 并发探测数，NAS 上建议 8~16，避免打满
 sample_bytes = 262144        # 测速采样字节数（256KB）
 min_speed_mbps = 1.5         # 最低速率，低于此值丢弃
-min_height = 720             # 高清门槛：低于该分辨率丢弃；1080 就是「只留 FHD 以上」
+min_height = 1080             # 高清门槛：低于该分辨率丢弃；1080 就是「只留 FHD 以上」
 max_height = 1080            # 画质上限：高于该分辨率丢弃。要 4K 改成 2160，想全收填 0
 max_per_channel = 4          # 每个频道最终保留几个源
 allow_unknown_resolution = false  # 允许分辨率未知的流（脚本源常见，开了会混进标清）

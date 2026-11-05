@@ -75,6 +75,8 @@ def _collect(settings: Settings, collectors: list[Collector], log: Logger) -> tu
                 }
             )
             log(f"[采集] {collector.name}（{collector.kind}）→ {len(got)} 条")
+            for note in getattr(collector, "notes", []) or []:
+                log(f"    跳过 {note}")
         except Exception as exc:  # noqa: BLE001 - 单个源失败不影响其它源
             stats.append(
                 {

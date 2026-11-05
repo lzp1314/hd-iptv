@@ -29,6 +29,8 @@ class State:
         self.last_error = ""
         self.report: dict = {}
         self.logs: list[str] = []
+        # 实时跳转用的地址缓存：slug -> (解析时间, 地址)
+        self.live_cache: dict[str, tuple[float, str]] = {}
 
     def log(self, message: str) -> None:
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
@@ -94,6 +96,40 @@ def make_handler(state: State):
             extra = {"Content-Disposition": f'inline; filename="{download}"'} if download else None
             self._send(200, path.read_bytes(), ctype, extra)
 
+        def _redirect(self, url: str) -> None:
+            self.send_response(302)
+            self.send_header("Location", url)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+        def _live(self, slug: str) -> None:
+            """实时跳转：每次请求现场换一个可用的新地址。
+
+            播放地址带时效，静态列表放久了会失效；用这个端点，播放器拿到的
+            永远是刚换出来的地址。地址缓存 5 分钟，避免每次刷新都去打扰接口。
+            """
+            from . import ysp
+
+            row = ysp.CHANNEL_BY_SLUG.get(slug.lower())
+            if row is None:
+                self._json({"error": f"未知频道: {slug}", "hint": "/api/live 可列出全部"}, 404)
+                return
+
+            cached = state.live_cache.get(row[0])
+            if cached and time.time() - cached[0] < 300:
+                self._redirect(cached[1])
+                return
+
+            try:
+                url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=2)
+            except Exception as exc:  # noqa: BLE001 - 失败要给出可读原因
+                self._json({"error": str(exc), "channel": row[1]}, 502)
+                return
+
+            state.live_cache[row[0]] = (time.time(), url)
+            self._redirect(url)
+
         def log_message(self, fmt: str, *args) -> None:  # 静音，避免刷屏
             return
 
@@ -126,7 +162,13 @@ def make_handler(state: State):
                         "generated_at": result.get("generated_at", ""),
                         "report": result.get("report", {}),
                         "logs": state.logs[-40:],
-                        "endpoints": {"m3u": "/m3u", "txt": "/txt", "json": "/json"},
+                        "endpoints": {
+                            "m3u": "/m3u",
+                            "txt": "/txt",
+                            "json": "/json",
+                            "live": "/live/<slug>.m3u8",
+                            "live_list": "/api/live",
+                        },
                     }
                 )
             elif path == "/api/channels":
@@ -134,6 +176,16 @@ def make_handler(state: State):
                 self._json({"generated_at": result.get("generated_at", ""), "channels": result.get("channels", [])})
             elif path == "/health":
                 self._json({"ok": True, "running": state.running})
+            elif path.startswith(("/live/", "/ysp/")) and path.endswith(".m3u8"):
+                slug = path.rsplit("/", 1)[-1][: -len(".m3u8")]
+                self._live(slug)
+            elif path == "/api/live":
+                from . import ysp
+                self._json({
+                    "hint": "把 /live/<slug>.m3u8 填进播放器，每次请求都会换一个新地址",
+                    "channels": [{"slug": r[0], "name": r[1], "url": f"/live/{r[0]}.m3u8"}
+                                 for r in ysp.CHANNELS],
+                })
             else:
                 self._json({"error": "not found", "path": path}, 404)
 

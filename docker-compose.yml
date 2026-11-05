@@ -13,14 +13,15 @@ services:
       - ./output:/app/output
     environment:
       - TZ=Asia/Shanghai
-      # 定时更新间隔（小时），0 表示只在启动时跑一次
-      - HDIPTV_INTERVAL_HOURS=6
+      # 定时更新间隔（小时），0 表示只在启动时跑一次。
+      # 央视频地址带 token，接口给的重签间隔是 4 小时，所以别设太长。
+      - HDIPTV_INTERVAL_HOURS=3
       # 对外地址，用于结果里的链接拼接（局域网填 NAS 的 IP）
       - PUBLIC_URL=http://192.168.1.10:8080
       # 可选：临时追加订阅源，多个用英文逗号分隔
       # - HDIPTV_SUBSCRIBE=https://example.com/a.m3u,https://example.com/b.txt
-      # 可选：画质上下限，默认 720~1080（不要 4K 就保持不动）
-      # - HDIPTV_MIN_HEIGHT=720
+      # 画质门槛：1080P 起步，4K 封顶（不要 4K 就保持不动）
+      - HDIPTV_MIN_HEIGHT=1080
       - HDIPTV_MAX_HEIGHT=1080
       # 可选：NAS 性能较弱时降并发
       # - HDIPTV_CONCURRENCY=8
