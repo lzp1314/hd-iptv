@@ -213,7 +213,7 @@ def _scheduler(state: State, interval_hours: float) -> None:
         time.sleep(interval)
 
 
-def serve(settings: Settings, host: str = "0.0.0.0", port: int = 8080) -> None:
+def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
     state = State(settings)
     report = load_result(settings).get("report", {})
     if report:

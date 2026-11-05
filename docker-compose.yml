@@ -15,8 +15,8 @@ services:
     restart: unless-stopped
 
     ports:
-      # 左边是 NAS 上的端口，冲突了改左边（比如 8081:8080）
-      - "${HOST_PORT:-8080}:8080"
+      # 左边是 NAS 上的端口，冲突了改左边（比如 9798:9797）
+      - "${HOST_PORT:-9797}:9797"
 
     volumes:
       # 配置：频道模板、采集源、config.toml
@@ -37,7 +37,7 @@ services:
 
     # Dockerfile 里已有同样的 HEALTHCHECK，这里显式写一份方便肉眼确认
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status==200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       start_period: 20s

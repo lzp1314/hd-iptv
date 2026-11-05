@@ -27,7 +27,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_serve = sub.add_parser("serve", help="启动 Web 服务（含定时更新）")
     p_serve.add_argument("--host", default="0.0.0.0")
-    p_serve.add_argument("--port", type=int, default=8080)
+    p_serve.add_argument("--port", type=int, default=9797)
 
     sub.add_parser("doctor", help="环境与配置自检")
 

@@ -107,7 +107,7 @@ python -m iptvhd --root examples update
 python -m iptvhd update
 ```
 
-它会现场向央视和浙江广电要地址，探测完输出到 `output/result.m3u`。第一次大约十几秒。
+它会现场向央视和浙江广电要地址，探测完输出到 `output/result.m3u`。**第一次要一分多钟**——取源必须串行（并发会被判异常流量），56 个台每个 3 次请求、间隔 0.3 秒，实测 78 秒出 56 个频道。
 
 想确认某个地址到底什么画质，单独探一下：
 
@@ -148,18 +148,18 @@ python -m iptvhd update
 ### 5. 起服务（可选，推荐）
 
 ```bash
-python -m iptvhd serve --port 8080
+python -m iptvhd serve --port 9797
 ```
 
-打开 `http://NAS_IP:8080` 就是面板，订阅地址：
+打开 `http://NAS_IP:9797` 就是面板，订阅地址：
 
 | 用途 | 地址 |
 |---|---|
-| M3U 订阅 | `http://NAS_IP:8080/m3u` |
-| TXT 订阅 | `http://NAS_IP:8080/txt` |
-| JSON 数据 | `http://NAS_IP:8080/json` |
-| 单台实时跳转 | `http://NAS_IP:8080/live/cctv1.m3u8` |
-| 可用 slug 清单 | `http://NAS_IP:8080/api/live` |
+| M3U 订阅 | `http://NAS_IP:9797/m3u` |
+| TXT 订阅 | `http://NAS_IP:9797/txt` |
+| JSON 数据 | `http://NAS_IP:9797/json` |
+| 单台实时跳转 | `http://NAS_IP:9797/live/cctv1.m3u8` |
+| 可用 slug 清单 | `http://NAS_IP:9797/api/live` |
 
 填进 TiviMate / ysc / Kodi / 影视仓 / PotPlayer 都能直接用。
 
@@ -308,6 +308,16 @@ name_group = 2
 
 镜像在 GitHub Actions 里自动构建，`amd64` 和 `arm64` 都有，推 `main` 或打 `v*` 标签各出一版。
 
+### 拉起来之后会经历什么
+
+| 时间 | 状态 |
+|---|---|
+| 0~5 秒 | 服务已经能访问，面板打得开，`/health` 返回 200 |
+| 5~90 秒 | 后台跑首次采集，这时 `/m3u` 返回 404，body 是「结果尚未生成，请先更新一次」 |
+| 90 秒后 | 54~56 个频道就绪，`/m3u` 可取，之后每 3 小时自动刷新 |
+
+**不挂任何卷也能跑**——镜像里自带一份默认配置，结果写在容器内的 `/app/output`。能播，但删了容器结果就没了，所以下面还是建议挂两个目录。
+
 ### 方式一：Docker Compose（推荐）
 
 ```bash
@@ -316,7 +326,7 @@ cd hd-iptv
 docker compose up -d --build
 ```
 
-起来后直接访问 `http://NAS_IP:8080`。**配置不用先准备**——`config/` 是空的也没关系，首次启动会自动写入一份默认配置（央视频 + 浙江广电，1080P）。
+起来后直接访问 `http://NAS_IP:9797`。**配置不用先准备**——`config/` 是空的也没关系，首次启动会自动写入一份默认配置（央视频 + 浙江广电，1080P）。
 
 要改端口 / 目录 / 局域网地址，复制一份 `.env` 再改，别动 yml：
 
@@ -325,10 +335,10 @@ cp .env.example .env
 ```
 
 ```ini
-HOST_PORT=8080
+HOST_PORT=9797
 CONFIG_DIR=/vol2/1000/docker/hd-iptv/config
 OUTPUT_DIR=/vol2/1000/docker/hd-iptv/output
-PUBLIC_URL=http://192.168.1.10:8080
+PUBLIC_URL=http://192.168.1.10:9797
 ```
 
 改完 `docker compose up -d` 重来一次即可（改环境变量会重建容器，不会重装镜像）。
@@ -337,13 +347,13 @@ PUBLIC_URL=http://192.168.1.10:8080
 
 ```bash
 docker run -d --name hd-iptv --restart unless-stopped \
-  -p 8080:8080 \
+  -p 9797:9797 \
   -v /vol2/1000/docker/hd-iptv/config:/app/config \
   -v /vol2/1000/docker/hd-iptv/output:/app/output \
   -e HDIPTV_INTERVAL_HOURS=3 \
   -e HDIPTV_MIN_HEIGHT=1080 \
   -e HDIPTV_MAX_HEIGHT=1080 \
-  -e PUBLIC_URL=http://192.168.1.10:8080 \
+  -e PUBLIC_URL=http://192.168.1.10:9797 \
   ghcr.io/lzp1314/hd-iptv:latest
 ```
 
@@ -359,7 +369,7 @@ docker run -d --name hd-iptv --restart unless-stopped \
 2. Docker → Compose → 新建项目，项目目录选 `/vol2/1000/docker/hd-iptv`
 3. compose 内容用仓库里的 `docker-compose.yml`，但把 `build: .` 改成 `image: ghcr.io/lzp1314/hd-iptv:latest`（面板里没有源码，构建不了）
 4. 卷映射写**绝对路径**：`/vol2/1000/docker/hd-iptv/config:/app/config`
-5. 启动，浏览器开 `http://飞牛IP:8080`
+5. 启动，浏览器开 `http://飞牛IP:9797`
 
 **B. SSH 拉源码构建（能改配置、升级方便）**
 
@@ -422,7 +432,7 @@ git push origin v1.0.0
 ```bash
 python -m iptvhd update          # 跑一次完整更新
 python -m iptvhd update --quiet  # 只打印汇总
-python -m iptvhd serve --port 8080
+python -m iptvhd serve --port 9797
 python -m iptvhd doctor          # 配置自检
 python -m iptvhd probe <地址...>  # 单条验证：能不能播、多少 P、多快
 python -m iptvhd --version
@@ -479,8 +489,8 @@ docker inspect hd-iptv --format '{{json .Mounts}}' | python -m json.tool
 
 看 `Source` 是不是你预期的路径。改完挂载必须重建容器，`docker restart` 不生效。
 
-**8080 端口被占了**
-改 `.env` 里的 `HOST_PORT=8081`（或 compose 里 `"8081:8080"`），然后 `docker compose up -d`。容器内始终是 8080，只改左边。
+**9797 端口被占了**
+改 `.env` 里的 `HOST_PORT=9798`（或 compose 里 `"9798:9797"`），然后 `docker compose up -d`。容器内始终是 9797，只改左边。
 
 **更新后是空的 / 0 条**
 1. `doctor` 看有没有启用的源

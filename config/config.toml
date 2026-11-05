@@ -30,4 +30,4 @@ probe_playlist_children = true    # 是否继续探测 m3u8 的子播放列表�
 [output]
 epg_url = ""                 # EPG 节目单地址，可填公共 EPG；留空则结果不带 x-tvg-url
 logo_base = ""               # 台标库根地址，形如 https://example.com/logo ；留空则用源自带 tvg-logo
-public_url = ""              # 对外访问地址，例如 http://192.168.1.10:8080
+public_url = ""              # 对外访问地址，例如 http://192.168.1.10:9797

@@ -22,9 +22,9 @@ COPY examples ./examples
 # 挂载成空目录时程序启动会自动把默认配置写回去，不至于跑出 0 个频道。
 RUN mkdir -p /app/output /app/config
 
-EXPOSE 8080
+EXPOSE 9797
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status==200 else 1)"
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"
 
-CMD ["python", "-m", "iptvhd", "serve", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "iptvhd", "serve", "--host", "0.0.0.0", "--port", "9797"]
