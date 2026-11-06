@@ -56,7 +56,7 @@ allow_unknown_resolution = false
 probe_playlist_children = true
 
 [relay]
-playlist_ttl = 1
+playlist_ttl = 2.5
 cache_mb = 96
 mode = "direct"
 
@@ -250,18 +250,20 @@ class Settings:
 
     @property
     def playlist_ttl(self) -> float:
-        """同一份清单的最短复用时间（秒）。
+        """清单预取间隔（秒）。
 
-        只是用来把「同一瞬间的并发请求」合并成一次上游刷新——清单正文绝不按这个
-        时间复用：上游只有 3 个分片、5 秒滚一片，复用久了播放器会反复播同一批已经
-        被回收的分片，表现就是卡住或跳台。
+        有人在看某个台时，后台每隔这么久替播放器去上游要一次新清单，播放器来请求
+        就直接读内存。调小=更实时但更费出口配额，调大=省配额但滞后半拍。
+
+        名字沿用 ``playlist_ttl``，是为了让已经在用的 panel.json / config.toml
+        不用改；它早就不表示「清单缓存多久」了。
         """
         panel = self.panel_get("playlist_ttl")
-        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 1)
+        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 2.5)
         try:
             return max(0.5, float(raw))
         except (TypeError, ValueError):
-            return 1.0
+            return 2.5
 
     @property
     def relay_cache_mb(self) -> float:

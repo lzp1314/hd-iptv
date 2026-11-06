@@ -22,6 +22,83 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 M3U_TYPE = "audio/x-mpegurl; charset=utf-8"
 
+# 反代把 Host 改回内网地址时，服务端就再也没法从请求里看出外网域名了。
+# 所以只要见过一次外网地址（面板、订阅、播放都算），就记下来，
+# 之后经反代进来的请求生成播放地址时用它，免得订阅列表里全是 192.168.x.x。
+_SEEN_PUBLIC: dict[str, object] = {"base": "", "at": 0.0}
+_SEEN_TTL = 7 * 86400.0
+
+
+def _looks_local(host: str) -> bool:
+    """判断 Host 是不是只能在局域网里用的地址。"""
+    name = host.strip().lower()
+    if not name or name.startswith("["):        # IPv6 字面量一律当本地
+        return True
+    name = name.rsplit(":", 1)[0] if ":" in name else name
+    if name in ("localhost", "0.0.0.0"):
+        return True
+    if name.startswith(("127.", "10.", "192.168.", "169.254.")):
+        return True
+    if name.startswith("172."):
+        try:
+            return 16 <= int(name.split(".")[1]) <= 31
+        except (IndexError, ValueError):
+            return False
+    return name.endswith((".local", ".lan", ".home"))
+
+
+def _seen_public() -> str:
+    base = str(_SEEN_PUBLIC.get("base") or "")
+    at = float(_SEEN_PUBLIC.get("at") or 0.0)
+    if base and time.time() - at <= _SEEN_TTL:
+        return base
+    return ""
+
+
+def _public_base(headers, public_url: str = "") -> str:
+    """算出这次请求该用哪个对外地址。
+
+    配了 ``PUBLIC_URL`` 就用它；否则按请求头推。套了反向代理时，
+    ``X-Forwarded-Host`` / ``Forwarded`` 会带出真实的外网域名和端口。
+
+    有些反代图省事，把 ``Host`` 改回内网地址又不传 forwarded 头，这时候服务端
+    看到的就是 ``192.168.x.x``。遇到这种情况退回「以前见过的那个外网地址」——
+    总比给外网播放器一个内网 IP 强。内网直连（没有 forwarded 头）不这样处理，
+    否则内网看个电视还要绕到外网域名去。
+    """
+    if public_url:
+        return public_url.rstrip("/")
+
+    host = (headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+    if not host:
+        # RFC 7239：Forwarded: for=1.2.3.4;host=tv.example.com;proto=https
+        for part in (headers.get("Forwarded") or "").split(";"):
+            key, _, value = part.partition("=")
+            if key.strip().lower() == "host":
+                host = value.strip().strip('"')
+                break
+    if not host:
+        host = (headers.get("X-Original-Host") or "").split(",")[0].strip()
+    if not host:
+        host = (headers.get("Host") or "").strip()
+    if not host:
+        return _seen_public()
+
+    proto = (headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+    if proto not in ("http", "https"):
+        proto = "https" if headers.get("X-Forwarded-Ssl") == "on" else "http"
+    here = f"{proto}://{host}"
+
+    if not _looks_local(host):
+        _SEEN_PUBLIC["base"] = here
+        _SEEN_PUBLIC["at"] = time.time()
+        return here
+
+    via_proxy = any(headers.get(h) for h in ("X-Forwarded-For", "X-Real-IP", "X-Forwarded-Host"))
+    if via_proxy:
+        return _seen_public() or here
+    return here
+
 
 def _channels_from_result(result: dict) -> list[Channel]:
     """把 result.json 还原成 Channel/Stream，供按请求现拼 m3u。
@@ -90,7 +167,7 @@ class State:
         # 清单由本机取（用上游认的 UA），分片默认让播放器直连 CDN
         self.relay = Relay(
             _ysp_resolver,
-            playlist_ttl=settings.playlist_ttl,
+            prefetch_every=settings.playlist_ttl,
             cache_bytes=int(settings.relay_cache_mb * 1024 * 1024),
             mode=settings.play_mode,
         )
@@ -146,7 +223,7 @@ class State:
             write_panel(self.settings.panel_path, clean)
             self.settings.panel.update(clean)
             self.relay.configure(
-                playlist_ttl=self.settings.playlist_ttl,
+                prefetch_every=self.settings.playlist_ttl,
                 cache_bytes=int(self.settings.relay_cache_mb * 1024 * 1024),
                 mode=self.settings.play_mode,
             )
@@ -268,23 +345,8 @@ def make_handler(state: State):
             self.end_headers()
 
         def _base(self) -> str:
-            """拼对外地址。
-
-            配了 ``PUBLIC_URL`` 就用它；没配就按这次请求的 Host 现算——
-            套了一层反向代理（Lucky / Nginx）时，``X-Forwarded-*`` 会带出
-            真实的外网域名和端口，生成的播放地址自然就是外网能用的。
-            """
-            public = settings.public_url
-            if public:
-                return public.rstrip("/")
-            host = (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
-            host = host or (self.headers.get("Host") or "").strip()
-            if not host:
-                return ""
-            proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
-            if proto not in ("http", "https"):
-                proto = "https" if self.headers.get("X-Forwarded-Ssl") == "on" else "http"
-            return f"{proto}://{host}"
+            """这次请求该用哪个对外地址。具体规则见模块里的 _public_base。"""
+            return _public_base(self.headers, settings.public_url)
 
         # ---------------- 播放 ----------------
         def _live(self, slug: str) -> None:
@@ -311,13 +373,18 @@ def make_handler(state: State):
             except Exception as exc:  # noqa: BLE001 - 失败要给出可读原因
                 self._json({"error": f"{type(exc).__name__}: {exc}", "channel": row[1]}, 502)
                 return
-            # 这几个头是给人排查用的：浏览器 F12 里看 /live/xxx.m3u8 的响应，
-            # Seq 一直不动就是上游卡住了，Stale=1 表示这次给的是旧的那份。
+            # 这几个头是给人排查用的：F12 里看 /live/xxx.m3u8 的响应，
+            # Seq 一直不动就是上游卡住了，Stale=1 表示这次给的是旧的那份，
+            # Segs 是这次窗口里带了几片——正常应该在 3~8 之间往上长。
             self._send(
                 200,
                 text.encode("utf-8"),
                 "application/vnd.apple.mpegurl; charset=utf-8",
-                {"X-HD-Seq": str(seq), "X-HD-Stale": "1" if stale else "0"},
+                {
+                    "X-HD-Seq": str(seq),
+                    "X-HD-Stale": "1" if stale else "0",
+                    "X-HD-Segs": str(text.count("#EXTINF")),
+                },
                 cache="no-store",
             )
 
@@ -657,7 +724,7 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
     httpd = Server((host, port), make_handler(state))
     state.log(f"服务已启动：http://{host}:{port}  （订阅地址 /playlist.m3u）")
     state.log(
-        f"分片缓存上限 {int(settings.relay_cache_mb)} MB，清单复用 {settings.playlist_ttl:g} 秒，"
+        f"分片缓存上限 {int(settings.relay_cache_mb)} MB，清单预取 {settings.playlist_ttl:g} 秒一次，"
         "多客户端共用一个上游连接池"
     )
     if not settings.public_url:

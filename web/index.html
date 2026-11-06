@@ -32,6 +32,21 @@
   <div id="relayBanner" class="banner" hidden></div>
   <div id="missingNote" class="banner quiet" hidden></div>
 
+  <section class="panel" id="channelsPanel">
+    <div class="panel-head">
+      <h2>我的频道 <span id="hiddenCount" class="count" hidden></span>
+        <button id="btnUnhideAll" class="btn mini" hidden>全部恢复</button>
+      </h2>
+      <div class="list-tools">
+        <label class="chk"><input id="showHidden" type="checkbox"> 显示已隐藏</label>
+        <input id="search" class="search" placeholder="搜索频道">
+      </div>
+    </div>
+    <div id="channelList" class="chan-layout">
+      <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
+    </div>
+  </section>
+
   <section class="panel" id="subscribePanel">
     <h2>订阅地址</h2>
     <p class="hint">
@@ -80,12 +95,12 @@
         </select>
       </label>
       <label>对外地址
-        <input id="setPublicUrl" type="text" placeholder="留空 = 按访问地址自动判断">
+        <input id="setPublicUrl" type="text" placeholder="留空 = 用你打开面板的这个地址">
       </label>
       <label>自动更新间隔（小时，0 关闭）
         <input id="setInterval" type="number" min="0" max="168" step="0.5">
       </label>
-      <label>清单复用（秒，一般不用改）
+      <label>清单刷新（秒，越小越实时）
         <input id="setTtl" type="number" min="0.5" max="5" step="0.5">
       </label>
       <label>分片缓存（MB，仅转发模式）
@@ -96,27 +111,8 @@
       </label>
     </div>
     <p class="hint" id="settingsNote">
-      套了反向代理（Lucky / Nginx）时，「对外地址」留空即可，列表会用你访问面板的外网域名和端口。
+      套了反向代理（Lucky / Nginx）时「对外地址」留空即可，面板和订阅列表都会用你访问时的域名和端口。
     </p>
-  </section>
-
-  <section class="panel">
-    <div class="panel-head">
-      <h2>频道列表 <span id="hiddenCount" class="count" hidden></span>
-        <button id="btnUnhideAll" class="btn mini" hidden>全部恢复</button>
-      </h2>
-      <div class="list-tools">
-        <label class="chk"><input id="showHidden" type="checkbox"> 显示已隐藏</label>
-        <input id="search" class="search" placeholder="搜索频道 / 分组">
-      </div>
-    </div>
-    <p class="hint">
-      点「播放」直接在面板里看（走本机 /live/ 地址，不依赖播放器的 UA）。
-      「隐藏」只影响订阅列表，随时能恢复，不用重新采集。
-    </p>
-    <div id="channelList" class="channel-list">
-      <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
-    </div>
   </section>
 
   <section class="panel">

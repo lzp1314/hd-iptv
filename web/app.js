@@ -1,12 +1,15 @@
 const $ = (id) => document.getElementById(id);
 let cache = [];
 let cacheKey = "";
-let apiBase = "";
+let settings = {};
 let settingsDirty = false;
 
-// 面板上展示的地址用服务端算出来的对外地址：套了反代时它才是外网能用的那个
+// 面板上展示的地址：手填了「对外地址」就以它为准，否则就是你打开面板用的这个地址。
+// 不用服务端从请求头猜出来的那个——不少反代会把 Host 改回内网地址，服务端那边
+// 只能看到 192.168.x.x，于是从外网进来的面板反而给你一个内网订阅地址。
 function base() {
-  return (apiBase || location.origin).replace(/\/+$/, "");
+  const manual = String(settings.public_url || "").replace(/\/+$/, "");
+  return manual || location.origin.replace(/\/+$/, "");
 }
 
 function esc(text) {
@@ -27,7 +30,10 @@ function fillUrls() {
   };
   for (const [id, path] of Object.entries(map)) {
     const el = $(id);
-    if (el) el.value = base() + path;
+    if (!el) continue;
+    // 值没变就别赋值：每 5 秒刷一次状态，赋值会把用户正在选中的文字清掉
+    const next = base() + path;
+    if (el.value !== next) el.value = next;
   }
 }
 
@@ -76,16 +82,14 @@ async function loadStatus() {
     $("version").textContent = "v" + (d.version || "-");
     const rep = d.report || {};
 
-    if (d.base && d.base !== apiBase) {
-      apiBase = d.base;
-      fillUrls();
-    }
+    settings = d.settings || {};
+    fillUrls();
 
     setDot(d.running ? "busy" : (d.last_error ? "err" : "ok"));
     $("btnUpdate").disabled = !!d.running;
     $("btnUpdate").textContent = d.running ? "更新中…" : "立即更新";
 
-    const hidden = (d.settings && d.settings.hidden) || [];
+    const hidden = settings.hidden || [];
     const total = rep.channels_matched != null ? rep.channels_matched : null;
     if ($("statChannels")) {
       $("statChannels").textContent =
@@ -167,7 +171,7 @@ async function saveSettings() {
     if (d.error) throw new Error(d.error);
     settingsDirty = false;
     note.textContent = `已保存：更新间隔 ${d.settings.interval_hours} 小时、`
-      + `清单复用 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB。`
+      + `清单刷新 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB。`
       + "播放器里的地址如果变了，重新拉一次列表即可。";
     await refresh();
   } catch (e) {
@@ -222,10 +226,65 @@ function streamMeta(stream) {
     <span class="rate ${cls}" title="${esc(rateTitle(stream))}">${esc(rate)}</span>`;
 }
 
+// 当前看的是哪个分组。存进地址栏的 # 里，刷新、收藏、发给家人都能停在同一个分组。
+let activeGroup = decodeURIComponent((location.hash || "").replace(/^#/, "")) || "*";
+
+function pickGroup(name) {
+  activeGroup = name || "*";
+  try {
+    const url = activeGroup === "*"
+      ? location.pathname + location.search
+      : "#" + encodeURIComponent(activeGroup);
+    history.replaceState(null, "", url);
+  } catch (e) {
+    /* 某些内嵌浏览器不给改地址栏，不影响使用 */
+  }
+  renderChannels(cache);
+}
+
+function groupLabel(name) {
+  const map = { CCTV: "央视", cctv: "央视", 央视: "央视", 卫视: "卫视" };
+  return map[name] || name || "未分组";
+}
+
+// 卡片里只放最要紧的两样：画质和码率。分辨率这些挤进来会把窗格撑破。
+function cardMeta(stream) {
+  if (!stream || !Object.keys(stream).length) return '<span class="dim">没有可用源</span>';
+  const rate = rateText(stream);
+  // 码率是这条流本身多"重"，不是好坏；只有测速（本机拉得动拉不动）才需要标红标绿
+  const cls = stream.bandwidth_kbps ? "" : rateClass(stream.speed_mbps);
+  return `<span class="pill ${gradePillClass(stream.grade)}">${esc(stream.grade || "未知")}</span>`
+    + `<span class="rate ${cls}" title="${esc(rateTitle(stream))}">${esc(rate)}</span>`;
+}
+
+function chanCard(ch) {
+  const visible = !ch.hidden;
+  const streams = ch.streams || [];
+  const slug = (streams.find((s) => s.slug) || {}).slug || "";
+  const more = streams.length > 1 ? `<span class="idx">${streams.length} 路</span>` : "";
+  const play = visible
+    ? (slug
+        ? `<button class="btn mini" data-play="${esc(slug)}" data-name="${esc(ch.name)}">播放</button>`
+        : `<button class="btn mini" disabled title="这条流来自外部订阅，面板播放需要本机 /live/ 地址">播放</button>`)
+    : `<button class="btn mini" data-unhide="${esc(ch.name)}">恢复</button>`;
+  const hide = visible
+    ? `<button class="btn mini ghost" data-hide="${esc(ch.name)}">隐藏</button>`
+    : "";
+  return `<article class="chan-card${visible ? "" : " is-hidden"}">
+    <div class="chan-top">
+      <span class="chan-dot"></span>
+      <span class="chan-name" title="${esc(ch.name)}">${esc(ch.name)}</span>
+      ${visible ? more : '<span class="pill hidden-pill">已隐藏</span>'}
+    </div>
+    <div class="chan-meta">${visible ? cardMeta(streams[0]) : '<span class="dim">不上架，随时可恢复</span>'}</div>
+    <div class="chan-ops">${play}${hide}</div>
+  </article>`;
+}
+
 function renderChannels(channels) {
-  const keyword = ($("search").value || "").trim().toLowerCase();
   const box = $("channelList");
   const all = channels || [];
+  const keyword = ($("search").value || "").trim().toLowerCase();
   const showHidden = $("showHidden") && $("showHidden").checked;
   const hiddenCount = all.filter((c) => c.hidden).length;
 
@@ -236,57 +295,77 @@ function renderChannels(channels) {
   }
   if ($("btnUnhideAll")) $("btnUnhideAll").hidden = !hiddenCount;
 
-  // 搜索时连隐藏的也一起找出来，否则想恢复还得先勾「显示已隐藏」
-  const list = all.filter((c) => {
-    const matchKeyword = !keyword
-      || c.name.toLowerCase().includes(keyword)
-      || (c.group || "").toLowerCase().includes(keyword);
-    if (!matchKeyword) return false;
-    return showHidden || !c.hidden || !!keyword;
-  });
-
-  if (!list.length) {
-    box.innerHTML = `<p class="empty">${all.length ? "没有匹配的频道" : "暂无数据，点右上角「立即更新」跑一次。"}</p>`;
+  if (!all.length) {
+    box.innerHTML = `<p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>`;
     return;
   }
 
-  let html = "";
-  let group = null;
-  const counts = {};
-  for (const ch of list) {
-    if (ch.group !== group) {
-      group = ch.group;
-      const groupVisible = list.some((c) => (c.group || "") === (group || "") && !c.hidden);
-      html += `<div class="group-title">${esc(group || "未分组")}${
-        groupVisible ? `<button class="btn mini ghost" data-hide-group="${esc(group || "")}">隐藏本组</button>` : ""
-      }</div>`;
+  // 搜索时在整个列表里找：不然还得先想清楚这个台在哪个分组
+  const pool = all.filter((c) => !keyword
+    || c.name.toLowerCase().includes(keyword)
+    || (c.group || "").toLowerCase().includes(keyword));
+
+  const groups = [];
+  const byGroup = new Map();
+  for (const ch of pool) {
+    const key = ch.group || "";
+    if (!byGroup.has(key)) {
+      byGroup.set(key, []);
+      groups.push(key);
     }
-    const visible = !ch.hidden;
-    if (visible) {
-      for (const s of ch.streams || []) {
-        const key = s.grade || "未知";
-        counts[key] = (counts[key] || 0) + 1;
-      }
-    }
-    // 一个台多条源时逐条列出来，方便直接挑速率高的那条
-    const rows = (ch.streams || []).map((s, i) => {
-      const multi = ch.streams.length > 1 ? `<span class="idx">${i + 1}</span>` : "";
-      return `<div class="stream-row">${multi}${streamMeta(s)}</div>`;
-    }).join("");
-    const slug = ((ch.streams || []).find((s) => s.slug) || {}).slug || "";
-    const ops = visible
-      ? `${slug
-          ? `<button class="btn mini" data-play="${esc(slug)}" data-name="${esc(ch.name)}">播放</button>`
-          : `<button class="btn mini" disabled title="这条流来自外部订阅，面板播放需要本机 /live/ 地址">播放</button>`}
-         <button class="btn mini" data-hide="${esc(ch.name)}">隐藏</button>`
-      : `<button class="btn mini" data-unhide="${esc(ch.name)}">恢复</button>`;
-    html += `<div class="chan ${visible ? "" : "is-hidden"}">
-      <span class="name">${esc(ch.name)}${visible ? "" : '<span class="pill hidden-pill">已隐藏</span>'}</span>
-      <span class="meta">${rows}</span>
-      <span class="ops">${ops}</span>
-    </div>`;
+    byGroup.get(key).push(ch);
   }
-  box.innerHTML = html;
+
+  let current = keyword ? "*" : activeGroup;
+  if (current !== "*" && !byGroup.has(current)) {
+    activeGroup = "*";
+    current = "*";
+  }
+  const picked = (current === "*" ? pool : byGroup.get(current) || [])
+    .filter((c) => showHidden || !c.hidden || !!keyword);
+
+  if (!pool.length) {
+    box.innerHTML = `<p class="empty">没有匹配的频道</p>`;
+    return;
+  }
+
+  const liveIn = (list) => list.filter((c) => !c.hidden).length;
+  const side = [`<button class="group-item${current === "*" ? " is-on" : ""}" data-group="*">
+      <span>全部</span><span class="num">${liveIn(pool)}</span></button>`]
+    .concat(groups.map((g) => {
+      const items = byGroup.get(g);
+      return `<button class="group-item${current === g ? " is-on" : ""}" data-group="${esc(g)}">
+        <span>${esc(groupLabel(g))}</span><span class="num">${liveIn(items)}</span></button>`;
+    }))
+    .join("");
+
+  const items = current === "*" ? [] : byGroup.get(current) || [];
+  const canHide = items.some((c) => !c.hidden);
+  const canShow = items.some((c) => c.hidden);
+  const title = current === "*"
+    ? (keyword ? `搜索「${esc($("search").value.trim())}」` : "全部频道")
+    : groupLabel(current);
+  const tools = current === "*" ? "" : `
+    ${canHide ? `<button class="btn mini ghost" data-hide-group="${esc(current)}">隐藏本组</button>` : ""}
+    ${canShow ? `<button class="btn mini ghost" data-unhide-group="${esc(current)}">恢复本组</button>` : ""}`;
+
+  box.innerHTML = `<aside class="chan-side">${side}</aside>
+    <div class="chan-main">
+      <div class="chan-head">
+        <h3>${title}<span class="num">${picked.length}</span></h3>
+        <div class="chan-tools">${tools}</div>
+      </div>
+      <div class="chan-grid">${picked.map(chanCard).join("")}</div>
+    </div>`;
+
+  const counts = {};
+  for (const ch of all) {
+    if (ch.hidden) continue;
+    for (const s of ch.streams || []) {
+      const key = s.grade || "未知";
+      counts[key] = (counts[key] || 0) + 1;
+    }
+  }
   $("statGrades").textContent = Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
     .map(([grade, n]) => `${grade}×${n}`)
@@ -294,7 +373,7 @@ function renderChannels(channels) {
   // 顶部的「直播流」跟着隐藏一起减，否则隐藏完数字不动，看着像没生效
   if ($("statStreams")) {
     const streams = all.filter((c) => !c.hidden).reduce((n, c) => n + (c.streams || []).length, 0);
-    $("statStreams").textContent = all.length ? `${streams}` : "-";
+    $("statStreams").textContent = `${streams}`;
   }
 }
 
@@ -342,6 +421,13 @@ function unhideAll() {
   setHidden(cache.filter((c) => c.hidden).map((c) => c.name), false);
 }
 
+function unhideGroup(group) {
+  const names = cache
+    .filter((c) => (c.group || "") === group && c.hidden)
+    .map((c) => c.name);
+  setHidden(names, false);
+}
+
 async function triggerUpdate() {
   $("btnUpdate").disabled = true;
   try {
@@ -386,9 +472,9 @@ async function checkUpdate() {
 }
 
 /* ---------------- 面板内播放 ---------------- */
-// HLS 直播天生滞后：上游清单只保留 3 个分片，播放器必须落后 2~3 片才有缓冲，
-// 所以「进度条从 0:18 走到 0:35」是窗口在往前滚，不是延迟越滚越大。这里显示
-// 真实的「距直播最新位置还差几秒」，并且落后太多时自动加速追回去。
+// HLS 直播天生滞后：服务端把上游那 3 片拼成 8 片窗口（约 40 秒），播放器落后
+// 3 片起步，所以「进度条从 0:18 走到 0:35」是窗口在往前滚，不是延迟越滚越大。
+// 这里显示真实的「距直播最新位置还差几秒」，并且落后太多时自动加速追回去。
 
 let hls = null;
 let playerSlug = "";
@@ -527,7 +613,7 @@ function openPlayer(slug, name, keepRestarts) {
   $("playerBadge").hidden = true;
   if (!keepRestarts) {
     $("playerTip").textContent =
-      "直播流本身就比电视台晚 2~3 个分片（这台约 10~15 秒）。进度条上的 0:18 是「当前可播窗口里的位置」，不是延迟在变大。";
+      "直播流本身就比电视台晚 2~3 个分片（这台约 15 秒）。进度条上的 0:18 是「当前可播窗口里的位置」，不是延迟在变大。";
   }
   stopStats();
   statsTimer = setInterval(playerStats, 1000);
@@ -550,12 +636,14 @@ function openPlayer(slug, name, keepRestarts) {
     // 播放器会当成「返回得太快=没新东西」立刻再问一次，几十秒就把本机的
     // 上游配额抽干，接着清单拿不到、画面停在播完的那十几秒上。
     lowLatencyMode: false,
-    // 目标落后 2 个分片（约 10 秒）：再小一点上游只有 3 片，容易卡；
-    // 落后超过 5 片就加速播放追回来，而不是让延迟越滚越大
-    liveSyncDurationCount: 2,
-    liveMaxLatencyDurationCount: 5,
-    maxLiveSyncPlaybackRate: 1.25,
+    // 服务端把上游那 3 片拼成了 8 片（约 40 秒）的窗口，所以这里可以多落后
+    // 几片换取缓冲：目标落后 3 片（约 15 秒），手里还攥着 5 片可播。
+    // 落后超过 6 片就用 1.5 倍速追回来，别让延迟一路滚下去。
+    liveSyncDurationCount: 3,
+    liveMaxLatencyDurationCount: 6,
+    maxLiveSyncPlaybackRate: 1.5,
     backBufferLength: 30,
+    maxBufferLength: 40,
     manifestLoadingTimeOut: 15000,
     fragLoadingTimeOut: 20000,
     // 上游时不时回一两次 403/超时，重试要够多，别一次就判死
@@ -675,6 +763,13 @@ document.addEventListener("DOMContentLoaded", () => {
       setHidden(unhide.dataset.unhide, false);
       return;
     }
+    const pick = e.target.closest("[data-group]");
+    if (pick) {
+      pickGroup(pick.dataset.group);
+      return;
+    }
+    const back = e.target.closest("[data-unhide-group]");
+    if (back) unhideGroup(back.dataset.unhideGroup);
     const group = e.target.closest("[data-hide-group]");
     if (group) hideGroup(group.dataset.hideGroup);
   });

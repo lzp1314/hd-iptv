@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from iptvhd.relay import Relay, RelayError, allowed, decode, encode, parse_range
 from iptvhd.models import Channel, Stream
 from iptvhd.writers import write_m3u
+
+
+def _expire(relay: Relay, slug: str = "cctv1", seconds: float = 20.0) -> None:
+    """把缓存时间往前拨，逼下一次请求必须去上游。
+
+    正常播放时窗口是被后台预取一直刷新着的，测试里没有那个线程，
+    就手动让它「已经放了很久」。
+    """
+    past = time.time() - seconds
+    window = relay._windows.get(slug)
+    if window is not None:
+        window.at = past
+    raw = relay._raw.get(slug)
+    if raw is not None:
+        relay._raw[slug] = (past, raw[1], raw[2], raw[3])
 
 MASTER = """#EXTM3U
 #EXT-X-VERSION:3
@@ -48,7 +64,7 @@ class CountingRelay(Relay):
 
     def __init__(self):
         self.calls = 0
-        super().__init__(self._resolver)
+        super().__init__(self._resolver, warm=False)
 
     def _resolver(self, slug):
         self.calls += 1
@@ -244,7 +260,7 @@ class RelayPolicyTest(unittest.TestCase):
         relay = CountingRelay()
         first = relay.playlist("cctv1")
         before = relay.calls
-        relay._playlist_ttl = 0.0                    # 让缓存立刻过期
+        _expire(relay)                               # 缓存过期，本来该去上游
         relay._take_token = lambda wait=0.0: False   # 配额用完
         again = relay.playlist("cctv1")
         self.assertEqual(again, first)               # 返回上一份清单
@@ -267,7 +283,8 @@ class ToggleRelay(Relay):
     def __init__(self, ttl: float = 0.0):
         super().__init__(
             lambda slug: ("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8", "qqlive"),
-            playlist_ttl=ttl,
+            prefetch_every=ttl,
+            warm=False,
         )
         self.down = False
         self.fetches = 0
@@ -297,6 +314,7 @@ class RelayStabilityTest(unittest.TestCase):
         relay = ToggleRelay()
         first = relay.playlist("cctv1")
         relay.down = True
+        _expire(relay)
         second = relay.playlist("cctv1")
         self.assertEqual(first, second)
         self.assertEqual(relay.stale_served, 1)
@@ -312,6 +330,7 @@ class RelayStabilityTest(unittest.TestCase):
         for _ in range(5):
             relay.playlist("cctv1")
             relay.down = not relay.down
+            _expire(relay)
         self.assertGreaterEqual(relay.fetches, 2)
 
     def test_segment_cached_between_requests(self):
