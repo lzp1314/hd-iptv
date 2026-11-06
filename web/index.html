@@ -35,7 +35,7 @@
     <p class="hint">
       填进播放器（观屿TV / TiviMate / 影视 / Kodi / PotPlayer 均可）。
       地址要以 <code>.m3u</code> 结尾——播放器把 <code>.m3u8</code> 当成「单个直播流」解析，
-      拿去当订阅就会提示「播放格式不受支持」。
+      拿去当订阅就会提示「播放格式不受支持」。这里列出的地址已排除你隐藏的台。
     </p>
     <div class="url-row">
       <span class="tag">M3U</span>
@@ -109,10 +109,18 @@
 
   <section class="panel">
     <div class="panel-head">
-      <h2>频道列表</h2>
-      <input id="search" class="search" placeholder="搜索频道 / 分组">
+      <h2>频道列表 <span id="hiddenCount" class="count" hidden></span>
+        <button id="btnUnhideAll" class="btn mini" hidden>全部恢复</button>
+      </h2>
+      <div class="list-tools">
+        <label class="chk"><input id="showHidden" type="checkbox"> 显示已隐藏</label>
+        <input id="search" class="search" placeholder="搜索频道 / 分组">
+      </div>
     </div>
-    <p class="hint">分辨率取自分片码流本身（不是接口标注），速率是实测采样速度，低于 2 Mbps 的台观感会明显发卡。</p>
+    <p class="hint">
+      点「播放」直接在面板里看（走本机 /live/ 地址，不依赖播放器的 UA）。
+      「隐藏」只影响订阅列表，随时能恢复，不用重新采集。
+    </p>
     <div id="channelList" class="channel-list">
       <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
     </div>
@@ -128,6 +136,31 @@
   <span>hd-iptv · 仅用于个人学习与家庭内网使用，请遵守当地法律法规与内容授权要求</span>
 </footer>
 
+<div id="playerMask" class="player-mask" hidden>
+  <div class="player-box">
+    <div class="player-head">
+      <div class="player-title">
+        <span id="playerTitle">-</span>
+        <span id="playerBadge" class="live-tag" hidden>直播</span>
+      </div>
+      <div class="player-actions">
+        <button id="btnGoLive" class="btn">回到最新</button>
+        <button id="btnCopyLive" class="btn">复制地址</button>
+        <button id="btnClosePlayer" class="btn">关闭</button>
+      </div>
+    </div>
+    <video id="playerVideo" playsinline controls></video>
+    <div class="player-foot">
+      <span id="playerStats" class="mono">准备中…</span>
+      <span id="playerTip" class="player-tip">
+        直播流本身就比电视台晚 2~3 个分片（这台约 10~15 秒）。进度条上的
+        <code>0:18</code> 是「当前可播窗口里的位置」，不是延迟在变大。
+      </span>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vendor/hls.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

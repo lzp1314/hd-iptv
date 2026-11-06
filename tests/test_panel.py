@@ -9,7 +9,8 @@ from pathlib import Path
 
 from iptvhd import epg, logos, writers
 from iptvhd.models import Channel, Stream
-from iptvhd.settings import coerce_panel, load_settings, read_panel, write_panel
+from iptvhd.service import _channels_from_result, _visible
+from iptvhd.settings import clean_names, coerce_panel, load_settings, read_panel, write_panel
 
 XMLTV = """<?xml version="1.0" encoding="UTF-8"?>
 <tv>
@@ -73,6 +74,48 @@ class TestPanelSettings(unittest.TestCase):
             self.assertEqual(settings.playlist_ttl, 5.0)
             self.assertEqual(settings.relay_cache_mb, 96.0)
             self.assertEqual(settings.public_url, "")
+
+
+class TestHiddenChannels(unittest.TestCase):
+    """隐藏频道：只影响对外输出，原始数据一条不删。"""
+
+    def test_clean_names(self):
+        self.assertEqual(clean_names(["CCTV-1", "CCTV-1", " 湖南卫视 "]), ["CCTV-1", "湖南卫视"])
+        self.assertEqual(clean_names("CCTV-1"), ["CCTV-1"])
+        self.assertEqual(clean_names(None), [])
+        self.assertEqual(clean_names([""]), [])
+        # 别让一个畸形请求把 panel.json 撑爆
+        self.assertEqual(len(clean_names([f"台{i}" for i in range(900)])), 500)
+
+    def test_panel_hidden_beats_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir()
+            (root / "config" / "config.toml").write_text(
+                '[output]\nhidden = ["CCTV-2"]\n', encoding="utf-8"
+            )
+            settings = load_settings(root)
+            self.assertEqual(settings.hidden, ["CCTV-2"])
+            # 面板里显式清空 = 全部恢复，不能被配置文件里的旧值顶回来
+            write_panel(settings.panel_path, {"hidden": []})
+            self.assertEqual(load_settings(root).hidden, [])
+
+    def test_visible_filters_by_name(self):
+        channels = [_channel("CCTV-1", "央视", "cctv1"), _channel("CCTV-2", "央视", "cctv2")]
+        self.assertEqual([c.name for c in _visible(channels, [])], ["CCTV-1", "CCTV-2"])
+        self.assertEqual([c.name for c in _visible(channels, ["CCTV-2"])], ["CCTV-1"])
+        # 名字对不上就不过滤——隐藏一个不存在的台不该误伤别的台
+        self.assertEqual(len(_visible(channels, ["CCTV-9"])), 2)
+
+    def test_result_keeps_hidden_rows(self):
+        """服务端返回全部频道并打标记，面板才能做「恢复」。"""
+        result = {"channels": [
+            {"name": "CCTV-1", "group": "央视", "streams": [{"url": "", "slug": "cctv1"}]},
+            {"name": "CCTV-2", "group": "央视", "streams": [{"url": "", "slug": "cctv2"}]},
+        ]}
+        channels = _channels_from_result(result)
+        self.assertEqual(len(_visible(channels, ["CCTV-2"])), 1)
+        self.assertEqual(len(channels), 2)          # 原始结果没被改动
 
 
 class TestRenderM3u(unittest.TestCase):

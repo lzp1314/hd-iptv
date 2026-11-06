@@ -1,6 +1,7 @@
 name: Docker image
 
-# 推到 main 或打 v* 标签时，自动构建 amd64 + arm64 镜像并推到 GHCR。
+# 推到 main 或打 v* 标签时，自动构建 amd64 / arm64 / armv7 镜像并推到 GHCR。
+# armv7 是给 32 位 Armbian（玩客云、老电视盒子之类）用的，Python 基础镜像有 arm32v7。
 # 想同时发到 Docker Hub：仓库 Settings → Variables 里加 DOCKERHUB_USERNAME，
 # Secrets 里加 DOCKERHUB_TOKEN（Docker Hub 的 Access Token），无需改代码。
 
@@ -46,11 +47,11 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: 构建并推送（amd64 / arm64）
+      - name: 构建并推送（amd64 / arm64 / armv7）
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -83,11 +84,11 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: 构建并推送（amd64 / arm64）
+      - name: 构建并推送（amd64 / arm64 / armv7）
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

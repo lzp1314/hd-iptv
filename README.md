@@ -53,6 +53,22 @@ python -m iptvhd serve --port 9797
 订阅就会提示「播放格式不受支持」——观屿TV、TiviMate、影视仓、Kodi、PotPlayer
 都适用这一条。
 
+**在面板里直接看**
+
+频道列表每行都有「播放」，点了就在面板里放，不用装播放器。它走的是本机
+`/live/` 地址，跟你用什么播放器、什么 UA 没关系。
+
+状态栏里的「延迟 12.4s」才是真实延迟。进度条上的 `0:18` 会一路涨到 `0:35`、
+`0:50`——那是「当前缓冲在时间轴上的位置」在跟着分片往前滚，不是延迟在变大。
+上游只保留 3 个分片、5 秒一片，播放器必须落后 1~2 片才有缓冲，所以 10~15 秒
+是正常的；落后多了点「回到最新」跳回去。
+
+**隐藏不看的台**
+
+每行右侧「隐藏」，分组标题右侧「隐藏本组」，标题栏的「全部恢复」可以一键还原。
+隐藏只影响订阅列表 / TXT / JSON，原始采集数据还在，随时恢复，不用重新采集。
+改完让播放器重新拉一次列表即可。
+
 **哪些台没有**
 
 央视频的公开频道就那些，下面这些**上游没有直播信号**，模板里已注释掉：
@@ -144,11 +160,29 @@ docker compose up -d --build
 > 2. 挂载目录如果不是你改的那个，配置根本不进容器。核对一下：
 >    `docker inspect hd-iptv --format '{{json .Mounts}}'`。
 
+## ARM 板 / Armbian
+
+支持。镜像有 `amd64`、`arm64`、`armv7` 三种，Armbian 上装好 Docker 直接拉就行：
+
+```bash
+curl -fsSL https://get.docker.com | sh     # 已经装了可跳过
+uname -m                                   # aarch64 → arm64；armv7l → 32 位
+docker compose up -d
+```
+
+绝大多数 Armbian 板子（RK3399 / RK3588 / 晶晨 S905 系列）是 **arm64**，直接可用；
+玩客云、部分老盒子是 **armv7（32 位）**，镜像同样带了 armv7。程序是纯 Python
+标准库、单进程，常驻内存约 50~80 MB，1 GB 内存的板子够用。
+
+路径别照抄飞牛那套 `/vol2`，换成你自己的盘，比如 `/mnt/sda1/docker/hd-iptv`。
+ARM 板 CPU 弱一点不影响播放：清单由 NAS 取、分片由播放器直连 CDN，NAS 这边
+基本只做字符串改写。
+
 ## 镜像从哪来
 
 | 位置 | 说明 |
 |---|---|
-| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` + `arm64`），tag 有 `latest` 和 `main` |
+| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`），tag 有 `latest` 和 `main` |
 | 本地构建 | `docker compose up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库 |
 
 GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉不动 `ghcr.io` 时用本地
@@ -180,8 +214,9 @@ python -m iptvhd --version
 | `/relay/<slug>/p/<token>` | 仅 `proxy` 模式下使用，播放器自动请求，不用手填 |
 | `/api/live` | 可用频道 slug 清单 |
 | `/api/status` | 运行状态、统计、设置、最近日志 |
-| `/api/channels` | 频道与源明细 |
+| `/api/channels` | 频道与源明细（含 `hidden` 标记） |
 | `/api/settings` | 读写面板设置（`POST` 生效） |
+| `POST /api/hidden` | 隐藏 / 恢复频道，`{"names":["CCTV-2"],"hidden":true}` |
 | `/api/version?check=1` | 当前版本，顺便跟仓库比一下 |
 | `/api/relay` | 中转缓存与最近错误，排查播放问题用 |
 | `POST /api/update` | 手动触发一次更新 |

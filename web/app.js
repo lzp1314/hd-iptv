@@ -1,11 +1,21 @@
 const $ = (id) => document.getElementById(id);
 let cache = [];
+let cacheKey = "";
 let apiBase = "";
 let settingsDirty = false;
 
 // 面板上展示的地址用服务端算出来的对外地址：套了反代时它才是外网能用的那个
 function base() {
   return (apiBase || location.origin).replace(/\/+$/, "");
+}
+
+function esc(text) {
+  return String(text == null ? "" : text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function fillUrls() {
@@ -59,7 +69,8 @@ function renderMissing(rows) {
     (absent.length ? "。上游没有的台不用管，模板里已注释掉；想加就自己接一个订阅源。" : "。下一轮会自动重试，已取到过的台不会从列表里消失。");
 }
 
-async function loadStatus() {  try {
+async function loadStatus() {
+  try {
     const r = await fetch("/api/status", { cache: "no-store" });
     const d = await r.json();
     $("version").textContent = "v" + (d.version || "-");
@@ -75,8 +86,13 @@ async function loadStatus() {  try {
     $("btnUpdate").disabled = !!d.running;
     $("btnUpdate").textContent = d.running ? "更新中…" : "立即更新";
 
-    $("statChannels").textContent = rep.channels_matched != null
-      ? `${rep.channels_matched}` : "-";
+    const hidden = (d.settings && d.settings.hidden) || [];
+    const total = rep.channels_matched != null ? rep.channels_matched : null;
+    if ($("statChannels")) {
+      $("statChannels").textContent =
+        total == null ? "-" : (hidden.length ? `${total - hidden.length}` : `${total}`);
+      $("statChannels").title = hidden.length ? `${total} 个频道，其中 ${hidden.length} 个已隐藏` : "";
+    }
     $("statStreams").textContent = rep.published != null ? rep.published : "-";
     $("statTime").textContent = d.generated_at || "-";
 
@@ -135,7 +151,7 @@ async function saveSettings() {
     play_mode: $("setPlayMode") ? $("setPlayMode").value : "direct",
     public_url: $("setPublicUrl").value.trim(),
     interval_hours: Number($("setInterval").value || 0),
-    playlist_ttl: Number($("setTtl").value || 2),
+    playlist_ttl: Number($("setTtl").value || 5),
     cache_mb: Number($("setCache").value || 96),
     epg_source: $("setEpgSource").value.trim(),
   };
@@ -160,9 +176,8 @@ async function saveSettings() {
   }
 }
 
-function gradePill(grade) {
-  const cls = grade === "4K" ? "g4k" : grade === "1080P" ? "g1080" : grade === "720P" ? "g720" : "";
-  return `<span class="pill ${cls}">${grade || "未知"}</span>`;
+function gradePillClass(grade) {
+  return grade === "4K" ? "g4k" : grade === "1080P" ? "g1080" : grade === "720P" ? "g720" : "";
 }
 
 // 速率档位：播放器实际能不能流畅，看这个比看分辨率更准
@@ -190,29 +205,40 @@ function rateTitle(stream) {
   return parts.join("\n") || "这一轮没测到速率（多半被上游限流，播放不受影响）";
 }
 
-function gradePillClass(grade) {
-  return grade === "4K" ? "g4k" : grade === "1080P" ? "g1080" : grade === "720P" ? "g720" : "";
-}
-
 function streamMeta(stream) {
   const size = stream.width && stream.height ? `${stream.width}×${stream.height}` : "";
   const rate = rateText(stream);
   const cls = rateClass(stream.speed_mbps);
-  return `<span class="pill ${gradePillClass(stream.grade)}">${stream.grade || "未知"}</span>
+  return `<span class="pill ${gradePillClass(stream.grade)}">${esc(stream.grade || "未知")}</span>
     ${size ? `<span class="res">${size}</span>` : ""}
-    <span class="rate ${cls}" title="${rateTitle(stream).replace(/"/g, "&quot;")}">${rate}</span>`;
+    <span class="rate ${cls}" title="${esc(rateTitle(stream))}">${esc(rate)}</span>`;
 }
 
 function renderChannels(channels) {
   const keyword = ($("search").value || "").trim().toLowerCase();
   const box = $("channelList");
-  const list = (channels || []).filter((c) => {
-    if (!keyword) return true;
-    return c.name.toLowerCase().includes(keyword) || (c.group || "").toLowerCase().includes(keyword);
+  const all = channels || [];
+  const showHidden = $("showHidden") && $("showHidden").checked;
+  const hiddenCount = all.filter((c) => c.hidden).length;
+
+  const badge = $("hiddenCount");
+  if (badge) {
+    badge.hidden = !hiddenCount;
+    badge.textContent = hiddenCount ? `已隐藏 ${hiddenCount}` : "";
+  }
+  if ($("btnUnhideAll")) $("btnUnhideAll").hidden = !hiddenCount;
+
+  // 搜索时连隐藏的也一起找出来，否则想恢复还得先勾「显示已隐藏」
+  const list = all.filter((c) => {
+    const matchKeyword = !keyword
+      || c.name.toLowerCase().includes(keyword)
+      || (c.group || "").toLowerCase().includes(keyword);
+    if (!matchKeyword) return false;
+    return showHidden || !c.hidden || !!keyword;
   });
 
   if (!list.length) {
-    box.innerHTML = `<p class="empty">${channels && channels.length ? "没有匹配的频道" : "暂无数据，点右上角「立即更新」跑一次。"}</p>`;
+    box.innerHTML = `<p class="empty">${all.length ? "没有匹配的频道" : "暂无数据，点右上角「立即更新」跑一次。"}</p>`;
     return;
   }
 
@@ -222,20 +248,34 @@ function renderChannels(channels) {
   for (const ch of list) {
     if (ch.group !== group) {
       group = ch.group;
-      html += `<div class="group-title">${group || "未分组"}</div>`;
+      const groupVisible = list.some((c) => (c.group || "") === (group || "") && !c.hidden);
+      html += `<div class="group-title">${esc(group || "未分组")}${
+        groupVisible ? `<button class="btn mini ghost" data-hide-group="${esc(group || "")}">隐藏本组</button>` : ""
+      }</div>`;
     }
-    for (const s of ch.streams || []) {
-      const key = s.grade || "未知";
-      counts[key] = (counts[key] || 0) + 1;
+    const visible = !ch.hidden;
+    if (visible) {
+      for (const s of ch.streams || []) {
+        const key = s.grade || "未知";
+        counts[key] = (counts[key] || 0) + 1;
+      }
     }
     // 一个台多条源时逐条列出来，方便直接挑速率高的那条
     const rows = (ch.streams || []).map((s, i) => {
       const multi = ch.streams.length > 1 ? `<span class="idx">${i + 1}</span>` : "";
       return `<div class="stream-row">${multi}${streamMeta(s)}</div>`;
     }).join("");
-    html += `<div class="chan">
-      <span class="name">${ch.name}</span>
+    const slug = ((ch.streams || []).find((s) => s.slug) || {}).slug || "";
+    const ops = visible
+      ? `${slug
+          ? `<button class="btn mini" data-play="${esc(slug)}" data-name="${esc(ch.name)}">播放</button>`
+          : `<button class="btn mini" disabled title="这条流来自外部订阅，面板播放需要本机 /live/ 地址">播放</button>`}
+         <button class="btn mini" data-hide="${esc(ch.name)}">隐藏</button>`
+      : `<button class="btn mini" data-unhide="${esc(ch.name)}">恢复</button>`;
+    html += `<div class="chan ${visible ? "" : "is-hidden"}">
+      <span class="name">${esc(ch.name)}${visible ? "" : '<span class="pill hidden-pill">已隐藏</span>'}</span>
       <span class="meta">${rows}</span>
+      <span class="ops">${ops}</span>
     </div>`;
   }
   box.innerHTML = html;
@@ -243,17 +283,55 @@ function renderChannels(channels) {
     .sort((a, b) => b[1] - a[1])
     .map(([grade, n]) => `${grade}×${n}`)
     .join("  ") || "-";
+  // 顶部的「直播流」跟着隐藏一起减，否则隐藏完数字不动，看着像没生效
+  if ($("statStreams")) {
+    const streams = all.filter((c) => !c.hidden).reduce((n, c) => n + (c.streams || []).length, 0);
+    $("statStreams").textContent = all.length ? `${streams}` : "-";
+  }
 }
 
 async function loadChannels() {
   try {
     const r = await fetch("/api/channels", { cache: "no-store" });
     const d = await r.json();
-    cache = d.channels || [];
+    const rows = d.channels || [];
+    // 5 秒轮询一次，数据没变就别重建 DOM——重建会把列表滚动位置顶回顶部
+    const key = JSON.stringify(rows);
+    if (key === cacheKey) return;
+    cacheKey = key;
+    cache = rows;
     renderChannels(cache);
   } catch (e) {
     /* 忽略：状态接口会给出错误提示 */
   }
+}
+
+async function setHidden(names, hidden) {
+  const list = (Array.isArray(names) ? names : [names]).filter(Boolean);
+  if (!list.length) return;
+  try {
+    const r = await fetch("/api/hidden", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: list, hidden }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    await Promise.all([loadChannels(), loadStatus()]);
+  } catch (e) {
+    $("log").textContent = "隐藏操作失败：" + e;
+  }
+}
+
+function hideGroup(group) {
+  const names = cache
+    .filter((c) => (c.group || "") === group && !c.hidden)
+    .map((c) => c.name);
+  setHidden(names, true);
+}
+
+function unhideAll() {
+  setHidden(cache.filter((c) => c.hidden).map((c) => c.name), false);
 }
 
 async function triggerUpdate() {
@@ -299,6 +377,170 @@ async function checkUpdate() {
   }
 }
 
+/* ---------------- 面板内播放 ---------------- */
+// HLS 直播天生滞后：上游清单只保留 3 个分片，播放器必须落后 2~3 片才有缓冲，
+// 所以「进度条从 0:18 走到 0:35」是窗口在往前滚，不是延迟越滚越大。这里显示
+// 真实的「距直播最新位置还差几秒」，并且落后太多时自动加速追回去。
+
+let hls = null;
+let playerSlug = "";
+let playerName = "";
+let statsTimer = null;
+let netRetries = 0;
+let mediaRetries = 0;
+
+function playerLatency() {
+  const v = $("playerVideo");
+  if (hls && Number.isFinite(hls.latency)) return hls.latency;
+  try {
+    const s = v.seekable;
+    if (s && s.length) return Math.max(0, s.end(s.length - 1) - v.currentTime);
+  } catch (_) { /* 直播刚开始时 seekable 是空的 */ }
+  return null;
+}
+
+function playerStats() {
+  const v = $("playerVideo");
+  const parts = [];
+  const delay = playerLatency();
+  if (delay != null) parts.push(`延迟 ${delay.toFixed(1)}s`);
+
+  try {
+    let buffered = 0;
+    for (let i = 0; i < v.buffered.length; i++) {
+      if (v.currentTime >= v.buffered.start(i) - 1 && v.currentTime <= v.buffered.end(i) + 1) {
+        buffered = v.buffered.end(i) - v.currentTime;
+        break;
+      }
+    }
+    if (buffered > 0) parts.push(`缓冲 ${buffered.toFixed(1)}s`);
+  } catch (_) { /* ignore */ }
+
+  if (v.videoWidth) parts.push(`${v.videoWidth}×${v.videoHeight}`);
+  if (hls && hls.levels && hls.currentLevel >= 0) {
+    const level = hls.levels[hls.currentLevel];
+    if (level && level.bitrate) parts.push(`${(level.bitrate / 1e6).toFixed(1)} Mbps`);
+  }
+  $("playerStats").textContent = parts.join(" · ") || "连接中…";
+
+  const badge = $("playerBadge");
+  if (badge) {
+    badge.hidden = false;
+    badge.classList.toggle("warn", delay != null && delay > 25);
+    badge.textContent = delay != null && delay > 25 ? "落后较多" : "直播";
+  }
+}
+
+function stopStats() {
+  if (statsTimer) clearInterval(statsTimer);
+  statsTimer = null;
+}
+
+function closePlayer() {
+  stopStats();
+  const v = $("playerVideo");
+  try { v.pause(); } catch (_) { /* ignore */ }
+  if (hls) {
+    try { hls.destroy(); } catch (_) { /* ignore */ }
+    hls = null;
+  }
+  v.removeAttribute("src");
+  v.load();
+  $("playerMask").hidden = true;
+  playerSlug = "";
+}
+
+function goLive() {
+  const v = $("playerVideo");
+  let target = null;
+  if (hls && Number.isFinite(hls.liveSyncPosition)) {
+    target = hls.liveSyncPosition;
+  } else {
+    try {
+      const s = v.seekable;
+      if (s && s.length) target = Math.max(0, s.end(s.length - 1) - 6);
+    } catch (_) { /* ignore */ }
+  }
+  if (target != null) {
+    try { v.currentTime = target; } catch (_) { /* ignore */ }
+    v.play().catch(() => {});
+    $("playerTip").textContent = "已跳到最新位置。再落后就再点一次。";
+  }
+}
+
+function failPlayer(message) {
+  $("playerStats").textContent = "播放失败：" + message;
+  $("playerBadge").hidden = true;
+}
+
+function openPlayer(slug, name) {
+  const v = $("playerVideo");
+  closePlayer();
+  playerSlug = slug;
+  playerName = name || slug;
+  netRetries = 0;
+  mediaRetries = 0;
+  $("playerTitle").textContent = playerName;
+  $("playerMask").hidden = false;
+  $("playerStats").textContent = "正在取清单…";
+  $("playerBadge").hidden = true;
+  $("playerTip").textContent =
+    "直播流本身就比电视台晚 2~3 个分片（这台约 10~15 秒）。进度条上的 0:18 是「当前可播窗口里的位置」，不是延迟在变大。";
+  stopStats();
+  statsTimer = setInterval(playerStats, 1000);
+
+  const url = `/live/${encodeURIComponent(slug)}.m3u8`;
+
+  // Safari / iOS 原生就能播 HLS，不需要也不该用 hls.js
+  if (v.canPlayType("application/vnd.apple.mpegurl")) {
+    v.src = url;
+    v.play().catch(() => {});
+    return;
+  }
+  if (!window.Hls || !window.Hls.isSupported()) {
+    failPlayer("这个浏览器不支持 HLS，请用 Chrome / Edge / Safari，或把地址复制到播放器里");
+    return;
+  }
+
+  hls = new Hls({
+    // 目标落后 2 个分片（约 10 秒）：再小一点上游只有 3 片，容易卡；
+    // 落后超过 5 片就加速播放追回来，而不是让延迟越滚越大
+    lowLatencyMode: true,
+    liveSyncDurationCount: 2,
+    liveMaxLatencyDurationCount: 5,
+    maxLiveSyncPlaybackRate: 1.25,
+    backBufferLength: 30,
+    manifestLoadingTimeOut: 15000,
+    fragLoadingTimeOut: 20000,
+  });
+  hls.loadSource(url);
+  hls.attachMedia(v);
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    v.play().catch(() => {
+      $("playerTip").textContent = "浏览器拦了自动播放，点一下画面中间的播放按钮即可。";
+    });
+  });
+  hls.on(Hls.Events.ERROR, (_evt, data) => {
+    if (!data.fatal) return;
+    if (data.type === Hls.ErrorTypes.NETWORK_ERROR && netRetries < 2) {
+      netRetries += 1;
+      $("playerStats").textContent = `网络抖动，第 ${netRetries} 次重试…`;
+      setTimeout(() => { if (hls) hls.startLoad(); }, 1500);
+      return;
+    }
+    if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries < 2) {
+      mediaRetries += 1;
+      $("playerStats").textContent = `解码出错，第 ${mediaRetries} 次修复…`;
+      if (hls) hls.recoverMediaError();
+      return;
+    }
+    const detail = data.details || data.type || "未知错误";
+    failPlayer(detail === "manifestLoadError"
+      ? "取不到清单——多半是上游正在限流，等一会儿再点；面板顶部会说明"
+      : detail);
+  });
+}
+
 async function refresh() {
   await loadStatus();
   await loadChannels();
@@ -314,6 +556,49 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btnCheckUpdate").addEventListener("click", checkUpdate);
   $("btnSaveSettings").addEventListener("click", saveSettings);
   $("search").addEventListener("input", () => renderChannels(cache));
+  if ($("showHidden")) $("showHidden").addEventListener("change", () => renderChannels(cache));
+
+  $("channelList").addEventListener("click", (e) => {
+    const play = e.target.closest("[data-play]");
+    if (play) {
+      openPlayer(play.dataset.play, play.dataset.name);
+      return;
+    }
+    const hide = e.target.closest("[data-hide]");
+    if (hide) {
+      setHidden(hide.dataset.hide, true);
+      return;
+    }
+    const unhide = e.target.closest("[data-unhide]");
+    if (unhide) {
+      setHidden(unhide.dataset.unhide, false);
+      return;
+    }
+    const group = e.target.closest("[data-hide-group]");
+    if (group) hideGroup(group.dataset.hideGroup);
+  });
+  if ($("btnUnhideAll")) $("btnUnhideAll").addEventListener("click", unhideAll);
+
+  $("btnClosePlayer").addEventListener("click", closePlayer);
+  $("btnGoLive").addEventListener("click", goLive);
+  $("btnCopyLive").addEventListener("click", async () => {
+    if (!playerSlug) return;
+    const url = `${location.origin}/live/${encodeURIComponent(playerSlug)}.m3u8`;
+    const btn = $("btnCopyLive");
+    try {
+      await navigator.clipboard.writeText(url);
+      btn.textContent = "已复制";
+      setTimeout(() => { btn.textContent = "复制地址"; }, 1200);
+    } catch (_) {
+      window.prompt("复制这个地址：", url);
+    }
+  });
+  $("playerMask").addEventListener("click", (e) => {
+    if (e.target === $("playerMask")) closePlayer();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("playerMask").hidden) closePlayer();
+  });
 
   // 用户正在改设置时不要被轮询覆盖
   ["setPlayMode", "setPublicUrl", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {

@@ -52,6 +52,18 @@ def _channels_from_result(result: dict) -> list[Channel]:
     return channels
 
 
+def _visible(channels: list[Channel], hidden: list[str]) -> list[Channel]:
+    """去掉面板里隐藏掉的台。
+
+    只过滤对外输出，result.json 里的原始条目一个不删——所以「恢复」是即时的，
+    不用等下一轮更新把台重新采集回来。
+    """
+    if not hidden:
+        return channels
+    blocked = set(hidden)
+    return [c for c in channels if c.name not in blocked]
+
+
 def _ysp_resolver(slug: str) -> tuple[str, str]:
     """中转层拿不到频道表之外的地址，这里的解析器只认 ysp 里的台。"""
     from . import ysp
@@ -103,7 +115,27 @@ class State:
             "public_url": s.public_url,
             "epg_url": s.epg_url,
             "epg_source": s.epg_source,
+            "hidden": s.hidden,
         }
+
+    def set_hidden(self, names: list[str], hidden: bool) -> list[str]:
+        """隐藏 / 恢复若干频道，立刻落盘。
+
+        对外的 m3u / txt 是每次请求现拼的，所以改完播放器重新拉一次列表就生效，
+        不用重新采集（采集是零请求的，但也没必要为改个显示多跑一轮）。
+        """
+        from .settings import clean_names
+
+        current = set(self.settings.hidden)
+        for name in clean_names(names):
+            if hidden:
+                current.add(name)
+            else:
+                current.discard(name)
+        value = sorted(current)
+        write_panel(self.settings.panel_path, {"hidden": value})
+        self.settings.panel["hidden"] = value
+        return value
 
     def apply_settings(self, values: dict) -> dict:
         """面板提交的设置：落盘 + 当场生效，不用重启容器。"""
@@ -295,6 +327,8 @@ def make_handler(state: State):
                     404,
                 )
                 return
+            # 面板上隐藏掉的台不出现在订阅里（原始数据还在，随时能恢复）
+            channels = _visible(channels, settings.hidden)
 
             base = self._base()
             logo_base = settings.logo_base or (f"{base}/logo" if base else "")
@@ -355,8 +389,48 @@ def make_handler(state: State):
             data = state.logos.get(name)
             self._send(200, data, "image/png", cache="public, max-age=86400")
 
+        _STATIC_TYPES = {
+            ".js": "application/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".ico": "image/x-icon",
+            ".woff2": "font/woff2",
+        }
+
+        def _static(self, path: str) -> None:
+            """面板的静态资源，限定在 web/ 目录内。
+
+            之前是两个写死的文件，加内置播放器要带 hls.js（约 400KB），
+            写死就太蠢了。这里只放行白名单后缀，并且挡住 ../ 穿越。
+            """
+            rel = unquote(path[len("/static/") :]).lstrip("/")
+            ctype = self._STATIC_TYPES.get(Path(rel).suffix.lower())
+            if not rel or not ctype:
+                self._json({"error": "not found", "path": path}, 404)
+                return
+            target = (WEB_DIR / rel).resolve()
+            try:
+                target.relative_to(WEB_DIR.resolve())
+            except ValueError:
+                self._json({"error": "not found", "path": path}, 404)
+                return
+            if not target.is_file():
+                self._json({"error": "not found", "path": path}, 404)
+                return
+            # 面板脚本改动频繁，必须让浏览器每次都回来问；第三方库体积大、不常变
+            cache = "public, max-age=604800" if rel.startswith("vendor/") else "no-cache"
+            self._send(200, target.read_bytes(), ctype, cache=cache)
+
         def log_message(self, fmt: str, *args) -> None:  # 静音，避免刷屏
             return
+
+        def handle_one_request(self) -> None:
+            # 播放器切台、关页面时直接断开，是常态；不接住会往 stderr 刷一大段栈
+            try:
+                super().handle_one_request()
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
 
         # ---------------- 路由 ----------------
         def do_GET(self) -> None:  # noqa: N802
@@ -364,10 +438,8 @@ def make_handler(state: State):
 
             if path in ("/", "/index.html"):
                 self._file(WEB_DIR / "index.html", "text/html; charset=utf-8")
-            elif path == "/static/app.js":
-                self._file(WEB_DIR / "app.js", "application/javascript; charset=utf-8")
-            elif path == "/static/style.css":
-                self._file(WEB_DIR / "style.css", "text/css; charset=utf-8")
+            elif path.startswith("/static/"):
+                self._static(path)
             elif path in ("/m3u", "/m3u8", "/playlist.m3u", "/list.m3u", "/result.m3u"):
                 # .m3u8 是 HLS 媒体清单的扩展名，播放器会当成「单个直播流」解析，
                 # 然后报「播放格式不受支持」——所以这个入口改成跳转到 .m3u
@@ -377,14 +449,22 @@ def make_handler(state: State):
                     self._playlist()
             elif path in ("/txt", "/playlist.txt", "/result.txt"):
                 result = load_result(settings) or {}
-                channels = _channels_from_result(result)
+                channels = _visible(_channels_from_result(result), settings.hidden)
                 if not channels:
                     self._json({"error": "结果尚未生成，请先更新一次"}, 404)
                     return
                 text, _ = writers.render_txt(channels, relay_base=self._base())
                 self._send(200, text.encode("utf-8"), "text/plain; charset=utf-8")
             elif path in ("/json", "/result.json"):
-                self._file(settings.data_dir / "result.json", "application/json; charset=utf-8")
+                result = load_result(settings)
+                if not result:
+                    self._json({"error": "结果尚未生成，请先更新一次"}, 404)
+                    return
+                hidden = set(settings.hidden)
+                if hidden:
+                    rows = [c for c in result.get("channels", []) or [] if c.get("name") not in hidden]
+                    result = dict(result, channels=rows, hidden=sorted(hidden))
+                self._json(result)
             elif path == "/epg.xml":
                 self._epg()
             elif path.startswith("/logo/"):
@@ -427,6 +507,7 @@ def make_handler(state: State):
                             "live_list": "/api/live",
                             "relay": "/relay/<slug>/p/<token>",
                             "settings": "/api/settings",
+                            "hidden": "/api/hidden",
                             "version": "/api/version?check=1",
                         },
                     }
@@ -435,7 +516,17 @@ def make_handler(state: State):
                 self._json({"settings": state.current_settings(), "epg": state.epg.stats()})
             elif path == "/api/channels":
                 result = load_result(settings) or {}
-                self._json({"generated_at": result.get("generated_at", ""), "channels": result.get("channels", [])})
+                hidden = set(settings.hidden)
+                rows = [
+                    dict(row, hidden=row.get("name") in hidden)
+                    for row in (result.get("channels", []) or [])
+                ]
+                self._json({
+                    "generated_at": result.get("generated_at", ""),
+                    "channels": rows,
+                    # 面板要能列出「已隐藏」并提供一键恢复，所以整份返回、只打标记
+                    "hidden": sorted(hidden),
+                })
             elif path == "/health":
                 self._json({"ok": True, "running": state.running})
             elif path == "/api/version":
@@ -463,24 +554,46 @@ def make_handler(state: State):
         def do_HEAD(self) -> None:  # noqa: N802
             self.do_GET()
 
+        def _body(self) -> dict | None:
+            """读 JSON 请求体；不合法时已经回过 400，返回 None。"""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(min(length, 64 * 1024)) if length else b"{}"
+                values = json.loads(raw.decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError) as exc:
+                self._json({"error": f"请求体不是合法 JSON：{exc}"}, 400)
+                return None
+            if not isinstance(values, dict):
+                self._json({"error": "需要一个 JSON 对象"}, 400)
+                return None
+            return values
+
         def do_POST(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
             if path == "/api/update":
                 started = state.trigger()
                 self._json({"started": started, "message": "已开始更新" if started else "已有任务在执行"})
             elif path == "/api/settings":
-                try:
-                    length = int(self.headers.get("Content-Length") or 0)
-                    raw = self.rfile.read(min(length, 64 * 1024)) if length else b"{}"
-                    values = json.loads(raw.decode("utf-8") or "{}")
-                    if not isinstance(values, dict):
-                        raise ValueError("需要一个 JSON 对象")
-                except (ValueError, UnicodeDecodeError) as exc:
-                    self._json({"error": f"请求体不是合法 JSON：{exc}"}, 400)
+                values = self._body()
+                if values is None:
                     return
                 updated = state.apply_settings(values)
                 state.log(f"[设置] 已更新 {', '.join(f'{k}={v}' for k, v in updated.items())}")
                 self._json({"ok": True, "settings": updated})
+            elif path == "/api/hidden":
+                values = self._body()
+                if values is None:
+                    return
+                names = values.get("names") or values.get("name") or []
+                flag = values.get("hidden", True)
+                if isinstance(flag, str):
+                    flag = flag.strip().lower() not in ("", "0", "false", "no", "off")
+                updated = state.set_hidden(names if isinstance(names, list) else [names], bool(flag))
+                state.log(
+                    f"[隐藏] {'隐藏' if flag else '恢复'} {', '.join(names if isinstance(names, list) else [names])}"
+                    f"，当前隐藏 {len(updated)} 个台"
+                )
+                self._json({"ok": True, "hidden": updated})
             else:
                 self._json({"error": "not found"}, 404)
 

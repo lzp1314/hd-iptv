@@ -80,11 +80,33 @@ def read_panel(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def clean_names(value) -> list[str]:
+    """把面板提交的频道名列表收敛成干净、去重的字符串列表。
+
+    频道名就是 channels.txt 里的那串字，不需要额外 id；限制条数和长度只是
+    防止有人往 panel.json 里塞进几兆垃圾。
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in value:
+        name = str(item or "").strip()[:64]
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= 500:
+            break
+    return out
+
+
 def coerce_panel(raw: dict) -> dict:
     """把面板提交的内容收敛成合法值，非法项直接丢掉。"""
     out: dict = {}
     for key, value in (raw or {}).items():
-        if key in ("public_url", "epg_url", "epg_source"):
+        if key == "hidden":
+            out[key] = clean_names(value)
+        elif key in ("public_url", "epg_url", "epg_source"):
             text = str(value or "").strip()
             out[key] = text.rstrip("/") if key == "public_url" else text
         elif key == "play_mode":
@@ -245,6 +267,18 @@ class Settings:
             return max(0.0, float(raw))
         except (TypeError, ValueError):
             return 96.0
+
+    @property
+    def hidden(self) -> list[str]:
+        """面板里隐藏掉的频道名。
+
+        隐藏只影响对外输出（订阅列表 / txt / JSON），原始采集结果照旧保留在
+        result.json 里——这样点一下「恢复」就回来了，不用重新跑一轮更新。
+        """
+        panel = self.panel.get("hidden")
+        if panel is not None:
+            return clean_names(panel)
+        return clean_names(self.get("output", "hidden", []))
 
     @property
     def play_mode(self) -> str:

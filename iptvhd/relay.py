@@ -193,7 +193,7 @@ class Relay:
         *,
         timeout: float = 8.0,
         seg_timeout: float = 20.0,
-        retry_gap: float = 45.0,
+        retry_gap: float = 20.0,
         playlist_ttl: float = 5.0,
         addr_ttl: float = 300.0,
         stale_max: float = 120.0,
@@ -480,7 +480,9 @@ class Relay:
         url, ua = self.upstream(slug)
         status, _, body = self._fetch(url, ua)
         if status in _GONE:
-            # 地址失效：换一个新的再来一次
+            # 地址失效或被限流：换一个新地址再试一次。中间停半秒——
+            # 403 多半是出口级限频，连着两次贴脸请求只会被拒得更狠。
+            time.sleep(0.4)
             url, ua = self.upstream(slug, fresh=True)
             status, _, body = self._fetch(url, ua)
         if status != 200 or not body:
