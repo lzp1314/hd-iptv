@@ -2,6 +2,7 @@
 
 **央视 + 卫视的高清直播，自动采集、自动测速、自动分发。零第三方依赖，一条命令跑在 NAS 上。**
 
+[![Version](https://img.shields.io/badge/version-0.8.1-blue.svg)](https://github.com/lzp1314/hd-iptv)
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -58,22 +59,10 @@ python -m iptvhd serve --port 9797
 频道列表每行都有「播放」，点了就在面板里放，不用装播放器。它走的是本机
 `/live/` 地址，跟你用什么播放器、什么 UA 没关系。
 
-状态栏里的「延迟 12.4s」才是真实延迟。进度条上的 `0:18` 会一路涨到 `0:35`、
-`0:50`——那是「当前缓冲在时间轴上的位置」在跟着分片往前滚，不是延迟在变大。
-上游只保留 3 个分片、5 秒一片，播放器必须落后 1~2 片才有缓冲，所以 10~15 秒
-是正常的；落后多了点「回到最新」跳回去。
-
-**播十几秒就停住不动？** 那不是延迟，是清单没往前滚。上游那张带 token 的清单
-地址偶尔会「冻住」：不报错、不 403，就是反复返回同一批分片，播放器把手里这
-十几秒播完就没有下一片了。项目里做了三层兜底：
-
-- 服务端盯 `#EXT-X-MEDIA-SEQUENCE`，同一个序号超过 10 秒没动就判定冻住，
-  自动换一张新票重取（10 秒最多换一次，不会把出口配额烧光）；
-- 面板播放器有看门狗：画面 4 秒不往前走就提示「等上游给下一段」，12 秒还不
-  动就整条重开一次，重开等于让服务端再换一次票；
-- `/live/` 的响应头带 `X-HD-Seq`（滚到第几片）和 `X-HD-Stale`（这次给的是不是
-  旧的那份）。F12 里看这两个值就能判断是上游卡住了还是网络断了；
-  面板「运行日志」里也会写「XXX 的清单冻在分片 N 已经 M 秒，换票也没换来新的」。
+直播流本身比电视台晚 2~3 个分片：上游只保留 3 个分片、5 秒一片，播放器必须
+落后 1~2 片才有缓冲，所以 10~15 秒是正常的。状态栏里的「延迟 12.4s」是真实
+延迟；进度条上的 `0:18` 会一路涨到 `0:35`、`0:50`，那是当前缓冲在时间轴上的位置
+跟着分片往前滚，不是延迟在变大。落后多了点「回到最新」跳回去。
 
 **隐藏不看的台**
 
@@ -222,7 +211,7 @@ python -m iptvhd --version
 | `/txt` `/json` | TXT 订阅 / 频道明细 |
 | `/epg.xml` | 节目单（只含自己的频道） |
 | `/logo/<频道名>.png` | 台标，服务端取一次存本地 |
-| `/live/<slug>.m3u8` | 单频道播放列表，服务端现换地址下发（分片由播放器直连） |
+| `/live/<slug>.m3u8` | 单频道播放列表，服务端现换地址下发；响应头 `X-HD-Seq` 标出当前分片序号 |
 | `/relay/<slug>/p/<token>` | 仅 `proxy` 模式下使用，播放器自动请求，不用手填 |
 | `/api/live` | 可用频道 slug 清单 |
 | `/api/status` | 运行状态、统计、设置、最近日志 |
