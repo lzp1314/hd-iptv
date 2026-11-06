@@ -106,7 +106,7 @@ class TestWindow(unittest.TestCase):
             relay._prefetch("cctv1")
 
         text, _, _seq = relay.playlist_info("cctv1")
-        self.assertEqual(text.count("#EXTINF"), 8, "窗口最多 8 片，不能无限长")
+        self.assertEqual(text.count("#EXTINF"), 12, "窗口最多 12 片，不能无限长")
         self.assertIn("114.ts", text)
         self.assertNotIn("100.ts", text, "旧分片要滚出去，否则播放器可能取到已被回收的地址")
 

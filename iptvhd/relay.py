@@ -186,10 +186,10 @@ class _SegmentCache:
 # 上游移出窗口了，只能跳到最新——表现就是「播一会儿停一下」「跳台」。把每次
 # 拿到的分片攒起来拼成更长的窗口，播放器才有缓冲可以吃，这才是别人家看起来
 # 顺畅的关键差别。
-_WINDOW_SEGMENTS = 8       # 最多保留 8 片，约 40 秒
+_WINDOW_SEGMENTS = 12      # 最多保留 12 片，约 60 秒——别人家扛限流的「余量」就来自这里
 _WINDOW_MAX_AGE = 12.0     # 窗口超过这么久没更新就當它不可信，重新同步取一次
 _PREFETCH_EVERY = 2.5      # 有人在看时，后台每隔这么久替播放器去要一次清单
-_ACTIVE_FOR = 20.0         # 这么久没人要清单就认为没人看，停止预取
+_ACTIVE_FOR = 30.0         # 这么久没人要清单就认为没人看，停止预取
 _FROZEN_AFTER = 10.0       # 分片序号这么久没往前滚，判定上游冻住
 
 
@@ -363,9 +363,12 @@ class Relay:
         self.failures = 0                                     # 累计失败次数
         self.stale_served = 0                                 # 用旧清单兜住的次数
         # 出口级限流：上游按 IP 限流，一旦被限，所有频道会一起 403。
-        # 这时继续换票只会把限流拖得更长，所以短暂拦住「没有缓存地址」的频道。
+        # 这时继续换票只会把限流拖得更长，所以进入「退避」：后台预取先停手，
+        # 让上游的计数缓一缓；退避时间随连续 403 指数拉长（上限 60 秒），
+        # 恢复后自动回落到正常节奏。播放器同步取仍允许，只是拿不到时软着陆重试。
         self._forbidden_hits = 0
         self._forbidden_until = 0.0
+        self._backoff_base = 8.0    # 首次退避时长，之后翻倍
         # 出口预算（令牌桶）：正常播放每个台 5 秒才要一次清单，很闲；但播放器
         # 刷新订阅、检测可用性时会几十秒内把每个台的 /live/xxx.m3u8 全 GET 一遍，
         # 一次几十个请求打上去，正好撞上游的按 IP 限频——被限之后连正在看的人
@@ -422,8 +425,9 @@ class Relay:
             raise RelayError(self._errors.get(slug, "上游暂时不可用，稍后自动重试"))
 
         if blocked and not hit:
-            # 整条出口正被上游限流：这个台连地址都没有，硬敲只会让所有人更久播不了
-            raise RelayError("上游限流中（403），等十几秒再换台")
+            # 整条出口正被上游限流：这个台连地址都没有，硬敲只会让所有人更久播不了。
+            # 别让播放器当成「这个台坏了」直接跳走——报一个稍后能自愈的错。
+            raise RelayError("上游限流冷却中，几秒后自动重试")
 
         try:
             url, ua = self._resolver(slug)
@@ -501,12 +505,13 @@ class Relay:
             self._errors[slug] = message
             self.failures += 1
             if "403" in message:
-                # 连续三个频道都被 403，基本可以认定是本机出口被限流，
-                # 而不是某个台单独坏了。停 20 秒，让上游的计数缓一缓。
+                # 连续 403 基本是本机出口被限流，而不是某个台坏了。进入退避：
+                # 第 1 次 8 秒，之后每次翻倍（16 / 32 / 60 封顶）。退避期间后台
+                # 预取停手，让上游计数缓一缓；恢复后自动回落到正常节奏。
                 self._forbidden_hits += 1
-                if self._forbidden_hits >= 3:
-                    self._forbidden_until = time.time() + 20.0
-                    self._forbidden_hits = 0
+                self._forbidden_until = time.time() + min(
+                    self._backoff_base * (2 ** (self._forbidden_hits - 1)), 60.0
+                )
             else:
                 self._forbidden_hits = 0
 
@@ -737,6 +742,11 @@ class Relay:
 
     def _prefetch(self, slug: str) -> None:
         """替正在观看的播放器去上游要一份新清单。所有调用方都不用等它。"""
+        # 退避期间停手：再敲只会把限流拖得更长。播放器手上的窗口够它再撑几十秒。
+        with self._lock:
+            backing_off = time.time() < self._forbidden_until
+        if backing_off:
+            return
         if not self._take_token(0):
             self.throttled += 1
             return

@@ -636,22 +636,22 @@ function openPlayer(slug, name, keepRestarts) {
     // 播放器会当成「返回得太快=没新东西」立刻再问一次，几十秒就把本机的
     // 上游配额抽干，接着清单拿不到、画面停在播完的那十几秒上。
     lowLatencyMode: false,
-    // 服务端把上游那 3 片拼成了 8 片（约 40 秒）的窗口，所以这里可以多落后
-    // 几片换取缓冲：目标落后 3 片（约 15 秒），手里还攥着 5 片可播。
-    // 落后超过 6 片就用 1.5 倍速追回来，别让延迟一路滚下去。
-    liveSyncDurationCount: 3,
-    liveMaxLatencyDurationCount: 6,
+    // 服务端把上游那 3 片拼成了 12 片（约 60 秒）的窗口。目标落后 5 片
+    // （约 25 秒），手里攥着 35 秒余量——上游限流断个几十秒也不怕。
+    // 落后超过 9 片（45 秒）才加速追，别让延迟一路滚下去。
+    liveSyncDurationCount: 5,
+    liveMaxLatencyDurationCount: 9,
     maxLiveSyncPlaybackRate: 1.5,
     backBufferLength: 30,
-    maxBufferLength: 40,
+    maxBufferLength: 60,
     manifestLoadingTimeOut: 15000,
     fragLoadingTimeOut: 20000,
     // 上游时不时回一两次 403/超时，重试要够多，别一次就判死
-    manifestLoadingMaxRetry: 5,
+    manifestLoadingMaxRetry: 8,
     manifestLoadingRetryDelay: 1000,
-    levelLoadingMaxRetry: 6,
+    levelLoadingMaxRetry: 8,
     levelLoadingRetryDelay: 1000,
-    fragLoadingMaxRetry: 6,
+    fragLoadingMaxRetry: 8,
     fragLoadingRetryDelay: 800,
   });
   hls.loadSource(url);
@@ -664,12 +664,12 @@ function openPlayer(slug, name, keepRestarts) {
   hls.on(Hls.Events.ERROR, (_evt, data) => {
     if (!data.fatal) return;
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-      // 先原地重载清单；还是不行就整条重开。整条重开会让服务端重新换票，
-      // 这正是「清单冻住」唯一有效的解法。
+      // 先原地重载清单，保住已经缓冲的窗口——限流时整条重开反而把
+      // 救命的那几十秒缓冲全丢掉。只有连续多次原地重载都失败，才整条重开。
       netRetries += 1;
-      if (netRetries <= 2) {
-        $("playerStats").textContent = `网络抖动，第 ${netRetries} 次重试…`;
-        setTimeout(() => { if (hls) hls.startLoad(); }, 1200);
+      if (netRetries <= 6) {
+        $("playerStats").textContent = `上游抖动，第 ${netRetries} 次续传…`;
+        setTimeout(() => { if (hls) hls.startLoad(); }, 1500);
       } else {
         restartPlayer(`取不到新的清单（第 ${netRetries} 次），重连中…`);
       }
