@@ -534,11 +534,34 @@ function openPlayer(slug, name) {
       if (hls) hls.recoverMediaError();
       return;
     }
-    const detail = data.details || data.type || "未知错误";
-    failPlayer(detail === "manifestLoadError"
-      ? "取不到清单——多半是上游正在限流，等一会儿再点；面板顶部会说明"
-      : detail);
+    failPlayer(playerErrorText(data));
   });
+}
+
+// 把 hls.js 的错误码翻译成「下一步该干嘛」：绝大多数人卡在这里时，
+// 真正需要知道的是去改哪个开关，而不是 fragLoadError 这种内部名词。
+function playerErrorText(data) {
+  const detail = data.details || "";
+  const status = data.response && data.response.code;
+  if (detail === "manifestLoadError" || detail === "manifestLoadTimeOut") {
+    return "取不到清单——多半是上游正在限流，等一分钟再点；面板顶部会说明";
+  }
+  if (detail === "fragLoadError" || detail === "fragLoadTimeOut"
+      || detail === "levelLoadError" || detail === "levelLoadTimeOut") {
+    if (status === 403) {
+      return "分片被 CDN 拒了（403）——这个台刚到时限流，或分片已过期，换台再回来。"
+        + "多个台都这样，就到「运行设置」把播放方式换成 proxy 再试。";
+    }
+    return "分片取不到，多半是 CDN 不允许浏览器直连（跨域被拦）。"
+      + "到「运行设置」把播放方式改成 proxy 保存，再点这个台。";
+  }
+  if (detail === "bufferStalledError") {
+    return "缓冲停住了——点右下角「回到直播」追上去。";
+  }
+  if (detail === "fragParsingError") {
+    return "分片解不出来，这个台的编码浏览器啃不动，换个台或者用外部播放器。";
+  }
+  return detail || data.type || "未知错误";
 }
 
 async function refresh() {
