@@ -42,13 +42,19 @@ def _logo(channel: Channel, logo_base: str) -> str:
 
 
 def _play_url(stream: Stream, relay_base: str) -> str:
-    """优先给本机转发地址。
+    """有 slug 就给本机地址。
 
-    直连地址对 UA 敏感、且有寿命；走本机转发后播放器用什么客户端都能放，
-    地址也不会过期。``relay_base`` 为空时退回直连，便于离线导出。
+    直连地址对 UA 敏感、且有寿命；走本机下发清单后播放器用什么客户端都能放，
+    地址也不会过期。没有对外地址时给相对路径——播放器按 m3u 所在地址解析，
+    少数不解析相对路径的播放器由服务端现拼时补全（``/playlist.m3u`` 走的就是
+    这条路径）。只有完全没有 slug 的流才退回它自己的地址。
     """
-    if relay_base and stream.slug:
-        return f"{relay_base.rstrip('/')}/live/{stream.slug}.m3u8"
+    if stream.slug:
+        base = relay_base.rstrip("/") if relay_base else ""
+        if base:
+            return f"{base}/live/{stream.slug}.m3u8"
+        # 没有对外地址：能直连就直连（离线导出时有用），否则给相对路径
+        return stream.url or f"/live/{stream.slug}.m3u8"
     return stream.url
 
 

@@ -304,8 +304,10 @@ class YangshipinCollector(Collector):
         # 接口对并发敏感，默认串行；调大只会更容易被限流，不建议
         workers = max(1, int(self.config.get("workers", 1)))
         # 换地址时顺手读一片：分辨率、码率、测速一次拿全。
-        # 探测阶段因此不再向同一个 CDN 打第二次（那一次拿的还是过期地址）。
-        verify = bool(self.config.get("verify_segment", True))
+        # 但每台多一次请求，64 个台就是多 64 次——上游按出口 IP 限流，
+        # 批量跑时这 64 次正好是压垮骆驼的那一下，所以默认关闭，
+        # 想要真实分辨率和码率再打开。
+        verify = bool(self.config.get("verify_segment", False))
 
         rows = [
             row for row in ysp.CHANNELS
@@ -314,6 +316,32 @@ class YangshipinCollector(Collector):
         if not rows:
             raise ValueError("筛选条件没有匹配到任何频道")
 
+        self.notes: list[str] = []
+
+        # 默认**不逐台向上游要地址**。这一步是整套流程里唯一会「一次打五十多个
+        # 请求」的地方，而上游正是按出口 IP 限频的：一轮全量取票之后，这个 IP
+        # 可能在几十分钟到几小时内对所有台都回 403——表现就是「明明采到了 N 个台，
+        # 播放器里却大半放不了」。列表里的地址本来也是播放时由中转层现换的，
+        # 采集阶段拿地址对播放毫无帮助，省掉是纯赚。
+        #
+        # 需要「这轮到底有哪几个台真能播」的离线校验时，在 sources.toml 里加
+        # resolve = true，代价是要多打五十多个请求，跑完记得别再连点「立即更新」。
+        if not bool(self.config.get("resolve", False)):
+            return self._tag([
+                Stream(
+                    url="",
+                    raw_name=name,
+                    group=_ysp_group(slug),
+                    slug=slug,
+                    tvg_id=name.split()[0].replace("-", ""),
+                    hint_height=ysp.DEFN_HEIGHT.get(defn_override or defn, 1080),
+                    height=ysp.DEFN_HEIGHT.get(defn_override or defn, 1080),
+                    playlist_only=True,
+                    ok=True,
+                )
+                for slug, name, _cnlid, _livepid, defn in rows
+            ])
+
         probe_client = HttpClient(
             user_agent=ysp.UA,
             timeout=client.timeout,
@@ -321,7 +349,6 @@ class YangshipinCollector(Collector):
             proxy=client.proxy,
         )
 
-        self.notes = []
         results: dict[str, Stream] = {}
 
         def resolve_one(row: tuple[str, str, str, str, str]) -> tuple[str, Stream | None, str]:
@@ -350,8 +377,9 @@ class YangshipinCollector(Collector):
                 user_agent=ysp.UA,
                 first_segment=first_seg,
                 playlist_only=True,
-                # 采集阶段已经连分片一起验过，探测阶段直接采信这个时间点
-                verified_at=time.time() if verify else 0.0,
+                # 清单刚刚验证过是 200 且带分片，探测阶段直接采信这个时间点，
+                # 不再向同一个 CDN 发第二次请求（批量探测是最容易触发限流的动作）
+                verified_at=time.time(),
             )
             if verify:
                 probe.apply_sample(stream, meta)

@@ -27,12 +27,16 @@ services:
 
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      # 定时刷新间隔（小时）。央视频地址约 4 小时换一次 token，别设太长。
-      HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-3}
-      # 画质区间：720 起步，只有 720P 的台不会被丢掉；上限 2160，源里有 4K 就取 4K
+      # 定时刷新间隔（小时）。每轮要把每个台各取一次清单，上游按 IP 限频，
+      # 别调太勤；播放地址是按需换票的，列表过期不影响观看。
+      HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-24}
+      # 画质区间：720 起步（只有 720P 的台留着），上限 1080（匿名接口没有真 4K）
       HDIPTV_MIN_HEIGHT: ${HDIPTV_MIN_HEIGHT:-720}
-      HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-2160}
-      # 分片缓存上限（MB）：多客户端共用，减少向上游取片的次数，避免被限流
+      HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-1080}
+      # 播放方式：direct = 清单本机下发、分片播放器直连 CDN（最流畅）；
+      # proxy = 分片也经本机转发（只有直连放不出来时才用）
+      HDIPTV_PLAY_MODE: ${HDIPTV_PLAY_MODE:-direct}
+      # 分片缓存上限（MB）：只对 proxy 模式生效
       HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
       # 对外地址。留空即可：列表按请求的域名端口现拼，套了反代也自动用外网地址；
       # 只有反代不透传 Host 头时才需要填，例如 https://tv.example.com:8443

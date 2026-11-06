@@ -35,7 +35,7 @@ name = "hd-iptv"
 data_dir = "output"
 
 [update]
-interval_hours = 6
+interval_hours = 24
 run_on_start = true
 
 [fetch]
@@ -50,7 +50,7 @@ concurrency = 24
 sample_bytes = 262144
 min_speed_mbps = 1.5
 min_height = 720
-max_height = 2160
+max_height = 1080
 max_per_channel = 4
 allow_unknown_resolution = false
 probe_playlist_children = true
@@ -58,6 +58,7 @@ probe_playlist_children = true
 [relay]
 playlist_ttl = 5
 cache_mb = 96
+mode = "direct"
 
 [epg]
 source = "https://epg.pw/xmltv/epg_CN.xml"
@@ -86,6 +87,10 @@ def coerce_panel(raw: dict) -> dict:
         if key in ("public_url", "epg_url", "epg_source"):
             text = str(value or "").strip()
             out[key] = text.rstrip("/") if key == "public_url" else text
+        elif key == "play_mode":
+            text = str(value or "").strip().lower()
+            if text in ("direct", "proxy"):
+                out[key] = text
         elif key in PANEL_BOUNDS:
             try:
                 num = float(value)
@@ -177,8 +182,8 @@ class Settings:
 
     @property
     def max_height(self) -> int:
-        """画质上限。默认 2160：源里真有 4K 就取，没有也不影响。"""
-        return int(os.environ.get("HDIPTV_MAX_HEIGHT") or self.get("probe", "max_height", 2160))
+        """画质上限。默认 1080：4K 档匿名接口拿不到真 4K，留着只会多几个坏台。"""
+        return int(os.environ.get("HDIPTV_MAX_HEIGHT") or self.get("probe", "max_height", 1080))
 
     @property
     def max_per_channel(self) -> int:
@@ -240,6 +245,19 @@ class Settings:
             return max(0.0, float(raw))
         except (TypeError, ValueError):
             return 96.0
+
+    @property
+    def play_mode(self) -> str:
+        """播放方式：``direct``（清单本机下发、分片直连 CDN）或 ``proxy``（全转发）。
+
+        实测只有 direct 能稳定播：全转发时本机去拉分片会被平台当成异常流量回 403，
+        而播放器自己直连带着 TLS 会话复用，反而没事。留在面板上是因为个别
+        播放器/网络环境可能需要退回全转发。
+        """
+        panel = self.panel_get("play_mode")
+        raw = panel if panel is not None else os.environ.get("HDIPTV_PLAY_MODE") or self.get("relay", "mode", "direct")
+        text = str(raw or "").strip().lower()
+        return text if text in ("direct", "proxy") else "direct"
 
     @property
     def interval_hours(self) -> float:

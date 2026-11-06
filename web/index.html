@@ -66,10 +66,17 @@
       <button id="btnSaveSettings" class="btn primary">保存</button>
     </div>
     <p class="hint">
-      保存后立刻生效，不用重启容器。频道地址拿到后会一直用，只有被上游拒绝才换新的；
-      这里的「清单缓存」是播放器每次取清单时多久真的去上游要一次，嫌卡就调大，嫌慢就调小。
+      保存后立刻生效，不用重启容器。播放地址是<strong>播放时现换</strong>的，列表多久更新一次
+      都不影响能不能放；「清单缓存」是播放器每次取清单时多久真的去上游要一次，
+      嫌卡就调大。上游按 IP 限频，别把「自动更新间隔」调太勤，也别对着一堆台连点重试。
     </p>
     <div class="form">
+      <label>播放方式
+        <select id="setPlayMode">
+          <option value="direct">直连（推荐）—— 清单由本机下发，分片播放器直连 CDN</option>
+          <option value="proxy">经 NAS 转发 —— 播放器直连放不出来时才用</option>
+        </select>
+      </label>
       <label>对外地址
         <input id="setPublicUrl" type="text" placeholder="留空 = 按访问地址自动判断">
       </label>
@@ -79,7 +86,7 @@
       <label>播放清单缓存（秒）
         <input id="setTtl" type="number" min="0.5" max="60" step="0.5">
       </label>
-      <label>分片缓存（MB）
+      <label>分片缓存（MB，仅转发模式）
         <input id="setCache" type="number" min="0" max="4096" step="8">
       </label>
       <label>节目单源（留空关闭节目单）

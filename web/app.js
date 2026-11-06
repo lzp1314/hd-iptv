@@ -91,10 +91,13 @@ async function loadStatus() {  try {
           "已经播着的台不受影响，这时候连切台会更容易卡。";
       } else if (relay.failures > 0) {
         const detail = (relay.errors && relay.errors[0]) ? `（${relay.errors[0]}）` : "";
+        const proxy = relay.mode === "proxy";
         banner.hidden = false;
         banner.textContent =
-          `上游最近拒绝 ${relay.failures} 次请求，已用缓存顶住 ${relay.stale_served || 0} 次${detail}。` +
-          "这段时间画面可能卡顿，通常一两分钟自动恢复；恢复前少切台能少触发请求，也可以把「播放清单缓存」调大一点。";
+          `取清单时上游拒绝过 ${relay.failures} 次${detail}，其中 ${relay.stale_served || 0} 次用上一份清单顶住了。` +
+          (proxy
+            ? "当前是「经 NAS 转发」模式，分片也从本机走，被平台判成异常流量的概率高——建议把播放方式切回「直连」。"
+            : "分片由播放器直连 CDN，不受影响；偶尔切台失败重试一次即可。");
       } else {
         banner.hidden = true;
       }
@@ -117,6 +120,7 @@ async function loadStatus() {  try {
 
 function fillSettings(s) {
   if (settingsDirty) return;
+  if ($("setPlayMode")) $("setPlayMode").value = s.play_mode || "direct";
   if ($("setPublicUrl")) $("setPublicUrl").value = s.public_url || "";
   if ($("setInterval")) $("setInterval").value = s.interval_hours != null ? s.interval_hours : "";
   if ($("setTtl")) $("setTtl").value = s.playlist_ttl != null ? s.playlist_ttl : "";
@@ -128,6 +132,7 @@ async function saveSettings() {
   const btn = $("btnSaveSettings");
   const note = $("settingsNote");
   const payload = {
+    play_mode: $("setPlayMode") ? $("setPlayMode").value : "direct",
     public_url: $("setPublicUrl").value.trim(),
     interval_hours: Number($("setInterval").value || 0),
     playlist_ttl: Number($("setTtl").value || 2),
@@ -311,7 +316,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("search").addEventListener("input", () => renderChannels(cache));
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPublicUrl", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
+  ["setPlayMode", "setPublicUrl", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });

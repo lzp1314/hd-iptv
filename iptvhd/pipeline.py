@@ -95,7 +95,8 @@ def _dedupe(streams: list[Stream]) -> list[Stream]:
     seen: set[str] = set()
     out: list[Stream] = []
     for s in streams:
-        key = s.url.strip()
+        # 采集阶段可以只给 slug、不给地址（地址在播放时现换），这种条目按 slug 认
+        key = s.url.strip() or (f"slug:{s.slug}" if s.slug else "")
         if not key or key in seen:
             continue
         seen.add(key)

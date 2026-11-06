@@ -30,7 +30,14 @@
 name = "央视频"
 type = "yangshipin"
 enabled = true
-workers = 4
+# 默认只登记频道、不逐台向上游要地址：地址在播放时由中转层现换，采集阶段
+# 拿它没有意义，而「一次打五十多个请求」正是被上游按 IP 限频、之后所有台
+# 都 403 的主因。留 false 就是零请求。
+# 想在命令行走一遍真实校验（`python -m iptvhd update` 看哪些台真能播）再改 true，
+# 代价是多打五十多个请求，跑完别马上再点「立即更新」。
+resolve = false
+# 只在 resolve = true 时生效：顺手读一片，拿到真实分辨率和码率（每台多一次请求）
+verify_segment = false
 # groups = ["央视", "卫视"]
 # channels = ["cctv1", "hnws"]
 

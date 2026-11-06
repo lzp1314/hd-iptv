@@ -94,6 +94,14 @@ def probe_one(stream: Stream, client: HttpClient, sample_bytes: int = 262144) ->
 
     部分平台（央视频）要求特定 UA 才放行分片，所以流自带 UA 时优先用它。
     """
+    if stream.playlist_only and not stream.url:
+        # 采集阶段只登记了频道、没取地址：能不能播由播放时的中转层决定，
+        # 这里不该为它向上游发请求（那正是批量探测被限流的来源）
+        stream.ok = True
+        if not stream.height:
+            stream.height = stream.hint_height
+        return stream
+
     if stream.playlist_only and stream.first_segment:
         return _probe_prefetched(stream, client, sample_bytes)
 

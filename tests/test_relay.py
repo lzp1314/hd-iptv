@@ -30,8 +30,10 @@ https://hlsliveali-cdn.ysp.cctv.cn/seg-2.ts
 class FakeRelay(Relay):
     """不联网的 Relay：把上游响应写死。"""
 
-    def __init__(self, pages: dict[str, tuple[int, str]]):
-        super().__init__(lambda slug: ("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8", "qqlive"))
+    def __init__(self, pages: dict[str, tuple[int, str]], **options):
+        super().__init__(
+            lambda slug: ("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8", "qqlive"), **options
+        )
         self.pages = pages
         self.asked: list[str] = []
 
@@ -98,14 +100,26 @@ class RelayTest(unittest.TestCase):
         self.assertNotIn("=", encode(url))  # 放进路径里不能带填充符
         self.assertEqual(decode("!!!not-base64!!!"), "")
 
-    def test_playlist_rewrites_everything(self):
+    def test_playlist_direct_by_default(self):
+        """默认 direct：清单里换成上游绝对地址，分片让播放器直连 CDN。
+
+        实测全代理时本机去拉分片会被平台回 403（每片一次裸请求，被判成异常
+        流量），只有清单经本机、分片直连才稳定——所以这是默认，不能随手改回去。
+        """
         relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)})
+        text = relay.playlist("cctv1")
+        self.assertIn("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/index.m3u8", text)
+        self.assertNotIn("/relay/", text)
+        self.assertNotIn("\nindex.m3u8", text)  # 相对地址必须换成绝对地址
+        self.assertEqual(relay.stats()["mode"], "direct")
+
+    def test_proxy_mode_rewrites_everything(self):
+        """切成 proxy 才把分片也换成本机地址（给直连放不出来的播放器兜底）。"""
+        relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)}, mode="proxy")
         text = relay.playlist("cctv1")
         self.assertIn("/relay/cctv1/p/", text)
         self.assertNotIn("ysp.cctv.cn", text)  # 播放器不该看到上游域名
-        self.assertNotIn("\nindex.m3u8", text)
 
-        # 再取子清单：分片和密钥也要一起改写
         token = text.split("/relay/cctv1/p/")[1].split("\n")[0].strip()
         self.assertTrue(decode(token).startswith("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/"))
         code, ctype, body, _extra = relay.resource("cctv1", token)
@@ -116,9 +130,9 @@ class RelayTest(unittest.TestCase):
         self.assertIn('URI="/relay/cctv1/p/', media)
         self.assertEqual(media.count("/relay/cctv1/p/"), 3)  # 密钥 + 2 个分片
 
-    def test_playlist_uses_absolute_urls_when_prefix_given(self):
-        """给了对外地址就写全路径：部分播放器不解析相对路径。"""
-        relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)})
+    def test_proxy_mode_uses_absolute_urls_when_prefix_given(self):
+        """proxy 模式给了对外地址就写全路径：部分播放器不解析相对路径。"""
+        relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)}, mode="proxy")
         text = relay.playlist("cctv1", "http://192.168.1.10:9797")
         self.assertIn("http://192.168.1.10:9797/relay/cctv1/p/", text)
 
@@ -128,6 +142,13 @@ class RelayTest(unittest.TestCase):
         self.assertIn('URI="http://tv.example.com:8443/relay/cctv1/p/', media)
         # 内网、外网两套地址各自缓存，别互相顶掉
         self.assertEqual(len(relay.stats()["playlists"]), 1)
+
+    def test_switch_mode_clears_cached_playlists(self):
+        """切换播放方式要清掉已改写的清单，否则面板改了设置却不生效。"""
+        relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)})
+        self.assertNotIn("/relay/", relay.playlist("cctv1"))
+        relay.configure(mode="proxy")
+        self.assertIn("/relay/", relay.playlist("cctv1"))
 
     def test_playlist_retries_once_on_403(self):
         relay = FakeRelay({"1.m3u8": (403, "")})
@@ -213,6 +234,23 @@ class RelayPolicyTest(unittest.TestCase):
         self.assertEqual(body, b"TS-DATA")
         self.assertIn("mp2t", ctype)
         self.assertEqual(relay.attempts, 2)
+
+    def test_budget_serves_stale_instead_of_hitting_upstream(self):
+        """播放器批量扫台时，配额用完就交旧清单，不能每个台都去撞上游。
+
+        这是「一被限流连正在看的台也一起 403」的防线：请求量由本机控制，
+        不由播放器的扫台节奏决定。
+        """
+        relay = CountingRelay()
+        first = relay.playlist("cctv1")
+        before = relay.calls
+        relay._playlist_ttl = 0.0                    # 让缓存立刻过期
+        relay._take_token = lambda wait=0.0: False   # 配额用完
+        again = relay.playlist("cctv1")
+        self.assertEqual(again, first)               # 返回上一份清单
+        self.assertEqual(relay.calls, before)        # 没有额外解析
+        self.assertEqual(relay.throttled, 1)
+        self.assertEqual(relay.stale_served, 1)
 
     def test_stats_shape(self):
         relay = CountingRelay()

@@ -34,12 +34,14 @@ def _channels_from_result(result: dict) -> list[Channel]:
         streams = []
         for item in row.get("streams", []) or []:
             url = str(item.get("url") or "")
-            if not url:
+            slug = str(item.get("slug") or "")
+            # 采集阶段可以只登记 slug、不取地址（地址在播放时现换）
+            if not url and not slug:
                 continue
             streams.append(
                 Stream(
                     url=url,
-                    slug=str(item.get("slug") or ""),
+                    slug=slug,
                     height=int(item.get("height") or 0),
                     width=int(item.get("width") or 0),
                 )
@@ -73,11 +75,12 @@ class State:
         self.last_error = ""
         self.report: dict = {}
         self.logs: list[str] = []
-        # 清单与分片的中转：播放器只跟本机说话，UA 由服务端代劳
+        # 清单由本机取（用上游认的 UA），分片默认让播放器直连 CDN
         self.relay = Relay(
             _ysp_resolver,
             playlist_ttl=settings.playlist_ttl,
             cache_bytes=int(settings.relay_cache_mb * 1024 * 1024),
+            mode=settings.play_mode,
         )
         self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
         self.logos = Logos(settings.data_dir / "logos")
@@ -96,6 +99,7 @@ class State:
             "interval_hours": s.interval_hours,
             "playlist_ttl": s.playlist_ttl,
             "cache_mb": int(s.relay_cache_mb),
+            "play_mode": s.play_mode,
             "public_url": s.public_url,
             "epg_url": s.epg_url,
             "epg_source": s.epg_source,
@@ -110,6 +114,7 @@ class State:
             self.relay.configure(
                 playlist_ttl=self.settings.playlist_ttl,
                 cache_bytes=int(self.settings.relay_cache_mb * 1024 * 1024),
+                mode=self.settings.play_mode,
             )
             if "epg_source" in clean:
                 # 换了节目单源就把旧的清掉，免得播放器拿到对不上的节目单
@@ -249,12 +254,13 @@ def make_handler(state: State):
 
         # ---------------- 播放 ----------------
         def _live(self, slug: str) -> None:
-            """返回改写后的播放清单，分片同样走本机转发。
+            """返回改写后的播放清单。
 
-            早先这里是 302 跳到上游地址，但跳转只能换地址、换不了 User-Agent：
-            播放器取 HLS 子清单和分片时用的仍是自己的 UA，照样被上游拒掉，
-            现象就是列表里只有一个台能放。改成整条链路本机转发之后，
-            播放器用什么 UA 都无所谓了。
+            清单必须由本机取：上游只放行它自己的 UA，播放器拿自己的 UA 去要
+            m3u8 会被回 403——这就是「列表里只有一个台能播」的老问题。
+            取回来之后，清单里的分片地址默认换成上游绝对地址，让播放器**直连
+            CDN**；经本机转发分片反而会被平台判成异常流量回 403（见 relay 模块
+            开头的说明），所以这里不再代劳。
             """
             from . import ysp
 
@@ -402,8 +408,10 @@ def make_handler(state: State):
                         "logos": state.logos.stats(),
                         # 上游被限流时面板要能说清楚，而不是只让用户看到画面卡住
                         "relay": {
+                            "mode": relay_stats.get("mode", "direct"),
                             "failures": relay_stats["failures"],
                             "stale_served": relay_stats["stale_served"],
+                            "throttled": relay_stats.get("throttled", 0),
                             "blocked_for": relay_stats.get("blocked_for", 0),
                             "plays": len(relay_stats["cached"]),
                             "errors": list(relay_stats["errors"].values())[:3],

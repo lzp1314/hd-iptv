@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import unittest
 
-from iptvhd.generators import CctvCollector, TemplateCollector, GENERATORS
+from iptvhd import ysp
+from iptvhd.generators import CctvCollector, TemplateCollector, YangshipinCollector, GENERATORS
 from iptvhd.hls import guess_height
 from iptvhd.models import Stream
+from iptvhd.net import HttpClient
 from iptvhd.pipeline import _filter
 from iptvhd.settings import Settings
 
@@ -35,6 +37,48 @@ class TestCctvGenerator(unittest.TestCase):
         streams = CctvCollector(name="cctv", config=cfg).collect(None)
         names = {s.raw_name for s in streams}
         self.assertEqual(names, {"CCTV-1 综合", "CCTV-13 新闻"})
+
+
+class TestYangshipinGenerator(unittest.TestCase):
+    """央视频取源器默认只登记频道，一个请求都不发。
+
+    这是防「出口 IP 被限流」的核心：一轮全量取票（五十多个请求）打上去，
+    之后所有台都会 403 几十分钟到几小时，播放器里就是「大半台放不了」。
+    """
+
+    def test_default_makes_no_request(self):
+        def boom(*a, **k):  # noqa: ANN001
+            raise AssertionError("默认不该向上游发请求")
+
+        original = ysp.resolve
+        ysp.resolve = boom
+        try:
+            streams = YangshipinCollector(name="ysp", config={}).collect(None)
+        finally:
+            ysp.resolve = original
+        self.assertGreater(len(streams), 50)
+        self.assertTrue(all(s.slug and not s.url for s in streams))
+        # 剧场频道在上游只认 720P 档，其余都是 1080P
+        self.assertTrue(all(s.ok and s.height in (1080, 720) for s in streams))
+
+    def test_resolve_option_opt_in(self):
+        """显式打开 resolve 才会去要地址——留给命令行做离线校验。"""
+        calls = []
+
+        def fake_resolve(cnlid, livepid, defn, client, **kw):  # noqa: ANN001
+            calls.append(cnlid)
+            return "https://hlsliveali-cdn.ysp.cctv.cn/A/1.m3u8", {}, "https://hlsliveali-cdn.ysp.cctv.cn/A/1.ts"
+
+        original = ysp.resolve
+        ysp.resolve = staticmethod(fake_resolve)
+        try:
+            streams = YangshipinCollector(
+                name="ysp", config={"resolve": True, "channels": ["cctv1"]}
+            ).collect(HttpClient(user_agent="qqlive", timeout=5, retries=0))
+        finally:
+            ysp.resolve = original
+        self.assertEqual(len(streams), 1)
+        self.assertTrue(calls and streams[0].url.startswith("https://"))
 
 
 class TestTemplateGenerator(unittest.TestCase):

@@ -1,26 +1,33 @@
-"""本地中转：把需要特殊请求头的 HLS 清单和分片转给播放器。
+"""播放清单改写：由本机用正确的请求头取清单，分片交给播放器直连。
 
 有些 CDN 只放行自家客户端的 User-Agent。HTTP 的 m3u 语法里虽然有
 ``#EXTVLCOPT:http-user-agent=``，但播放器请求 HLS 的子清单和分片时会换成
 自己的 UA，于是主清单能打开、画面却出不来——表现就是"列表里只有一个台能播"。
 
-中转层用正确的 UA 向上游取，把 m3u8 里的每一行改写成 ``/relay/...`` 形式的
-本地地址，分片也是本机转手。播放器只跟本机说话，UA 不再是问题。
+**所以清单必须由本机取**（用上游认的 UA）。但**分片一定要让播放器直连 CDN**，
+不能经本机转发——这是实测出来的关键差别：同一条流，全部经本机代理时，本机去
+拉分片会被平台回 403（每片一次裸请求，被判成异常流量），而只在清单这一跳经本机、
+分片直连时，任何播放器都能稳定播。区别只在于「谁去拉分片」：播放器连着 TLS
+会话、带 keep-alive，本机代理则是几百个孤立的短连接。
+
+默认因此是 ``direct`` 模式：改写清单里的每一行成**上游绝对地址**，播放器直连。
+少数播放器（或 CDN 对来源 IP 挑剔时）需要旧的全代理行为，把模式切成 ``proxy``
+即可——那时的分片才会走 ``/relay/...``。
 
 **为什么播放器会「看十几秒就跳到下一个台」**：播放器把列表里的每一条当成一段
 媒体，某一条一旦取不到（4xx/5xx、超时），它就顺延播下一条——于是失败一次等于
 跳一个台。上游对同一 IP 的请求频率很敏感，播放器刷新清单加上多客户端同时看，
 很容易撞上拒绝。所以这里的策略是「宁可慢一点、也别让播放器看到失败」：
 
-- 清单缓存 2 秒，同一时刻的并发请求共用一次上游请求
+- 清单缓存 5 秒，同一时刻的并发请求共用一次上游请求
 - 清单拉取失败时**返回上一份成功的清单**（最多 120 秒），播放器不会跳台
-- 分片按内容缓存（同一片不会变），重复请求、拖动、多客户端都不再打上游
+- 分片按内容缓存（同一片不会变），重复请求、拖动、多客户端都不再打上游（仅 proxy 模式）
 - 分片被拒时先等 250ms 重试一次，仍失败才报错——分片失败播放器只会重试这一片，
   不会跳到下一个台，所以这里可以如实报错
 - 地址拿到后一直用，只有上游真的拒绝（401/403/404/410）才换新的，且换地址有
   45 秒冷却，避免失败时把接口敲爆
 
-安全：中转目标只允许上游自己的域名，避免变成一个可以访问任意地址的代理。
+安全：proxy 模式下中转目标只允许上游自己的域名，避免变成一个可以访问任意地址的代理。
 """
 
 from __future__ import annotations
@@ -45,6 +52,9 @@ _GONE = (401, 403, 404, 410)
 
 # 分片被拒时，重试前的等待
 _RETRY_PAUSE = 0.25
+
+# 取清单/分片时带的 Referer
+_REFERER = "https://live.cctv.cn/"
 
 
 def allowed(url: str) -> bool:
@@ -166,10 +176,15 @@ class _SegmentCache:
 
 
 class Relay:
-    """按频道缓存上游地址，并把清单改写成指向本机的地址。
+    """按频道缓存上游地址，并把清单改写成播放器能直接用的形式。
 
     ``resolver(slug)`` 应该返回 ``(playurl, 该流需要的 UA)``；调用方可传
     自己的实现，测试里可以塞假的。
+
+    ``mode``:
+
+    ``direct``  清单里的地址换成上游绝对地址，分片由播放器直连 CDN（默认，最流畅）
+    ``proxy``   分片也经本机转发，只在播放器直连放不出来时用
     """
 
     def __init__(
@@ -184,8 +199,10 @@ class Relay:
         stale_max: float = 120.0,
         cache_bytes: int = 96 * 1024 * 1024,
         cache_ttl: float = 300.0,
+        mode: str = "direct",
     ):
         self._resolver = resolver
+        self._mode = mode if mode in ("direct", "proxy") else "direct"
         self._timeout = timeout
         self._seg_timeout = seg_timeout
         self._retry_gap = retry_gap
@@ -205,6 +222,34 @@ class Relay:
         # 这时继续换票只会把限流拖得更长，所以短暂拦住「没有缓存地址」的频道。
         self._forbidden_hits = 0
         self._forbidden_until = 0.0
+        # 出口预算（令牌桶）：正常播放每个台 5 秒才要一次清单，很闲；但播放器
+        # 刷新订阅、检测可用性时会几十秒内把每个台的 /live/xxx.m3u8 全 GET 一遍，
+        # 一次几十个请求打上去，正好撞上游的按 IP 限频——被限之后连正在看的人
+        # 都会一起 403。这里把「向上游要清单」的总速率卡住，超出就先用缓存顶着。
+        self._rate = 1.2          # 每秒最多向上游要 1.2 次清单
+        self._burst = 10.0        # 允许的瞬时突发
+        self._tokens = self._burst
+        self._tokens_at = time.monotonic()
+        self._bucket_lock = threading.Lock()
+        self.throttled = 0        # 因预算不足而没去上游的次数
+
+    def _take_token(self, wait: float = 4.0) -> bool:
+        """取一个出口配额，等不到就返回 False（调用方用缓存顶住）。"""
+        deadline = time.monotonic() + wait
+        while True:
+            with self._bucket_lock:
+                now = time.monotonic()
+                self._tokens = min(
+                    self._burst, self._tokens + (now - self._tokens_at) * self._rate
+                )
+                self._tokens_at = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return True
+                need = (1.0 - self._tokens) / self._rate
+            if time.monotonic() + need > deadline:
+                return False
+            time.sleep(min(need, 0.25))
 
     # ---------------- 上游 ----------------
     def upstream(self, slug: str, *, fresh: bool = False) -> tuple[str, str]:
@@ -268,15 +313,26 @@ class Relay:
             for key in [k for k in self._playlists if k.endswith(f"|{slug}")]:
                 self._playlists.pop(key, None)
 
-    def configure(self, *, playlist_ttl: float | None = None, cache_bytes: int | None = None) -> None:
+    def configure(
+        self,
+        *,
+        playlist_ttl: float | None = None,
+        cache_bytes: int | None = None,
+        mode: str | None = None,
+    ) -> None:
         """面板上改了参数后立刻生效，不用重启容器。
 
         清单缓存调小=更实时但更费上游请求；调大=更抗限流但换台慢半拍。
+        切模式要把已缓存的清单清掉，否则播放器还会拿到旧写法。
         """
         if playlist_ttl is not None:
             self._playlist_ttl = max(0.5, float(playlist_ttl))
         if cache_bytes is not None:
             self._segments.resize(int(cache_bytes))
+        if mode is not None and mode in ("direct", "proxy") and mode != self._mode:
+            self._mode = mode
+            with self._lock:
+                self._playlists.clear()
 
     def _mark_failed(self, slug: str, message: str) -> None:
         """记一次失败并进入冷却。
@@ -302,7 +358,6 @@ class Relay:
                     self._forbidden_hits = 0
             else:
                 self._forbidden_hits = 0
-            self.failures += 1
 
     def stats(self) -> dict:
         """给面板看的简况。"""
@@ -313,18 +368,23 @@ class Relay:
         seg = self._segments.stats()
         seg.update({"hits": self._segments.hits, "misses": self._segments.misses})
         return {
+            "mode": self._mode,
             "cached": cached,
             "playlists": playlists,
             "segments": seg,
             "errors": dict(self._errors),
             "failures": self.failures,
             "stale_served": self.stale_served,
+            # 出口预算用光的次数：说明播放器在批量扫台，不是故障
+            "throttled": self.throttled,
             # 出口被限流时，没缓存的台会被直接挡回来，面板据此提示等一下
             "blocked_for": max(0, round(self._forbidden_until - now)),
         }
 
     def _fetch(self, url: str, ua: str, *, timeout: float | None = None) -> tuple[int, dict, bytes]:
-        request = urllib.request.Request(url, headers={"User-Agent": ua or "qqlive"})
+        # Referer 不能省：官方 CDN 对缺 Referer 的请求更容易回 403
+        headers = {"User-Agent": ua or "qqlive", "Referer": _REFERER}
+        request = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=timeout or self._timeout) as resp:
                 return resp.status, dict(resp.headers), resp.read()
@@ -335,13 +395,23 @@ class Relay:
 
     # ---------------- 改写 ----------------
     def wrap(self, slug: str, url: str, prefix: str = "") -> str:
-        """把上游地址换成本机的转发地址。
+        """把上游地址换成本机的转发地址（仅 proxy 模式）。
 
         ``prefix`` 是这次的对外地址（比如 ``http://192.168.1.10:9797``）。
         给全路径而不是 ``/relay/...``：少数播放器不按清单地址解析相对路径，
         拿到相对地址就直接报「格式不支持」。
         """
         return f"{prefix}/relay/{urllib.parse.quote(slug)}/p/{encode(url)}"
+
+    def target(self, slug: str, url: str, prefix: str = "") -> str:
+        """这一行最终写给播放器的地址。
+
+        direct 模式直接给上游绝对地址（分片由播放器直连 CDN，最流畅）；
+        proxy 模式换成 ``/relay/...``，由本机转手。
+        """
+        if self._mode == "direct":
+            return url
+        return self.wrap(slug, url, prefix)
 
     def _rewrite(self, text: str, base: str, slug: str, prefix: str = "") -> str:
         out: list[str] = []
@@ -353,12 +423,12 @@ class Relay:
             if stripped.startswith("#"):
                 out.append(
                     _URI_ATTR.sub(
-                        lambda m: f'URI="{self.wrap(slug, urllib.parse.urljoin(base, m.group(1)), prefix)}"',
+                        lambda m: f'URI="{self.target(slug, urllib.parse.urljoin(base, m.group(1)), prefix)}"',
                         line,
                     )
                 )
             else:
-                out.append(self.wrap(slug, urllib.parse.urljoin(base, stripped), prefix))
+                out.append(self.target(slug, urllib.parse.urljoin(base, stripped), prefix))
         return "\n".join(out) + "\n"
 
     # ---------------- 对外 ----------------
@@ -386,6 +456,13 @@ class Relay:
                     return cached[1]
 
             try:
+                # 有旧清单的台：配额不够就直接交旧的，播放器不会卡在那等。
+                # 从没成功过的台：多等一会儿，让它排队拿到一次真清单，
+                # 否则播放器会把「暂时没排上」当成这个台坏了。
+                wait = 4.0 if cached else 15.0
+                if not self._take_token(wait):
+                    self.throttled += 1
+                    raise RelayError("正在批量请求频道，稍后自动恢复")
                 text = self._fetch_playlist(slug, prefix)
             except RelayError:
                 with self._lock:
