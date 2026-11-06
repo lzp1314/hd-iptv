@@ -19,8 +19,11 @@
 跳一个台。上游对同一 IP 的请求频率很敏感，播放器刷新清单加上多客户端同时看，
 很容易撞上拒绝。所以这里的策略是「宁可慢一点、也别让播放器看到失败」：
 
-- 清单缓存 5 秒，同一时刻的并发请求共用一次上游请求
+- 清单正文**每次现取**，不做跨刷新复用；只有同一瞬间的并发合并成一次上游请求
 - 清单拉取失败时**返回上一份成功的清单**（最多 120 秒），播放器不会跳台
+- 清单「冻住」会被发现并换票重取：同一个 ``#EXT-X-MEDIA-SEQUENCE`` 超过 10 秒
+  没往前滚，就不是「刚好没滚」，而是那张带 token 的地址卡住了——这类卡死不报
+  错，播放器播完手里的十几秒就定在那儿，只能靠比对序号抓出来
 - 分片按内容缓存（同一片不会变），重复请求、拖动、多客户端都不再打上游（仅 proxy 模式）
 - 分片被拒时先等 250ms 重试一次，仍失败才报错——分片失败播放器只会重试这一片，
   不会跳到下一个台，所以这里可以如实报错
@@ -46,6 +49,9 @@ ALLOW_SUFFIX = (".cctv.cn", ".cctv.com", ".ysp.cctv.cn", ".cztv.com", ".cztvclou
 
 # m3u8 里的 URI 属性（#EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等）
 _URI_ATTR = re.compile(r'URI="([^"]+)"')
+
+# 清单滚到第几片了。同一个地址反复取却一直是这个数，就说明清单冻住了
+_SEQ_LINE = re.compile(r"#EXT-X-MEDIA-SEQUENCE:\s*(\d+)")
 
 # 视为「地址已失效」的状态码
 _GONE = (401, 403, 404, 410)
@@ -213,9 +219,18 @@ class Relay:
         self._cache: dict[str, tuple[float, str, str]] = {}   # slug -> (时间, 地址, UA)
         self._failed: dict[str, float] = {}                   # slug -> 上次换地址失败的时间
         self._errors: dict[str, str] = {}                     # slug -> 最近一次错误
-        self._playlists: dict[str, tuple[float, str]] = {}    # slug -> (时间, 已改写的清单)
+        self._playlists: dict[str, tuple[float, str, int]] = {}  # key -> (时间, 清单, 分片序号)
         self._flights: dict[str, threading.Lock] = {}         # slug -> 拉清单的去重锁
+        # 清单「冻住」的判定：同一个分片序号持续多久没变。上游清单 5 秒滚一片，
+        # 超过 10 秒没动就一定不是「刚好没滚」，而是这张票据/CDN 缓存卡住了。
+        self._seq_since: dict[str, tuple[int, float]] = {}    # key -> (序号, 首次看到的时间)
+        self._stuck_note: dict[str, float] = {}               # key -> 上次报告冻住的时间
+        self._reticket_at: dict[str, float] = {}              # key -> 上次为「冻住」换票的时间
+        # 冻住后连续几次仍然没滚：这时候客户端那边其实早就播空了，
+        # 再给它同一份清单只会一直卡着，不如直接报错让它重连换票。
+        self._stuck_hits: dict[str, int] = {}
         self._segments = _SegmentCache(cache_bytes, cache_ttl)
+        self._notify = None                                   # 日志出口，由 service 接上
         self.failures = 0                                     # 累计失败次数
         self.stale_served = 0                                 # 用旧清单兜住的次数
         # 出口级限流：上游按 IP 限流，一旦被限，所有频道会一起 403。
@@ -311,7 +326,9 @@ class Relay:
         with self._lock:
             self._cache.pop(slug, None)
             for key in [k for k in self._playlists if k.endswith(f"|{slug}")]:
-                self._playlists.pop(key, None)
+                for store in (self._playlists, self._seq_since, self._stuck_hits,
+                              self._stuck_note, self._reticket_at):
+                    store.pop(key, None)
 
     def configure(
         self,
@@ -333,6 +350,9 @@ class Relay:
             self._mode = mode
             with self._lock:
                 self._playlists.clear()
+                self._seq_since.clear()
+                self._stuck_hits.clear()
+                self._reticket_at.clear()
 
     def _mark_failed(self, slug: str, message: str) -> None:
         """记一次失败并进入冷却。
@@ -433,13 +453,23 @@ class Relay:
 
     # ---------------- 对外 ----------------
     def playlist(self, slug: str, prefix: str = "") -> str:
-        """返回改写后的 m3u8 文本。
+        """返回改写后的 m3u8 文本（只要正文）。"""
+        return self.playlist_info(slug, prefix)[0]
+
+    def playlist_info(self, slug: str, prefix: str = "") -> tuple[str, bool, int]:
+        """返回 ``(清单正文, 是不是沿用旧的那份, 分片序号)``。
 
         **每次都向上游要一份新的，不缓存正文。** 上游清单只有 3 个分片、5 秒滚
         一片，把同一份正文发给播放器第二遍，等于让它反复播同一批分片：播完这十几
         秒就没有下一片，而那批分片早被 CDN 回收，重取只会 403——表现就是「看着
         看着卡住」「十几秒跳台」。所以这里只缓存入口地址，正文每次重取；同一瞬间
         的并发（主清单 + 子清单、多台设备同看一个台）合并成一次刷新。
+
+        还有一层更隐蔽的卡死：上游那张带 token 的清单地址**会冻住**——不报错、
+        不 403，就是反复返回同一批分片。播放器把这十几个秒播完，发现没有新分片，
+        画面就定在那里，而服务端日志一片祥和。所以这里盯 ``#EXT-X-MEDIA-SEQUENCE``：
+        同一个序号超过 10 秒没往前滚（上游 5 秒滚一片，10 秒是两片），就判定冻住，
+        **换一张新票重取**；换票还冻住就如实告诉调用方，别再假装正常。
 
         失败时返回上一份成功的清单：播放器拿不到清单会直接跳到下一个频道，比给它
         一份稍旧（但结构完整）的清单糟得多。
@@ -449,7 +479,7 @@ class Relay:
             cached = self._playlists.get(key)
             # 去抖窗口只用来合并「同一批分片」的并发请求，不用于跨刷新复用
             if cached and time.time() - cached[0] <= self._playlist_ttl:
-                return cached[1]
+                return cached[1], False, cached[2]
             flight = self._flights.setdefault(key, threading.Lock())
 
         # 同一频道的并发刷新只让一个去上游，其余等它把结果放进来
@@ -457,7 +487,7 @@ class Relay:
             with self._lock:
                 cached = self._playlists.get(key)
                 if cached and time.time() - cached[0] <= self._playlist_ttl:
-                    return cached[1]
+                    return cached[1], False, cached[2]
 
             try:
                 # 有旧清单的台：配额不够就直接交旧的，播放器不会卡在那等。
@@ -473,15 +503,112 @@ class Relay:
                     stale = self._playlists.get(key)
                 if stale and time.time() - stale[0] <= self._stale_max:
                     self.stale_served += 1
-                    return stale[1]
+                    return stale[1], True, stale[2]
                 raise
 
-            with self._lock:
-                self._playlists[key] = (time.time(), text)
-            return text
+            seq = self._seq_of(text)
+            final, stuck = self._check_frozen(key, slug, prefix, text, seq, cached)
+            if final is None:
+                text, seq = cached[1], cached[2]
+            else:
+                # 换票之后拿到的可能是新的一份，序号要跟着重算
+                text = final
+                seq = self._seq_of(text)
 
-    def _fetch_playlist(self, slug: str, prefix: str = "") -> str:
-        url, ua = self.upstream(slug)
+            with self._lock:
+                self._playlists[key] = (time.time(), text, seq)
+            return text, stuck, seq
+
+    def _check_frozen(
+        self,
+        key: str,
+        slug: str,
+        prefix: str,
+        text: str,
+        seq: int,
+        cached: tuple[float, str, int] | None,
+    ) -> tuple[str | None, bool]:
+        """清单没往前滚就换一张票重取。
+
+        返回 ``(最终正文, 是否冻住)``；正文为 ``None`` 表示「这轮取到的其实没
+        变化，调用方该用旧的」。
+        """
+        if seq < 0:
+            # 没有 MEDIA-SEQUENCE（主清单 / 单片清单），按内容判：一样就算没动
+            if cached and cached[1] == text:
+                return None, True
+            return text, False
+
+        now = time.time()
+        with self._lock:
+            since = self._seq_since.get(key)
+            if since is None or since[0] != seq:
+                self._seq_since[key] = (seq, now)
+                self._stuck_hits[key] = 0
+                return text, False
+            first = since[1]
+
+        # 上游 5 秒滚一片，压到 10 秒还没动就不是「刚好没滚」了
+        if now - first < 10.0:
+            return text, False
+
+        # 冻住了：换一张新票，同一个 URL 再取一次只会拿到同一份。
+        # 换票本身也是一次上游请求，别每个刷新周期都换——10 秒一次足够，
+        # 反复换只会把本来就紧张的出口配额烧光。
+        with self._lock:
+            last_ticket = self._reticket_at.get(key, 0.0)
+            due = now - last_ticket >= 10.0
+            if due:
+                self._reticket_at[key] = now
+            else:
+                self._stuck_hits[key] = self._stuck_hits.get(key, 0) + 1
+        if not due:
+            return None if cached else text, True
+
+        try:
+            retry = self._fetch_playlist(slug, prefix, fresh=True)
+        except RelayError:
+            retry = ""
+        retry_seq = self._seq_of(retry) if retry else -1
+        if retry and retry_seq != seq:
+            with self._lock:
+                self._seq_since[key] = (retry_seq, now)
+                self._stuck_hits[key] = 0
+            return retry, False
+
+        with self._lock:
+            hits = self._stuck_hits.get(key, 0) + 1
+            self._stuck_hits[key] = hits
+            last = self._stuck_note.get(key, 0.0)
+            report = now - last >= 30.0
+            if report:
+                self._stuck_note[key] = now
+        if report:
+            self._note(
+                f"{slug} 的清单冻在分片 {seq} 已经 {int(now - first)} 秒，换票也没换来新的"
+            )
+        return None if cached else text, True
+
+    @staticmethod
+    def _seq_of(text: str) -> int:
+        """清单里滚到第几片；没有这个标签（主清单）返回 -1。"""
+        match = _SEQ_LINE.search(text or "")
+        return int(match.group(1)) if match else -1
+
+    def attach_log(self, notify) -> None:
+        """接上一个日志出口，把「清单冻住了」这类事写进面板的运行日志。"""
+        self._notify = notify
+
+    def _note(self, message: str) -> None:
+        notify = getattr(self, "_notify", None)
+        if notify:
+            try:
+                notify(message)
+            except Exception:  # noqa: BLE001 - 记日志不能反过来搞崩播放
+                pass
+
+    def _fetch_playlist(self, slug: str, prefix: str = "", *, fresh: bool = False) -> str:
+        url, ua = self.upstream(slug, fresh=fresh)
         status, _, body = self._fetch(url, ua)
         if status in _GONE:
             # 地址失效或被限流：换一个新地址再试一次。中间停半秒——

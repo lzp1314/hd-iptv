@@ -96,6 +96,8 @@ class State:
         )
         self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
         self.logos = Logos(settings.data_dir / "logos")
+        # 「清单冻住」这类事只在这里看得见，接到面板的运行日志里
+        self.relay.attach_log(self.log)
 
     def log(self, message: str) -> None:
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
@@ -302,14 +304,22 @@ def make_handler(state: State):
                 self._json({"error": f"未知频道: {slug}", "hint": "/api/live 可列出全部"}, 404)
                 return
             try:
-                text = state.relay.playlist(key, self._base())
+                text, stale, seq = state.relay.playlist_info(key, self._base())
             except RelayError as exc:
                 self._json({"error": str(exc), "channel": row[1]}, 502)
                 return
             except Exception as exc:  # noqa: BLE001 - 失败要给出可读原因
                 self._json({"error": f"{type(exc).__name__}: {exc}", "channel": row[1]}, 502)
                 return
-            self._send(200, text.encode("utf-8"), "application/vnd.apple.mpegurl; charset=utf-8")
+            # 这几个头是给人排查用的：浏览器 F12 里看 /live/xxx.m3u8 的响应，
+            # Seq 一直不动就是上游卡住了，Stale=1 表示这次给的是旧的那份。
+            self._send(
+                200,
+                text.encode("utf-8"),
+                "application/vnd.apple.mpegurl; charset=utf-8",
+                {"X-HD-Seq": str(seq), "X-HD-Stale": "1" if stale else "0"},
+                cache="no-store",
+            )
 
         def _playlist(self) -> None:
             """按请求现拼订阅列表。

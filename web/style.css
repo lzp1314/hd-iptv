@@ -34,7 +34,7 @@ body {
   z-index: 10;
 }
 
-.brand { display: flex; align-items: center; gap: 10px; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand h1 { font-size: 17px; margin: 0; letter-spacing: .3px; }
 .ver { color: var(--muted); font-size: 12px; }
 .dot {
@@ -82,7 +82,8 @@ main { max-width: 1080px; margin: 0 auto; padding: 20px 22px 40px; }
   gap: 4px;
 }
 .card .label { color: var(--muted); font-size: 12px; }
-.card strong { font-size: 22px; font-weight: 600; }
+/* 一格放不下时宁可折行，也别把整页撑出横向滚动（手机上很容易踩到） */
+.card strong { font-size: 22px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
 .card strong.small { font-size: 13px; font-weight: 500; }
 
 .panel {
@@ -93,8 +94,11 @@ main { max-width: 1080px; margin: 0 auto; padding: 20px 22px 40px; }
   margin-bottom: 16px;
 }
 .panel h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
-.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.panel-head h2 { margin: 0; }
 .hint { color: var(--muted); font-size: 12px; margin: -4px 0 12px; }
+/* 紧跟标题栏的说明别再往上收：按钮比标题高，负边距会顶到按钮底下 */
+.panel-head + .hint { margin-top: 0; }
 
 .url-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .tag {
@@ -121,9 +125,11 @@ main { max-width: 1080px; margin: 0 auto; padding: 20px 22px 40px; }
   width: 220px;
 }
 
+/* 六个字段正好两行三列；minmax(0,1fr) 是必须的——下拉框里的长文案
+   会把列撑开，其余几列就被挤得参差不齐（默认 min-width:auto 的老毛病） */
 .form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px 14px;
   margin-bottom: 10px;
 }
@@ -133,9 +139,12 @@ main { max-width: 1080px; margin: 0 auto; padding: 20px 22px 40px; }
   gap: 5px;
   font-size: 12px;
   color: var(--muted);
+  min-width: 0;
 }
 .form input,
 .form select {
+  width: 100%;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 7px 10px;
@@ -246,18 +255,35 @@ code {
   line-height: 1.6;
 }
 
-.update-result { margin-left: 10px; }
+/* 「检查更新」在顶栏版本号后面，结论就写在旁边，不另开一块面板 */
+.update-result {
+  margin-left: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+  max-width: 42vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.update-result:empty { display: none; }
 .update-result.ok { color: #15803d; }
 .update-result.warn { color: #b45309; }
 .update-result.err { color: #b91c1c; }
 .mono { font-family: ui-monospace, Consolas, monospace; }
+.dim { opacity: .75; }
 
 footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   text-align: center;
   color: var(--muted);
   font-size: 12px;
   padding: 0 20px 28px;
 }
+footer .mono { font-size: 11.5px; }
 
 /* ---------------- 面板内播放器 ---------------- */
 .player-mask {
@@ -315,6 +341,10 @@ footer {
 }
 .live-tag.warn { background: #d97706; }
 
+@media (max-width: 900px) {
+  .form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (max-width: 640px) {
   .search { width: 120px; }
   .card strong { font-size: 18px; }
@@ -323,4 +353,9 @@ footer {
   .player-mask { padding: 0; }
   .player-box { border-radius: 0; height: 100%; display: flex; flex-direction: column; }
   #playerVideo { flex: 1; max-height: none; object-fit: contain; }
+  /* 顶栏挤不下时，版本号那一行单独折到第二行，别把按钮压成竖排 */
+  .topbar { flex-wrap: wrap; padding: 10px 14px; gap: 10px; }
+  .brand { flex: 1 1 100%; flex-wrap: wrap; row-gap: 6px; }
+  .update-result { max-width: 100%; white-space: normal; }
+  .form { grid-template-columns: 1fr; }
 }

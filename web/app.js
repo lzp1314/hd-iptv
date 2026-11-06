@@ -74,7 +74,6 @@ async function loadStatus() {
     const r = await fetch("/api/status", { cache: "no-store" });
     const d = await r.json();
     $("version").textContent = "v" + (d.version || "-");
-    if ($("curVersion")) $("curVersion").textContent = "v" + (d.version || "-");
     const rep = d.report || {};
 
     if (d.base && d.base !== apiBase) {
@@ -94,7 +93,9 @@ async function loadStatus() {
       $("statChannels").title = hidden.length ? `${total} 个频道，其中 ${hidden.length} 个已隐藏` : "";
     }
     $("statStreams").textContent = rep.published != null ? rep.published : "-";
-    $("statTime").textContent = d.generated_at || "-";
+    // 卡片窄，完整的 ISO 时间会把格子撑破（手机上直接横向溢出），只留到分钟
+    $("statTime").textContent = shortTime(d.generated_at);
+    $("statTime").title = d.generated_at || "";
 
     const relay = d.relay || {};
     const banner = $("relayBanner");
@@ -194,6 +195,13 @@ function rateText(stream) {
   if (stream.bandwidth_kbps) return `码率 ${(stream.bandwidth_kbps / 1000).toFixed(1)} Mbps`;
   if (stream.speed_mbps) return `测速 ${stream.speed_mbps.toFixed(1)} Mbps`;
   return "未测速";
+}
+
+// 2026-11-06T14:30:00+08:00 → 11-06 14:30。卡片里塞不下完整时间戳
+function shortTime(value) {
+  if (!value) return "-";
+  const m = String(value).match(/^\d{4}-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  return m ? `${m[1]}-${m[2]} ${m[3]}:${m[4]}` : String(value);
 }
 
 // 测出来的数字是「本机从这台取流能跑多快」，不是视频码率，鼠标悬停写清楚
@@ -388,6 +396,11 @@ let playerName = "";
 let statsTimer = null;
 let netRetries = 0;
 let mediaRetries = 0;
+// 画面卡住的自救：上一步播到哪、什么时候还在往前走
+let lastTime = 0;
+let lastProgressAt = 0;
+let restartTimer = null;
+let restarts = 0;
 
 function playerLatency() {
   const v = $("playerVideo");
@@ -421,7 +434,26 @@ function playerStats() {
     const level = hls.levels[hls.currentLevel];
     if (level && level.bitrate) parts.push(`${(level.bitrate / 1e6).toFixed(1)} Mbps`);
   }
+
+  // 卡死看门狗：正在播却一直不往前走，就是「这十几秒播完了、新的没来」。
+  // 上游清单冻住时不会有任何报错，只能靠这个发现。
+  const now = Date.now();
+  if (!v.paused && !v.seeking && v.currentTime > lastTime + 0.05) {
+    lastTime = v.currentTime;
+    lastProgressAt = now;
+  }
+  const stuckMs = lastProgressAt ? now - lastProgressAt : 0;
+  if (!v.paused && stuckMs > 3000) {
+    parts.push(`画面停住 ${Math.floor(stuckMs / 1000)}s`);
+  }
   $("playerStats").textContent = parts.join(" · ") || "连接中…";
+
+  if (!v.paused && stuckMs > 4000 && stuckMs < 50000) {
+    $("playerTip").textContent = stuckMs > 12000
+      ? "上游一直没给新分片，正在换票重连…"
+      : "等上游给下一段——上游清单 5 秒才滚一片，稍等一下。";
+  }
+  if (!v.paused && stuckMs > 12000 && restarts < 8) restartPlayer("画面停住了");
 
   const badge = $("playerBadge");
   if (badge) {
@@ -438,6 +470,12 @@ function stopStats() {
 
 function closePlayer() {
   stopStats();
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+  lastTime = 0;
+  lastProgressAt = 0;
   const v = $("playerVideo");
   try { v.pause(); } catch (_) { /* ignore */ }
   if (hls) {
@@ -471,21 +509,26 @@ function goLive() {
 function failPlayer(message) {
   $("playerStats").textContent = "播放失败：" + message;
   $("playerBadge").hidden = true;
+  // 必须先停掉每秒刷新的状态栏，否则这句话一秒后就被「连接中…」盖掉了
+  stopStats();
 }
 
-function openPlayer(slug, name) {
+function openPlayer(slug, name, keepRestarts) {
   const v = $("playerVideo");
   closePlayer();
   playerSlug = slug;
   playerName = name || slug;
   netRetries = 0;
   mediaRetries = 0;
+  if (!keepRestarts) restarts = 0;
   $("playerTitle").textContent = playerName;
   $("playerMask").hidden = false;
-  $("playerStats").textContent = "正在取清单…";
+  $("playerStats").textContent = keepRestarts ? "重连中…" : "正在取清单…";
   $("playerBadge").hidden = true;
-  $("playerTip").textContent =
-    "直播流本身就比电视台晚 2~3 个分片（这台约 10~15 秒）。进度条上的 0:18 是「当前可播窗口里的位置」，不是延迟在变大。";
+  if (!keepRestarts) {
+    $("playerTip").textContent =
+      "直播流本身就比电视台晚 2~3 个分片（这台约 10~15 秒）。进度条上的 0:18 是「当前可播窗口里的位置」，不是延迟在变大。";
+  }
   stopStats();
   statsTimer = setInterval(playerStats, 1000);
 
@@ -503,15 +546,25 @@ function openPlayer(slug, name) {
   }
 
   hls = new Hls({
+    // 不开低延迟模式：那套要清单支持 _HLS_msn 阻塞式重载，上游的清单没有，
+    // 播放器会当成「返回得太快=没新东西」立刻再问一次，几十秒就把本机的
+    // 上游配额抽干，接着清单拿不到、画面停在播完的那十几秒上。
+    lowLatencyMode: false,
     // 目标落后 2 个分片（约 10 秒）：再小一点上游只有 3 片，容易卡；
     // 落后超过 5 片就加速播放追回来，而不是让延迟越滚越大
-    lowLatencyMode: true,
     liveSyncDurationCount: 2,
     liveMaxLatencyDurationCount: 5,
     maxLiveSyncPlaybackRate: 1.25,
     backBufferLength: 30,
     manifestLoadingTimeOut: 15000,
     fragLoadingTimeOut: 20000,
+    // 上游时不时回一两次 403/超时，重试要够多，别一次就判死
+    manifestLoadingMaxRetry: 5,
+    manifestLoadingRetryDelay: 1000,
+    levelLoadingMaxRetry: 6,
+    levelLoadingRetryDelay: 1000,
+    fragLoadingMaxRetry: 6,
+    fragLoadingRetryDelay: 800,
   });
   hls.loadSource(url);
   hls.attachMedia(v);
@@ -522,10 +575,16 @@ function openPlayer(slug, name) {
   });
   hls.on(Hls.Events.ERROR, (_evt, data) => {
     if (!data.fatal) return;
-    if (data.type === Hls.ErrorTypes.NETWORK_ERROR && netRetries < 2) {
+    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+      // 先原地重载清单；还是不行就整条重开。整条重开会让服务端重新换票，
+      // 这正是「清单冻住」唯一有效的解法。
       netRetries += 1;
-      $("playerStats").textContent = `网络抖动，第 ${netRetries} 次重试…`;
-      setTimeout(() => { if (hls) hls.startLoad(); }, 1500);
+      if (netRetries <= 2) {
+        $("playerStats").textContent = `网络抖动，第 ${netRetries} 次重试…`;
+        setTimeout(() => { if (hls) hls.startLoad(); }, 1200);
+      } else {
+        restartPlayer(`取不到新的清单（第 ${netRetries} 次），重连中…`);
+      }
       return;
     }
     if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries < 2) {
@@ -536,6 +595,25 @@ function openPlayer(slug, name) {
     }
     failPlayer(playerErrorText(data));
   });
+}
+
+// 整条重开：销毁再建，等于让服务端重新换一次票。
+// 「播完十几秒停住」这类卡死靠重载清单救不回来，只能这么办。
+function restartPlayer(reason) {
+  if (!playerSlug || restartTimer) return;
+  if (restarts >= 8) {
+    failPlayer("这个台连续重连都拿不到新分片，多半是上游限流了，过几分钟再点");
+    return;
+  }
+  restarts += 1;
+  $("playerTip").textContent = reason + " 上游清单可能冻住了，换票重取。";
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (!playerSlug) return;
+    const slug = playerSlug;
+    const name = playerName;
+    openPlayer(slug, name, true);
+  }, 2000);
 }
 
 // 把 hls.js 的错误码翻译成「下一步该干嘛」：绝大多数人卡在这里时，
