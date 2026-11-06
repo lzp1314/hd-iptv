@@ -67,8 +67,7 @@
     </div>
     <p class="hint">
       保存后立刻生效，不用重启容器。播放地址是<strong>播放时现换</strong>的，列表多久更新一次
-      都不影响能不能放；「清单缓存」是播放器每次取清单时多久真的去上游要一次，
-      嫌卡就调大。上游按 IP 限频，别把「自动更新间隔」调太勤，也别对着一堆台连点重试。
+      都不影响能不能放。上游按出口 IP 限频，别把「自动更新间隔」调太勤，也别对着一堆台连点重试。
     </p>
     <div class="form">
       <label>播放方式
@@ -83,8 +82,8 @@
       <label>自动更新间隔（小时，0 关闭）
         <input id="setInterval" type="number" min="0" max="168" step="0.5">
       </label>
-      <label>播放清单缓存（秒）
-        <input id="setTtl" type="number" min="0.5" max="60" step="0.5">
+      <label>清单最短复用（秒，一般不用改）
+        <input id="setTtl" type="number" min="0.5" max="5" step="0.5">
       </label>
       <label>分片缓存（MB，仅转发模式）
         <input id="setCache" type="number" min="0" max="4096" step="8">

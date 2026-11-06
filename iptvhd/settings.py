@@ -22,7 +22,7 @@ PANEL_FILE = "panel.json"
 # 允许面板修改的数值项及其取值范围，越界一律夹回区间内
 PANEL_BOUNDS = {
     "interval_hours": (0.0, 168.0),
-    "playlist_ttl": (0.5, 60.0),
+    "playlist_ttl": (0.5, 5.0),
     "cache_mb": (0.0, 4096.0),
 }
 
@@ -56,7 +56,7 @@ allow_unknown_resolution = false
 probe_playlist_children = true
 
 [relay]
-playlist_ttl = 5
+playlist_ttl = 1
 cache_mb = 96
 mode = "direct"
 
@@ -250,13 +250,18 @@ class Settings:
 
     @property
     def playlist_ttl(self) -> float:
-        """播放器取清单时，多久回上游要一次。越小越实时，越大越省请求。"""
+        """同一份清单的最短复用时间（秒）。
+
+        只是用来把「同一瞬间的并发请求」合并成一次上游刷新——清单正文绝不按这个
+        时间复用：上游只有 3 个分片、5 秒滚一片，复用久了播放器会反复播同一批已经
+        被回收的分片，表现就是卡住或跳台。
+        """
         panel = self.panel_get("playlist_ttl")
-        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 5)
+        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 1)
         try:
             return max(0.5, float(raw))
         except (TypeError, ValueError):
-            return 2.0
+            return 1.0
 
     @property
     def relay_cache_mb(self) -> float:

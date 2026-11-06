@@ -194,7 +194,7 @@ class Relay:
         timeout: float = 8.0,
         seg_timeout: float = 20.0,
         retry_gap: float = 20.0,
-        playlist_ttl: float = 5.0,
+        playlist_ttl: float = 1.0,
         addr_ttl: float = 300.0,
         stale_max: float = 120.0,
         cache_bytes: int = 96 * 1024 * 1024,
@@ -435,20 +435,24 @@ class Relay:
     def playlist(self, slug: str, prefix: str = "") -> str:
         """返回改写后的 m3u8 文本。
 
-        失败时优先返回上一份成功的结果——播放器拿不到清单就会直接跳到列表中
-        的下一个频道，那正是「看十几秒跳台」的表现，比给一份稍旧的清单糟得多。
+        **每次都向上游要一份新的，不缓存正文。** 上游清单只有 3 个分片、5 秒滚
+        一片，把同一份正文发给播放器第二遍，等于让它反复播同一批分片：播完这十几
+        秒就没有下一片，而那批分片早被 CDN 回收，重取只会 403——表现就是「看着
+        看着卡住」「十几秒跳台」。所以这里只缓存入口地址，正文每次重取；同一瞬间
+        的并发（主清单 + 子清单、多台设备同看一个台）合并成一次刷新。
 
-        缓存按「对外地址 + 频道」分开存：内网和外网访问拿到的该是两套地址。
+        失败时返回上一份成功的清单：播放器拿不到清单会直接跳到下一个频道，比给它
+        一份稍旧（但结构完整）的清单糟得多。
         """
         key = f"{prefix}|{slug}"
-        now = time.time()
         with self._lock:
             cached = self._playlists.get(key)
-            if cached and now - cached[0] <= self._playlist_ttl:
+            # 去抖窗口只用来合并「同一批分片」的并发请求，不用于跨刷新复用
+            if cached and time.time() - cached[0] <= self._playlist_ttl:
                 return cached[1]
             flight = self._flights.setdefault(key, threading.Lock())
 
-        # 同一频道的并发刷新只让一个去上游，其余等它把结果放进缓存
+        # 同一频道的并发刷新只让一个去上游，其余等它把结果放进来
         with flight:
             with self._lock:
                 cached = self._playlists.get(key)

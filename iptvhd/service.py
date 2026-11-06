@@ -647,7 +647,7 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
     httpd = Server((host, port), make_handler(state))
     state.log(f"服务已启动：http://{host}:{port}  （订阅地址 /playlist.m3u）")
     state.log(
-        f"分片缓存上限 {int(settings.relay_cache_mb)} MB，清单缓存 {settings.playlist_ttl:g} 秒，"
+        f"分片缓存上限 {int(settings.relay_cache_mb)} MB，清单复用 {settings.playlist_ttl:g} 秒，"
         "多客户端共用一个上游连接池"
     )
     if not settings.public_url:

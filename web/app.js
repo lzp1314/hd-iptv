@@ -151,7 +151,7 @@ async function saveSettings() {
     play_mode: $("setPlayMode") ? $("setPlayMode").value : "direct",
     public_url: $("setPublicUrl").value.trim(),
     interval_hours: Number($("setInterval").value || 0),
-    playlist_ttl: Number($("setTtl").value || 5),
+    playlist_ttl: Number($("setTtl").value || 1),
     cache_mb: Number($("setCache").value || 96),
     epg_source: $("setEpgSource").value.trim(),
   };
@@ -166,7 +166,7 @@ async function saveSettings() {
     if (d.error) throw new Error(d.error);
     settingsDirty = false;
     note.textContent = `已保存：更新间隔 ${d.settings.interval_hours} 小时、`
-      + `清单缓存 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB。`
+      + `清单复用 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB。`
       + "播放器里的地址如果变了，重新拉一次列表即可。";
     await refresh();
   } catch (e) {
