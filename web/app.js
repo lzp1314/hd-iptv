@@ -92,6 +92,7 @@ function fillSettings(s) {
   if ($("setInterval")) $("setInterval").value = s.interval_hours != null ? s.interval_hours : "";
   if ($("setTtl")) $("setTtl").value = s.playlist_ttl != null ? s.playlist_ttl : "";
   if ($("setCache")) $("setCache").value = s.cache_mb != null ? s.cache_mb : "";
+  if ($("setEpgSource")) $("setEpgSource").value = s.epg_source || "";
 }
 
 async function saveSettings() {
@@ -102,6 +103,7 @@ async function saveSettings() {
     interval_hours: Number($("setInterval").value || 0),
     playlist_ttl: Number($("setTtl").value || 2),
     cache_mb: Number($("setCache").value || 96),
+    epg_source: $("setEpgSource").value.trim(),
   };
   btn.disabled = true;
   try {
@@ -280,7 +282,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("search").addEventListener("input", () => renderChannels(cache));
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPublicUrl", "setInterval", "setTtl", "setCache"].forEach((id) => {
+  ["setPublicUrl", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });

@@ -98,6 +98,7 @@ class State:
             "cache_mb": int(s.relay_cache_mb),
             "public_url": s.public_url,
             "epg_url": s.epg_url,
+            "epg_source": s.epg_source,
         }
 
     def apply_settings(self, values: dict) -> dict:
@@ -110,7 +111,31 @@ class State:
                 playlist_ttl=self.settings.playlist_ttl,
                 cache_bytes=int(self.settings.relay_cache_mb * 1024 * 1024),
             )
+            if "epg_source" in clean:
+                # 换了节目单源就把旧的清掉，免得播放器拿到对不上的节目单
+                self.epg.source = self.settings.epg_source
+                self.epg.clear()
+                names = self._channel_names()
+                if self.epg.source and names:
+                    threading.Thread(target=self._warm_epg, args=(names,), daemon=True).start()
         return self.current_settings()
+
+    def _channel_names(self) -> list[str]:
+        result = load_result(self.settings) or {}
+        names = [str(c.get("name") or "") for c in result.get("channels", []) or []]
+        return [n for n in names if n]
+
+    def _warm_epg(self, names: list[str]) -> None:
+        if not names:
+            return
+        try:
+            mapping = self.epg.build(names)
+            self.log(
+                f"[节目单] 对上 {len(mapping)}/{len(names)} 个频道"
+                + ("" if mapping else "（节目单源里没有这些台，或源不可达）")
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"! 节目单构建失败：{exc}")
 
     # ---------------- 更新 ----------------
     def trigger(self) -> bool:
@@ -141,18 +166,10 @@ class State:
 
     def _warm_assets(self) -> None:
         """更新完顺手把节目单和台标备好，播放器来要时不用等。"""
-        result = load_result(self.settings) or {}
-        names = [str(c.get("name") or "") for c in result.get("channels", []) or []]
-        names = [n for n in names if n]
+        names = self._channel_names()
         if not names:
             return
-        try:
-            mapping = self.epg.build(names)
-            self.log(f"[节目单] 对上 {len(mapping)}/{len(names)} 个频道" + (
-                "" if mapping else "（节目单源里没有这些台，或源不可达）"
-            ))
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"! 节目单构建失败：{exc}")
+        self._warm_epg(names)
         try:
             got = self.logos.prefetch(names)
             if got:

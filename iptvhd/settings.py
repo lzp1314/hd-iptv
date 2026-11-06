@@ -83,7 +83,7 @@ def coerce_panel(raw: dict) -> dict:
     """把面板提交的内容收敛成合法值，非法项直接丢掉。"""
     out: dict = {}
     for key, value in (raw or {}).items():
-        if key in ("public_url", "epg_url"):
+        if key in ("public_url", "epg_url", "epg_source"):
             text = str(value or "").strip()
             out[key] = text.rstrip("/") if key == "public_url" else text
         elif key in PANEL_BOUNDS:
@@ -210,6 +210,9 @@ class Settings:
 
     @property
     def epg_source(self) -> str:
+        panel = self.panel_get("epg_source")
+        if panel is not None:
+            return str(panel).strip()
         return str(self.get("epg", "source", DEFAULT_EPG_SOURCE) or "").strip()
 
     @property

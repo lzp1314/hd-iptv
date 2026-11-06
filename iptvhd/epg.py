@@ -115,6 +115,18 @@ class Epg:
             return True
         return age > self.ttl
 
+    def clear(self) -> None:
+        """丢掉已生成的节目单（换了源或者关掉功能时用）。"""
+        with self._lock:
+            self._mapping = {}
+            self.channels = 0
+            self.built_at = 0.0
+            for path in (self.out, self.raw, self.map_file):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     def xml(self, names: list[str], *, force: bool = False) -> bytes | None:
         """给播放器的节目单文件；没有就返回 None。"""
         if force or self.stale() or not self._mapping:

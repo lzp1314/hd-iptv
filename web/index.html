@@ -81,6 +81,9 @@
       <label>分片缓存（MB）
         <input id="setCache" type="number" min="0" max="4096" step="8">
       </label>
+      <label>节目单源（留空关闭节目单）
+        <input id="setEpgSource" type="text" placeholder="https://epg.pw/xmltv/epg_CN.xml">
+      </label>
     </div>
     <p class="hint" id="settingsNote">
       套了反向代理（Lucky / Nginx）时，「对外地址」留空即可，列表会用你访问面板的外网域名和端口。
