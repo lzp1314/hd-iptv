@@ -116,6 +116,19 @@ class RelayTest(unittest.TestCase):
         self.assertIn('URI="/relay/cctv1/p/', media)
         self.assertEqual(media.count("/relay/cctv1/p/"), 3)  # 密钥 + 2 个分片
 
+    def test_playlist_uses_absolute_urls_when_prefix_given(self):
+        """给了对外地址就写全路径：部分播放器不解析相对路径。"""
+        relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)})
+        text = relay.playlist("cctv1", "http://192.168.1.10:9797")
+        self.assertIn("http://192.168.1.10:9797/relay/cctv1/p/", text)
+
+        token = text.split("/relay/cctv1/p/")[1].split("\n")[0].strip()
+        _, _, body, _ = relay.resource("cctv1", token, "", "http://tv.example.com:8443")
+        media = body.decode()
+        self.assertIn('URI="http://tv.example.com:8443/relay/cctv1/p/', media)
+        # 内网、外网两套地址各自缓存，别互相顶掉
+        self.assertEqual(len(relay.stats()["playlists"]), 1)
+
     def test_playlist_retries_once_on_403(self):
         relay = FakeRelay({"1.m3u8": (403, "")})
         with self.assertRaises(RelayError):

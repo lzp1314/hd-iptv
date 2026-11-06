@@ -3,38 +3,55 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__
+from . import __version__, writers
+from .epg import Epg
+from .logos import Logos
+from .models import Channel, Stream
 from .pipeline import load_result, run_update
 from .relay import Relay, RelayError
-from .settings import Settings
+from .settings import Settings, coerce_panel, write_panel
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
+M3U_TYPE = "audio/x-mpegurl; charset=utf-8"
 
-def _cache_bytes() -> int:
-    """分片缓存上限，默认 96MB。
 
-    缓存的意义不只是省流量：同一路直播有多个客户端在看时，上游只被请求一次，
-    才不会因为「同一 IP 并发取片」被限流——限流正是播放器跳台的主因。
+def _channels_from_result(result: dict) -> list[Channel]:
+    """把 result.json 还原成 Channel/Stream，供按请求现拼 m3u。
+
+    地址、画质这些落过盘的信息都在，唯独没有 logo 和 UA——这两个由
+    服务端自己补（台标走 /logo，UA 走中转），不需要从文件里读。
     """
-    raw = os.environ.get("HDIPTV_RELAY_CACHE_MB", "").strip()
-    try:
-        mb = float(raw) if raw else 96.0
-    except ValueError:
-        mb = 96.0
-    return max(0, int(mb * 1024 * 1024))
+    channels: list[Channel] = []
+    for row in result.get("channels", []) or []:
+        streams = []
+        for item in row.get("streams", []) or []:
+            url = str(item.get("url") or "")
+            if not url:
+                continue
+            streams.append(
+                Stream(
+                    url=url,
+                    slug=str(item.get("slug") or ""),
+                    height=int(item.get("height") or 0),
+                    width=int(item.get("width") or 0),
+                )
+            )
+        name = str(row.get("name") or "")
+        if name and streams:
+            channels.append(Channel(name=name, group=str(row.get("group") or "未分组"), streams=streams))
+    return channels
 
 
-# 中转层拿不到频道表之外的地址，这里的解析器只认 ysp 里的台
 def _ysp_resolver(slug: str) -> tuple[str, str]:
+    """中转层拿不到频道表之外的地址，这里的解析器只认 ysp 里的台。"""
     from . import ysp
 
     row = ysp.CHANNEL_BY_SLUG.get(slug.lower())
@@ -57,7 +74,13 @@ class State:
         self.report: dict = {}
         self.logs: list[str] = []
         # 清单与分片的中转：播放器只跟本机说话，UA 由服务端代劳
-        self.relay = Relay(_ysp_resolver, cache_bytes=_cache_bytes())
+        self.relay = Relay(
+            _ysp_resolver,
+            playlist_ttl=settings.playlist_ttl,
+            cache_bytes=int(settings.relay_cache_mb * 1024 * 1024),
+        )
+        self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
+        self.logos = Logos(settings.data_dir / "logos")
 
     def log(self, message: str) -> None:
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
@@ -66,6 +89,30 @@ class State:
             self.logs.append(line)
             self.logs = self.logs[-200:]
 
+    # ---------------- 设置 ----------------
+    def current_settings(self) -> dict:
+        s = self.settings
+        return {
+            "interval_hours": s.interval_hours,
+            "playlist_ttl": s.playlist_ttl,
+            "cache_mb": int(s.relay_cache_mb),
+            "public_url": s.public_url,
+            "epg_url": s.epg_url,
+        }
+
+    def apply_settings(self, values: dict) -> dict:
+        """面板提交的设置：落盘 + 当场生效，不用重启容器。"""
+        clean = coerce_panel(values)
+        if clean:
+            write_panel(self.settings.panel_path, clean)
+            self.settings.panel.update(clean)
+            self.relay.configure(
+                playlist_ttl=self.settings.playlist_ttl,
+                cache_bytes=int(self.settings.relay_cache_mb * 1024 * 1024),
+            )
+        return self.current_settings()
+
+    # ---------------- 更新 ----------------
     def trigger(self) -> bool:
         """异步触发一次更新，已有任务在跑时返回 False。"""
         with self.lock:
@@ -90,6 +137,28 @@ class State:
             with self.lock:
                 self.running = False
                 self.last_finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        threading.Thread(target=self._warm_assets, daemon=True).start()
+
+    def _warm_assets(self) -> None:
+        """更新完顺手把节目单和台标备好，播放器来要时不用等。"""
+        result = load_result(self.settings) or {}
+        names = [str(c.get("name") or "") for c in result.get("channels", []) or []]
+        names = [n for n in names if n]
+        if not names:
+            return
+        try:
+            mapping = self.epg.build(names)
+            self.log(f"[节目单] 对上 {len(mapping)}/{len(names)} 个频道" + (
+                "" if mapping else "（节目单源里没有这些台，或源不可达）"
+            ))
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"! 节目单构建失败：{exc}")
+        try:
+            got = self.logos.prefetch(names)
+            if got:
+                self.log(f"[台标] 缓存 {got} 个")
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"! 台标缓存失败：{exc}")
 
 
 def make_handler(state: State):
@@ -100,12 +169,19 @@ def make_handler(state: State):
         protocol_version = "HTTP/1.1"
 
         # ---------------- 基础工具 ----------------
-        def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
+        def _send(
+            self,
+            code: int,
+            body: bytes,
+            ctype: str,
+            extra: dict | None = None,
+            cache: str | None = None,
+        ) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", cache or "no-cache")
             self.send_header("Accept-Ranges", "bytes")
             for key, value in (extra or {}).items():
                 self.send_header(key, value)
@@ -121,12 +197,12 @@ def make_handler(state: State):
             self._send(code, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
 
-        def _file(self, path: Path, ctype: str, download: str = "") -> None:
+        def _file(self, path: Path, ctype: str, download: str = "", cache: str | None = None) -> None:
             if not path.exists():
                 self._json({"error": "结果尚未生成，请先更新一次", "path": str(path)}, 404)
                 return
             extra = {"Content-Disposition": f'inline; filename="{download}"'} if download else None
-            self._send(200, path.read_bytes(), ctype, extra)
+            self._send(200, path.read_bytes(), ctype, extra, cache)
 
         def _redirect(self, url: str) -> None:
             self.send_response(302)
@@ -135,6 +211,26 @@ def make_handler(state: State):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
 
+        def _base(self) -> str:
+            """拼对外地址。
+
+            配了 ``PUBLIC_URL`` 就用它；没配就按这次请求的 Host 现算——
+            套了一层反向代理（Lucky / Nginx）时，``X-Forwarded-*`` 会带出
+            真实的外网域名和端口，生成的播放地址自然就是外网能用的。
+            """
+            public = settings.public_url
+            if public:
+                return public.rstrip("/")
+            host = (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+            host = host or (self.headers.get("Host") or "").strip()
+            if not host:
+                return ""
+            proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+            if proto not in ("http", "https"):
+                proto = "https" if self.headers.get("X-Forwarded-Ssl") == "on" else "http"
+            return f"{proto}://{host}"
+
+        # ---------------- 播放 ----------------
         def _live(self, slug: str) -> None:
             """返回改写后的播放清单，分片同样走本机转发。
 
@@ -151,7 +247,7 @@ def make_handler(state: State):
                 self._json({"error": f"未知频道: {slug}", "hint": "/api/live 可列出全部"}, 404)
                 return
             try:
-                text = state.relay.playlist(key)
+                text = state.relay.playlist(key, self._base())
             except RelayError as exc:
                 self._json({"error": str(exc), "channel": row[1]}, 502)
                 return
@@ -159,6 +255,40 @@ def make_handler(state: State):
                 self._json({"error": f"{type(exc).__name__}: {exc}", "channel": row[1]}, 502)
                 return
             self._send(200, text.encode("utf-8"), "application/vnd.apple.mpegurl; charset=utf-8")
+
+        def _playlist(self) -> None:
+            """按请求现拼订阅列表。
+
+            为什么不直接发 result.m3u：那份文件在更新时就把地址写死了，
+            改了对外地址、套了反代都得等下一轮更新才生效。现拼的成本是
+            几十个频道做一次字符串拼接，可以忽略。
+            """
+            result = load_result(settings) or {}
+            channels = _channels_from_result(result)
+            if not channels:
+                self._json(
+                    {"error": "结果尚未生成，请先更新一次",
+                     "hint": "面板右上角「立即更新」，或者等首轮采集跑完"},
+                    404,
+                )
+                return
+
+            base = self._base()
+            logo_base = settings.logo_base or (f"{base}/logo" if base else "")
+            epg_url = settings.epg_url or (f"{base}/epg.xml" if base else "")
+            text, _ = writers.render_m3u(
+                channels,
+                epg_url=epg_url,
+                logo_base=logo_base,
+                relay_base=base,
+                tvg_ids=state.epg.mapping(),
+            )
+            self._send(
+                200,
+                text.encode("utf-8"),
+                M3U_TYPE,
+                {"Content-Disposition": 'inline; filename="hd-iptv.m3u"'},
+            )
 
         def _relay(self, path: str) -> None:
             """/relay/<slug>/p/<token>：转发子清单、分片和密钥。"""
@@ -168,7 +298,7 @@ def make_handler(state: State):
                 return
             try:
                 code, ctype, body, extra = state.relay.resource(
-                    parts[1], parts[3], self.headers.get("Range", "")
+                    parts[1], parts[3], self.headers.get("Range", ""), self._base()
                 )
             except RelayError as exc:
                 self._json({"error": str(exc)}, 502)
@@ -178,13 +308,36 @@ def make_handler(state: State):
                 return
             self._send(code, body, ctype, extra)
 
+        def _epg(self) -> None:
+            result = load_result(settings) or {}
+            names = [str(c.get("name") or "") for c in result.get("channels", []) or []]
+            names = [n for n in names if n]
+            if not names:
+                from .normalize import load_channels
+
+                names = [c.name for c in load_channels(settings.channels_file)]
+            data = state.epg.xml(names)
+            if not data:
+                self._json({"error": "节目单尚未生成", "detail": state.epg.error}, 404)
+                return
+            self._send(200, data, "application/xml; charset=utf-8", cache="public, max-age=1800")
+
+        def _logo(self, path: str) -> None:
+            name = unquote(path[len("/logo/") :])
+            if name.lower().endswith(".png"):
+                name = name[:-4]
+            if not name:
+                self._json({"error": "缺少频道名"}, 400)
+                return
+            data = state.logos.get(name)
+            self._send(200, data, "image/png", cache="public, max-age=86400")
+
         def log_message(self, fmt: str, *args) -> None:  # 静音，避免刷屏
             return
 
         # ---------------- 路由 ----------------
         def do_GET(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
-            data_dir = settings.data_dir
 
             if path in ("/", "/index.html"):
                 self._file(WEB_DIR / "index.html", "text/html; charset=utf-8")
@@ -192,12 +345,27 @@ def make_handler(state: State):
                 self._file(WEB_DIR / "app.js", "application/javascript; charset=utf-8")
             elif path == "/static/style.css":
                 self._file(WEB_DIR / "style.css", "text/css; charset=utf-8")
-            elif path in ("/m3u", "/m3u8", "/result.m3u"):
-                self._file(data_dir / "result.m3u", "audio/x-mpegurl; charset=utf-8", "result.m3u")
-            elif path == "/txt":
-                self._file(data_dir / "result.txt", "text/plain; charset=utf-8", "result.txt")
-            elif path == "/json":
-                self._file(data_dir / "result.json", "application/json; charset=utf-8")
+            elif path in ("/m3u", "/m3u8", "/playlist.m3u", "/list.m3u", "/result.m3u"):
+                # .m3u8 是 HLS 媒体清单的扩展名，播放器会当成「单个直播流」解析，
+                # 然后报「播放格式不受支持」——所以这个入口改成跳转到 .m3u
+                if path == "/m3u8":
+                    self._redirect("/playlist.m3u")
+                else:
+                    self._playlist()
+            elif path in ("/txt", "/playlist.txt", "/result.txt"):
+                result = load_result(settings) or {}
+                channels = _channels_from_result(result)
+                if not channels:
+                    self._json({"error": "结果尚未生成，请先更新一次"}, 404)
+                    return
+                text, _ = writers.render_txt(channels, relay_base=self._base())
+                self._send(200, text.encode("utf-8"), "text/plain; charset=utf-8")
+            elif path in ("/json", "/result.json"):
+                self._file(settings.data_dir / "result.json", "application/json; charset=utf-8")
+            elif path == "/epg.xml":
+                self._epg()
+            elif path.startswith("/logo/"):
+                self._logo(path)
             elif path == "/api/status":
                 result = load_result(settings) or {}
                 relay_stats = state.relay.stats()
@@ -211,6 +379,10 @@ def make_handler(state: State):
                         "generated_at": result.get("generated_at", ""),
                         "report": result.get("report", {}),
                         "logs": state.logs[-40:],
+                        "settings": state.current_settings(),
+                        "base": self._base(),
+                        "epg": state.epg.stats(),
+                        "logos": state.logos.stats(),
                         # 上游被限流时面板要能说清楚，而不是只让用户看到画面卡住
                         "relay": {
                             "failures": relay_stats["failures"],
@@ -220,16 +392,21 @@ def make_handler(state: State):
                             "segments": relay_stats["segments"],
                         },
                         "endpoints": {
-                            "m3u": "/m3u",
+                            "m3u": "/playlist.m3u",
                             "txt": "/txt",
                             "json": "/json",
+                            "epg": "/epg.xml",
+                            "logo": "/logo/<频道名>.png",
                             "live": "/live/<slug>.m3u8",
                             "live_list": "/api/live",
                             "relay": "/relay/<slug>/p/<token>",
+                            "settings": "/api/settings",
                             "version": "/api/version?check=1",
                         },
                     }
                 )
+            elif path == "/api/settings":
+                self._json({"settings": state.current_settings(), "epg": state.epg.stats()})
             elif path == "/api/channels":
                 result = load_result(settings) or {}
                 self._json({"generated_at": result.get("generated_at", ""), "channels": result.get("channels", [])})
@@ -265,20 +442,39 @@ def make_handler(state: State):
             if path == "/api/update":
                 started = state.trigger()
                 self._json({"started": started, "message": "已开始更新" if started else "已有任务在执行"})
+            elif path == "/api/settings":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    raw = self.rfile.read(min(length, 64 * 1024)) if length else b"{}"
+                    values = json.loads(raw.decode("utf-8") or "{}")
+                    if not isinstance(values, dict):
+                        raise ValueError("需要一个 JSON 对象")
+                except (ValueError, UnicodeDecodeError) as exc:
+                    self._json({"error": f"请求体不是合法 JSON：{exc}"}, 400)
+                    return
+                updated = state.apply_settings(values)
+                state.log(f"[设置] 已更新 {', '.join(f'{k}={v}' for k, v in updated.items())}")
+                self._json({"ok": True, "settings": updated})
             else:
                 self._json({"error": "not found"}, 404)
 
     return Handler
 
 
-def _scheduler(state: State, interval_hours: float) -> None:
-    interval = max(0.05, interval_hours) * 3600
+def _scheduler(state: State) -> None:
+    """定时更新。间隔可以被面板改掉，所以每轮都重新读一次。"""
     while True:
-        try:
-            state.trigger()
-        except Exception as exc:  # noqa: BLE001
-            state.log(f"! 定时任务异常：{exc}")
-        time.sleep(interval)
+        interval = state.settings.interval_hours
+        if interval <= 0:
+            time.sleep(15)
+            continue
+        state.trigger()
+        finish_at = time.time() + interval * 3600
+        while time.time() < finish_at:
+            # 分片睡眠：面板把间隔改小以后最多 15 秒就生效
+            time.sleep(min(15.0, max(1.0, finish_at - time.time())))
+            if abs(state.settings.interval_hours - interval) > 1e-6:
+                break
 
 
 class Server(ThreadingHTTPServer):
@@ -302,17 +498,21 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
 
     if settings.run_on_start:
         state.trigger()
+
+    threading.Thread(target=_scheduler, args=(state,), daemon=True).start()
     interval = settings.interval_hours
-    if interval > 0:
-        threading.Thread(target=_scheduler, args=(state, interval), daemon=True).start()
-        state.log(f"定时更新已启用：每 {interval} 小时一次")
+    state.log(
+        f"定时更新：每 {interval:g} 小时一次" if interval > 0 else "定时更新：已关闭（面板里可以打开）"
+    )
 
     httpd = Server((host, port), make_handler(state))
-    state.log(f"服务已启动：http://{host}:{port}  （订阅地址 /m3u）")
-    state.log(f"分片缓存上限 {_cache_bytes() // (1024 * 1024)} MB，多客户端共用一个上游连接池")
+    state.log(f"服务已启动：http://{host}:{port}  （订阅地址 /playlist.m3u）")
+    state.log(
+        f"分片缓存上限 {int(settings.relay_cache_mb)} MB，清单缓存 {settings.playlist_ttl:g} 秒，"
+        "多客户端共用一个上游连接池"
+    )
     if not settings.public_url:
-        state.log("提示：未设置 PUBLIC_URL，列表里会给上游直连地址；"
-                  "播放器若不认 UA 会卡住，建议设成 http://<本机IP>:%d" % port)
+        state.log("提示：未设置对外地址，列表按请求的 Host 现拼；套了反代会自动用外网域名")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

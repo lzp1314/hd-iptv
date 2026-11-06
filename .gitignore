@@ -21,3 +21,6 @@ config/local/
 
 # 本地部署参数（端口 / 目录 / 局域网地址）
 .env
+
+# 面板设置（本机运行期参数，不入库）
+config/panel.json

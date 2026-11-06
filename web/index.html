@@ -31,10 +31,14 @@
 
   <section class="panel" id="subscribePanel">
     <h2>订阅地址</h2>
-    <p class="hint">把这几个地址填进播放器（TiviMate / ysc / Kodi / 影视 / PotPlayer 均可）。</p>
+    <p class="hint">
+      填进播放器（观屿TV / TiviMate / 影视 / Kodi / PotPlayer 均可）。
+      地址要以 <code>.m3u</code> 结尾——播放器把 <code>.m3u8</code> 当成「单个直播流」解析，
+      拿去当订阅就会提示「播放格式不受支持」。
+    </p>
     <div class="url-row">
       <span class="tag">M3U</span>
-      <input id="urlM3u" readonly value="/m3u">
+      <input id="urlM3u" readonly value="/playlist.m3u">
       <button class="btn" data-copy="urlM3u">复制</button>
     </div>
     <div class="url-row">
@@ -43,10 +47,44 @@
       <button class="btn" data-copy="urlTxt">复制</button>
     </div>
     <div class="url-row">
+      <span class="tag">EPG</span>
+      <input id="urlEpg" readonly value="/epg.xml">
+      <button class="btn" data-copy="urlEpg">复制</button>
+    </div>
+    <div class="url-row">
       <span class="tag">JSON</span>
       <input id="urlJson" readonly value="/json">
       <button class="btn" data-copy="urlJson">复制</button>
     </div>
+    <p class="hint" id="epgNote">节目单：等待首轮更新</p>
+  </section>
+
+  <section class="panel" id="settingsPanel">
+    <div class="panel-head">
+      <h2>运行设置</h2>
+      <button id="btnSaveSettings" class="btn primary">保存</button>
+    </div>
+    <p class="hint">
+      保存后立刻生效，不用重启容器。频道地址拿到后会一直用，只有被上游拒绝才换新的；
+      这里的「清单缓存」是播放器每次取清单时多久真的去上游要一次，嫌卡就调大，嫌慢就调小。
+    </p>
+    <div class="form">
+      <label>对外地址
+        <input id="setPublicUrl" type="text" placeholder="留空 = 按访问地址自动判断">
+      </label>
+      <label>自动更新间隔（小时，0 关闭）
+        <input id="setInterval" type="number" min="0" max="168" step="0.5">
+      </label>
+      <label>播放清单缓存（秒）
+        <input id="setTtl" type="number" min="0.5" max="60" step="0.5">
+      </label>
+      <label>分片缓存（MB）
+        <input id="setCache" type="number" min="0" max="4096" step="8">
+      </label>
+    </div>
+    <p class="hint" id="settingsNote">
+      套了反向代理（Lucky / Nginx）时，「对外地址」留空即可，列表会用你访问面板的外网域名和端口。
+    </p>
   </section>
 
   <section class="panel" id="aboutPanel">

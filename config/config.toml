@@ -28,7 +28,20 @@ max_per_channel = 4          # 每个频道最终保留几个源
 allow_unknown_resolution = false  # 允许分辨率未知的流（脚本源常见，开了会混进标清）
 probe_playlist_children = true    # 是否继续探测 m3u8 的子播放列表和分片
 
+[relay]
+# 播放清单缓存（秒）：播放器每取一次清单，多久才真的去上游要一次。
+# 调小=更实时但更费上游请求（上游会限流），调大=更抗限流但换台慢半拍。
+playlist_ttl = 2
+# 分片中转缓存上限（MB）。多客户端同看一个台时共用，只向上游取一次；0 关闭。
+cache_mb = 96
+
+[epg]
+# 节目单源（XMLTV）。面板上的「节目单」就是把它裁成我们自己的频道。
+# 留空则关闭节目单功能。
+source = "https://epg.pw/xmltv/epg_CN.xml"
+ttl_hours = 6                # 多久重新拉一次
+
 [output]
-epg_url = ""                 # EPG 节目单地址，可填公共 EPG；留空则结果不带 x-tvg-url
-logo_base = ""               # 台标库根地址，形如 https://example.com/logo ；留空则用源自带 tvg-logo
-public_url = ""              # 对外访问地址，例如 http://192.168.1.10:9797
+epg_url = ""                 # 手填节目单地址；留空则用内置的 /epg.xml
+logo_base = ""               # 手填台标库根地址；留空则用内置的 /logo/<频道名>.png
+public_url = ""              # 对外访问地址，例如 http://192.168.1.10:9797；留空按请求的 Host 现算

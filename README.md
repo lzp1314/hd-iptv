@@ -1,211 +1,103 @@
 # hd-iptv
 
-**高清直播源自动采集 / 清洗 / 测速 / 分发工具。零第三方依赖，一条命令跑在 NAS 上。**
+**央视 + 卫视的高清直播，自动采集、自动测速、自动分发。零第三方依赖，一条命令跑在 NAS 上。**
 
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
-它做的事只有一件：把你手上一堆来源不同、命名混乱、三天两头失效的直播源，整理成一份**只保留高清、只保留能播、按时自动刷新**的订阅列表。
+跑起来就有三十来个频道，1080P，不需要你去找任何订阅源。分辨率是从分片码流里
+读出来的真实宽高，不是接口自报的档位；每条流还带码率和测速，哪个台又重又慢
+在面板上一眼能看出来。仓库里不含任何直播地址。
 
-更关键的是，它不只会「收集」——内置的**取源器**直接向平台现场要地址，不需要任何人维护现成列表。
-
-**所以它开箱就能用**：默认配置跑完就有 55 个左右的央视和卫视频道，全部 1080P，不需要你去找任何订阅源。
-分辨率是从分片码流里读出来的真实宽高，不是接口自报的档位——哪些台真的 1080P、哪些其实只有 720P，面板上看得见。
-每条流还带**码率**（分片大小 ÷ 分片时长）和**测速**（NAS 到 CDN 的实际下载速度），哪个台又重又慢一眼就能看出来。
-仓库里不含任何直播地址——每个地址都是运行时现换的，这也是它和「搬运列表」类项目的根本区别。
-
-> 仅供个人学习与家庭内网自用。请勿用于公开转播、二次分发或任何商业用途，详见文末[合规声明](#合规声明)。
-
-```
-取源器（向平台要）          采集器（收现成的）
-平台接口 / 省广电 CDN     ←→  订阅 / 本地 / JSON 接口 / 网页
-        │                        │
-        └──────────┬─────────────┘
-                   ▼   统一成候选流
-                   ▼   清洗 + 匹配        ← 频道模板决定留谁、怎么分组
-   湖南卫视_HD → 湖南卫视
-                   ▼   探测 + 测速        ← 读 m3u8 主列表，再从分片 SPS 读真实分辨率 + 实测速率
-   1920x1080 / 6.2Mbps / 28ms
-                   ▼   过滤                ← 720P 以下丢、超时丢、404 丢、速率不达标丢
-                   ▼   输出
-   result.m3u ── result.txt ── result.json ── HTTP 订阅地址 + 网页面板
-```
-
-## 和同类项目的区别
-
-| | 常见做法 | hd-iptv |
-|---|---|---|
-| 源从哪来 | 聚合别人整理好的列表，列表死了就断供 | 内置**取源器**直接向平台要地址，另有四种采集器兜底 |
-| 判分辨率 | 调 ffprobe 解码，慢且吃 CPU | 直接读 HLS 主列表的 `RESOLUTION`，毫秒级，容器不用装 ffmpeg |
-| 判断能不能播 | 只看 HTTP 200 | 主列表能开、子清单 404 也算死；还要真读一段分片，拿不到字节就不算活 |
-| 依赖 | 一堆 pip 包 + ffmpeg | 只用 Python 标准库，`python -m iptvhd` 直接跑 |
-| 采集扩展 | 改代码 | 四种源类型靠配置拼，加源不用碰 Python |
-| 部署 | CLI 一把梭 | CLI + 网页面板 + Docker Compose（含多架构镜像） |
-
-## 内置取源器
-
-取源器不依赖现成列表：运行时向平台请求可用地址，再逐条校验画质与连通性。默认只开两个，其余留作备用。
-
-| 取源器 | 覆盖范围 | 默认 |
-|---|---|---|
-| `yangshipin` | 央视全部频道 + 全国卫视，1080P | 开 |
-| `zhejiang` | 浙江卫视 1080P，央视之外的第二条独立来源 | 开 |
-| `cctv` | 央视部分频道的备份线路 | 关 |
-| `template` | 任何「地址有规律」的平台，配置即接入 | 关 |
-
-实现方式不在这份文档里展开，代码自解释。少数频道因版权方要求不提供信号，属于上游限制，不是取源失败。
-
-### 关于 4K
-
-上游目前**最高只提供 1080P**。直接去接口请求 4K 档位（`uhd` / `4k`）会被静默降级回 1080P，返回的清晰度清单里也只有 540P / 720P / 1080P 三档，所以这里抓不到 4K，不是配置问题。
-
-`max_height` 默认已经放到 2160：哪天某个源真的提供了 4K，会自动取 4K；没有就停在 1080P，不会为了凑 4K 去牺牲稳定性。画质下限是 720，意思是「1080P 优先，只有 720P 的台也留着」——设成 1080 会让这类台整个消失。
-
-### 地址是短时的
-
-上游给出的地址带时效，项目用两层机制应对：
-
-- **定时重跑**：默认每 3 小时刷新一次 `result.m3u`，保证列表里的地址新鲜
-- **本机转发**：`/live/<slug>.m3u8` 由服务端现换成新地址再转给播放器。播放器看到的是 NAS 自己的地址，不用关心时效，也不受客户端限制
+> 仅供个人学习与家庭内网自用，详见文末[合规声明](#合规声明)。
 
 ## 快速开始
 
-### 0. 先看效果（不需要任何订阅源）
-
-仓库自带一个演示项目，用的是公开的 HLS 测试流，跟版权内容无关：
-
-```bash
-git clone https://github.com/lzp1314/hd-iptv.git
-cd hd-iptv
-python -m iptvhd --root examples update
-```
-
-输出在 `examples/output/result.m3u`。它会识别出 1080P 并保留，360P 直接丢掉。
-
-### 1. 扩充来源
-
-`config/sources.toml` 里三种方式任选：开一个自己的订阅、加一个省广电模块、或者用 `template` 填 URL 模板。
-
-```toml
-[[source]]
-name = "我的订阅"
-type = "subscription"
-url = "https://example.com/list.m3u"
-enabled = true
-```
-
-### 2. 自检
-
-```bash
-python -m iptvhd doctor
-```
-
-它会告诉你：模板载入了几个频道、有几个源启用、输出目录能不能写、门槛设成多少。有 ✗ 就先修 ✗。
-
-### 3. 跑一次
-
-```bash
-python -m iptvhd update
-```
-
-### 4. 起服务（推荐）
-
-```bash
-python -m iptvhd serve --port 9797
-```
-
-打开 `http://NAS_IP:9797` 就是面板，订阅地址：
-
-| 用途 | 地址 |
-|---|---|
-| M3U 订阅 | `http://NAS_IP:9797/m3u` |
-| TXT 订阅 | `http://NAS_IP:9797/txt` |
-| JSON 数据 | `http://NAS_IP:9797/json` |
-| 单台播放 | `http://NAS_IP:9797/live/cctv1.m3u8` |
-| 可用 slug 清单 | `http://NAS_IP:9797/api/live` |
-
-填进 TiviMate / ysc / Kodi / 影视仓 / PotPlayer 都能直接用。面板上有「检查更新」，点一下会跟仓库比版本，升级方式也写在旁边。
-
-**两种用法怎么选：**
-
-- **订阅列表 `/m3u`** —— 一次拿到全部频道，适合当日常主用。设了 `PUBLIC_URL` 时，列表里给的是本机转发地址，播放器直接用。
-- **单台地址 `/live/<slug>.m3u8`** —— 每个频道一个固定地址，服务端现换地址再转发，永远不会失效。
-
-`slug` 就是频道名的小写形式，比如 `cctv1`、`cctv5`、`hnws`（湖南卫视）、`zjws`（浙江卫视），完整清单看 `/api/live`。
-
-## 部署
-
-两种方式，按需选一种：
-
-| 方式 | 适合谁 | 命令 |
-|---|---|---|
-| **源码构建** | 想改代码、看得到源码 | `docker compose up -d --build` |
-| **拉现成镜像** | 只想跑起来 | `docker run ... ghcr.io/lzp1314/hd-iptv:latest` |
-
-镜像在 GitHub Actions 里自动构建，`amd64` 和 `arm64` 都有，推 `main` 或打 `v*` 标签各出一版。
-
-### 拉起来之后会经历什么
-
-| 时间 | 状态 |
-|---|---|
-| 0~5 秒 | 服务已经能访问，面板打得开，`/health` 返回 200 |
-| 5~90 秒 | 后台跑首次采集，这时 `/m3u` 返回 404，body 是「结果尚未生成，请先更新一次」 |
-| 90 秒后 | 54~56 个频道就绪，`/m3u` 可取，之后每 3 小时自动刷新 |
-
-**不挂任何卷也能跑**——镜像里自带一份默认配置，结果写在容器内的 `/app/output`。能播，但删了容器结果就没了，所以下面还是建议挂两个目录。
-
-### 方式一：Docker Compose（推荐）
-
-```bash
-git clone https://github.com/lzp1314/hd-iptv.git
-cd hd-iptv
-docker compose up -d --build
-```
-
-起来后直接访问 `http://NAS_IP:9797`。**配置不用先准备**——`config/` 是空的也没关系，首次启动会自动写入一份默认配置（1080P 主源 + 一条备用来源）。
-
-要改端口 / 目录 / 局域网地址，复制一份 `.env` 再改，别动 yml：
-
-```bash
-cp .env.example .env
-```
-
-```ini
-HOST_PORT=9797
-CONFIG_DIR=/vol2/1000/docker/hd-iptv/config
-OUTPUT_DIR=/vol2/1000/docker/hd-iptv/output
-PUBLIC_URL=http://192.168.1.10:9797
-```
-
-改完 `docker compose up -d` 重来一次即可（改环境变量会重建容器，不会重装镜像）。
-
-### 方式二：直接跑镜像
+**Docker（推荐）**
 
 ```bash
 docker run -d --name hd-iptv --restart unless-stopped \
   -p 9797:9797 \
   -v /vol2/1000/docker/hd-iptv/config:/app/config \
   -v /vol2/1000/docker/hd-iptv/output:/app/output \
-  -e HDIPTV_INTERVAL_HOURS=3 \
-  -e HDIPTV_MIN_HEIGHT=720 \
-  -e HDIPTV_MAX_HEIGHT=2160 \
-  -e PUBLIC_URL=http://192.168.1.10:9797 \
   ghcr.io/lzp1314/hd-iptv:latest
 ```
 
-`/vol2/1000/docker/...` 是飞牛的路径，换成你自己的即可，两个目录不存在会自动创建。
+打开 `http://NAS_IP:9797` 就是控制台。首次启动会自动写入默认配置并开始采集，
+一两分钟后订阅地址就可以用了。
 
-### 飞牛 fnOS
+**源码跑**
 
-飞牛的 Docker 面板对 compose 支持得不错，两条路：
+```bash
+git clone https://github.com/lzp1314/hd-iptv.git
+cd hd-iptv
+python -m iptvhd serve --port 9797
+```
+
+只用 Python 标准库，3.11 以上，不需要 pip install。
+
+**播放器里填什么**
+
+| 用途 | 地址 |
+|---|---|
+| M3U 订阅（主用） | `http://NAS_IP:9797/playlist.m3u` |
+| TXT 订阅 | `http://NAS_IP:9797/txt` |
+| 节目单 | `http://NAS_IP:9797/epg.xml` |
+| 单台播放 | `http://NAS_IP:9797/live/cctv1.m3u8` |
+
+订阅地址要以 `.m3u` 结尾。播放器会把 `.m3u8` 当成「单个直播流」解析，拿去当
+订阅就会提示「播放格式不受支持」——观屿TV、TiviMate、影视仓、Kodi、PotPlayer
+都适用这一条。
+
+## 部署
+
+### Docker Compose
+
+```bash
+git clone https://github.com/lzp1314/hd-iptv.git
+cd hd-iptv
+cp .env.example .env      # 按需改端口和目录，不改也能跑
+docker compose up -d --build
+```
+
+`config/` 是空的也没关系，首次启动会自动补一份默认配置。
+
+常用环境变量（`.env` 里写，或直接 `-e`）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `HOST_PORT` | `9797` | 宿主机端口，容器内始终是 9797 |
+| `CONFIG_DIR` | `./config` | 配置目录，建议写绝对路径 |
+| `OUTPUT_DIR` | `./output` | 结果目录，建议写绝对路径 |
+| `PUBLIC_URL` | 空 | 对外地址。留空则按访问时的域名端口自动判断，套反代不用填 |
+| `HDIPTV_INTERVAL_HOURS` | `3` | 自动刷新间隔（小时），0 关闭 |
+| `HDIPTV_MIN_HEIGHT` / `HDIPTV_MAX_HEIGHT` | `720` / `2160` | 画质区间 |
+| `HDIPTV_RELAY_CACHE_MB` | `96` | 分片中转缓存（MB） |
+
+端口、刷新间隔、清单缓存、对外地址都可以直接在面板上改，改完立刻生效，
+不用重启容器。
+
+### 外网访问（反向代理）
+
+用 Lucky / Nginx / 群晖反代把 `9797` 映射出去就行，订阅地址就是
+「外网域名 + 反代端口 + `/playlist.m3u`」，例如 `https://tv.example.com:8443/playlist.m3u`。
+
+列表里的播放地址是按请求的 Host 现拼的（认 `X-Forwarded-Host` / `X-Forwarded-Proto`），
+所以内网访问拿到内网地址、外网访问拿到外网地址，两边都能直接播。只有在反代
+不透传 `Host` 头时，才需要去面板「运行设置」里手填一次对外地址。
+
+反代记得关掉响应缓冲，否则直播会卡成幻灯片。
+
+## 飞牛 fnOS
 
 **A. 面板里贴 compose（不用 SSH）**
 
-1. 文件管理建目录：`/vol2/1000/docker/hd-iptv/`，里面再建 `config`、`output`
+1. 文件管理建目录 `/vol2/1000/docker/hd-iptv/`，里面再建 `config`、`output`
 2. Docker → Compose → 新建项目，项目目录选 `/vol2/1000/docker/hd-iptv`
-3. compose 内容用仓库里的 `docker-compose.yml`，但把 `build: .` 改成 `image: ghcr.io/lzp1314/hd-iptv:latest`（面板里没有源码，构建不了）
+3. compose 内容用仓库里的 `docker-compose.yml`，把 `build: .` 换成
+   `image: ghcr.io/lzp1314/hd-iptv:latest`（面板里没有源码，构建不了）
 4. 卷映射写**绝对路径**：`/vol2/1000/docker/hd-iptv/config:/app/config`
 5. 启动，浏览器开 `http://飞牛IP:9797`
 
@@ -218,39 +110,31 @@ cd hd-iptv
 docker compose up -d --build
 ```
 
-> **两个必看的坑**
-> 1. `docker restart` **不会**重新读卷映射。改过挂载路径必须删容器重建：`docker compose up -d --force-recreate`。
-> 2. 挂载的 `config` 目录如果指向别处（比如匿名卷 `/vol2/docker/volumes/<hash>/_data`），你在宿主机上改的配置根本没进容器。用 `docker inspect hd-iptv --format '{{json .Mounts}}'` 核对一下 Source 是不是你以为的目录。
+> **两个坑**
+> 1. `docker restart` **不会**重新读卷映射，改过挂载路径必须删容器重建：
+>    `docker compose up -d --force-recreate`。
+> 2. 挂载目录如果不是你改的那个，配置根本不进容器。核对一下：
+>    `docker inspect hd-iptv --format '{{json .Mounts}}'`。
 
-### 群晖 / 极空间 / 威联通
-
-把 `config` 和 `output` 两个目录映射出去即可，`amd64`（群晖 x86 机型）和 `arm64`（部分 ARM 机型）都有镜像。群晖的 Container Manager 支持直接导入 `docker-compose.yml`。
-
-### 镜像从哪来
+## 镜像从哪来
 
 | 位置 | 说明 |
 |---|---|
-| `ghcr.io/lzp1314/hd-iptv` | 多架构镜像（`amd64` + `arm64`），有 `latest` 和 `main` 两个 tag |
-| 本地构建 | `docker compose up -d --build` 出的 `hd-iptv:local`，不依赖任何镜像仓库 |
+| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` + `arm64`），tag 有 `latest` 和 `main` |
+| 本地构建 | `docker compose up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库 |
 
-拉不动 `ghcr.io` 时（国内网络常见），用本地构建那条，效果一样。
+GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉不动 `ghcr.io` 时用本地
+构建那条，效果一样。
 
 ## 命令行
 
 ```bash
 python -m iptvhd update          # 跑一次完整更新
-python -m iptvhd update --quiet  # 只打印汇总
+python -m iptvhd update --quiet   # 只打印汇总
 python -m iptvhd serve --port 9797
-python -m iptvhd doctor          # 配置自检
-python -m iptvhd probe <地址...>  # 单条验证：能不能播、多少 P、多快
+python -m iptvhd doctor           # 配置自检
+python -m iptvhd probe <地址...>   # 单条验证：能不能播、多少 P、多快
 python -m iptvhd --version
-```
-
-`probe` 是接新平台时的第一件工具。找到一个候选地址，先探一下再写进配置，比跑整轮更新快得多：
-
-```bash
-$ python -m iptvhd probe "https://cdn.example.com/zjws/1080p.m3u8"
-可用    1080P 1920x1080  33.3Mbps  505ms  https://cdn.example.com/...
 ```
 
 通用参数 `--root <目录>` 可以指向任意项目目录，用来跑多套配置。
@@ -259,109 +143,26 @@ $ python -m iptvhd probe "https://cdn.example.com/zjws/1080p.m3u8"
 
 | 路径 | 说明 |
 |---|---|
-| `/` | 网页面板（含版本检查） |
-| `/m3u` `/txt` `/json` | 结果文件 |
-| `/api/status` | 运行状态、统计、最近日志 |
-| `/api/channels` | 频道与源明细 |
+| `/` | 网页面板 |
+| `/playlist.m3u` | M3U 订阅（`/m3u` 是别名） |
+| `/txt` `/json` | TXT 订阅 / 频道明细 |
+| `/epg.xml` | 节目单（只含自己的频道） |
+| `/logo/<频道名>.png` | 台标，服务端取一次存本地 |
 | `/live/<slug>.m3u8` | 单频道播放列表，服务端现换地址并转发 |
 | `/relay/<slug>/p/<token>` | 中转内部地址，播放器自动请求，不用手填 |
-| `/api/live` | 可用频道清单 |
-| `/api/version?check=1` | 当前版本，顺便跟仓库比一下有没有新版 |
-| `/api/relay` | 中转缓存、分片命中率与最近错误，排查播放问题用 |
+| `/api/live` | 可用频道 slug 清单 |
+| `/api/status` | 运行状态、统计、设置、最近日志 |
+| `/api/channels` | 频道与源明细 |
+| `/api/settings` | 读写面板设置（`POST` 生效） |
+| `/api/version?check=1` | 当前版本，顺便跟仓库比一下 |
+| `/api/relay` | 中转缓存与最近错误，排查播放问题用 |
 | `POST /api/update` | 手动触发一次更新 |
 | `/health` | 健康检查（给 Docker HEALTHCHECK 用） |
 
-## 输出示例
-
-```m3u
-#EXTM3U x-tvg-url="https://epg.example.com/e.xml"
-#EXTINF:-1 tvg-id="CCTV1" tvg-name="CCTV-1" group-title="央视" tvg-logo="https://logo.example.com/CCTV-1.png",CCTV-1
-http://192.168.1.10:9797/live/cctv1.m3u8
-```
-
-设了 `PUBLIC_URL`，列表里给的就是这种本机地址——播放器连的是 NAS，不用管上游地址的时效和客户端限制。没设则退回上游直连地址，部分播放器可能放不出来。
-
-一个频道多个源时，名字后面会标画质，方便在播放器里挑；排序是「分辨率优先，其次速率，再次延迟」。
-
-## 测试
-
-```bash
-python -m unittest discover -s tests -t . -v
-```
-
-95 个用例，包含一个端到端测试：本地起一个伪造的 HLS 服务器（主列表 + 分片 + 一个 404），跑完整管线，断言 1080P 被保留、360P 与 404 被丢弃，输出格式正确。
-
-## 常见问题
-
-**容器起来了，但网页里一个频道都没有**
-先看日志头一行有没有 `[初始化] 已写入默认配置`。没有的话，多半是挂载没落到你改的那个目录上——程序在容器里往 `/app/config` 写，你在宿主机改的是另一份。核对实际挂载：
-
-```bash
-docker inspect hd-iptv --format '{{json .Mounts}}' | python -m json.tool
-```
-
-看 `Source` 是不是你预期的路径。改完挂载必须重建容器，`docker restart` 不生效。
-
-**9797 端口被占了**
-改 `.env` 里的 `HOST_PORT=9798`（或 compose 里 `"9798:9797"`），然后 `docker compose up -d`。容器内始终是 9797，只改左边。
-
-**更新后是空的 / 0 条**
-1. `doctor` 看有没有启用的源
-2. 模板里有没有对应频道名（`CCTV-1` 和 `cctv1` 能对上，`央视综合` 要靠别名）
-3. 把 `min_height` 临时调到 0、`allow_unknown_resolution` 设为 true 再跑一次，确认是过滤太狠还是压根没采到
-4. 日志里搜「未匹配」，未匹配数很高说明源里的频道名跟模板差太远
-
-**大量 403 / 超时**
-多为 UA 或 Referer 校验。给对应源加 `ua` / `headers`，或者调大 `timeout`、降低 `concurrency`。
-
-**结果里混进标清**
-`min_height` 提到 1080，并关掉 `allow_unknown_resolution`。HLS 源基本都能拿到 `RESOLUTION`，拿不到的本来就是脚本录屏类，画质不可控。
-
-**频道对不上**
-优先加别名。别名比模糊匹配可靠，模糊匹配只在名字包含时才兜底，且有数字边界保护。
-
-**NAS 上跑起来很卡**
-`concurrency` 降到 8，`sample_bytes` 降到 131072，顺便把 `max_per_channel` 设成 2。
-
-**列表里只有一个台能播，其他点了没反应**
-
-这是播放器 UA 被上游拒绝的典型症状：主清单能打开，取分片时换成播放器自己的 UA，就被挡回去了。项目默认让列表走本机转发，就是为了避免这件事。
-
-前提是 `.env` 里设了 `PUBLIC_URL=http://<NAS的IP>:9797`。没设的话，列表给的是上游直连地址，就会出现这个问题。设完重新跑一次更新即可。
-
-**看着看着自动跳到下一个台**
-
-播放器把列表里的每一条当成一段媒体，某一条取流失败它就顺延播下一条——所以「跳台」本质是「这一条报错了」。上游对同一 IP 的请求频率很敏感，播放器刷新清单加上多台设备同时看，很容易撞上拒绝。
-
-现在中转层做了三件事来避免：清单缓存 2 秒、同一频道的并发刷新只打一次上游、拉清单失败时**返回上一份成功的清单**而不是报错。分片也按内容缓存，重复请求、拖动进度、多个客户端都不会再去打上游。
-
-如果仍然频繁跳，打开 `/api/relay` 看 `failures` 是否在涨：涨说明上游确实在拒，`errors` 里会写明是哪个台、什么状态码；不涨就不是上游问题，多半是播放器自己的设置。
-
-**有些台看着不像 1080P**
-
-以前是按接口标注的档位打标签，现在改成从分片码流里读 SPS 拿真实宽高，面板上直接显示 `1920×1080` 这种实际值。如果某个台显示的是 `1280×720`，那就是上游给的就是 720P——信号源本身就是标清上变换，改配置也变不出 1080P。
-
-**检查更新报 Connection reset by peer**
-
-这是 NAS 到 `raw.githubusercontent.com` 的线路被重置，不是仓库或代码的问题。检查更新现在会依次尝试 jsDelivr、raw、GitHub API 三个地址，只要有一个通就能出结果；三个都不通时面板会显示「连不上更新服务器」，鼠标悬停能看到每个源的具体错误。这条不影响直播。
-
-**播一会儿就卡、过一会儿又好了**
-
-上游对同一地址的重复请求有频率判定，撞上冷却窗口会短暂拒绝。播放器一般会自己重试；频繁卡就等一两分钟，或者把 `interval_hours` 调小，让它更早换新地址。
-
-**某些台这次有、下次没**
-
-上游会把地址分到不同边缘节点，个别节点临时拒绝请求，偶发一两个台缺席是正常的，下一轮会回来。要长期盯住某个台，用 `/live/<slug>.m3u8` 那条固定地址。
-
-**为什么跑一轮要一两分钟**
-
-取源和探测都要控制请求节奏，发太快会被上游判为异常流量。这是后台定时任务，不需要盯着等。
-
 ## 合规声明
 
-本项目只是一个**播放列表管理工具**，不生产、不存储、不分发任何音视频内容，仓库内不含任何频道地址或频道数据。
-
-内置取源器的做法是：运行时向平台请求播放地址，拿到即用、不落盘、不二次分发。它依赖上游接口现状，接口一变就得跟着调整，所以不可能是一个「装上就永久有效」的东西。
+本项目只是一个**播放列表管理工具**，不生产、不存储、不分发任何音视频内容，
+仓库内不含任何频道地址或频道数据。
 
 - 采集到的直播流版权归各电视台 / 平台所有，请仅用于个人学习与家庭内网自用
 - 不要用于商业转播、公开分发或任何侵权用途

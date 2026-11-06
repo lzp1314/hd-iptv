@@ -153,6 +153,13 @@ class _SegmentCache:
         if item:
             self._bytes -= len(item[2])
 
+    def resize(self, max_bytes: int) -> None:
+        """改限额，并把超出部分从最旧的开始丢掉。"""
+        with self._lock:
+            self.max_bytes = max(0, int(max_bytes))
+            while self._bytes > self.max_bytes and self._data:
+                self._drop(next(iter(self._data)))
+
     def stats(self) -> dict:
         with self._lock:
             return {"entries": len(self._data), "bytes": self._bytes}
@@ -243,7 +250,18 @@ class Relay:
         """丢掉地址与清单缓存，下次请求时换新地址。"""
         with self._lock:
             self._cache.pop(slug, None)
-            self._playlists.pop(slug, None)
+            for key in [k for k in self._playlists if k.endswith(f"|{slug}")]:
+                self._playlists.pop(key, None)
+
+    def configure(self, *, playlist_ttl: float | None = None, cache_bytes: int | None = None) -> None:
+        """面板上改了参数后立刻生效，不用重启容器。
+
+        清单缓存调小=更实时但更费上游请求；调大=更抗限流但换台慢半拍。
+        """
+        if playlist_ttl is not None:
+            self._playlist_ttl = max(0.5, float(playlist_ttl))
+        if cache_bytes is not None:
+            self._segments.resize(int(cache_bytes))
 
     def _mark_failed(self, slug: str, message: str) -> None:
         """记一次失败并进入冷却。
@@ -266,7 +284,7 @@ class Relay:
         now = time.time()
         with self._lock:
             cached = {k: round(now - v[0]) for k, v in self._cache.items()}
-            playlists = {k: round(now - v[0], 1) for k, v in self._playlists.items()}
+            playlists = {k.split("|", 1)[-1]: round(now - v[0], 1) for k, v in self._playlists.items()}
         seg = self._segments.stats()
         seg.update({"hits": self._segments.hits, "misses": self._segments.misses})
         return {
@@ -289,11 +307,16 @@ class Relay:
             raise RelayError(f"上游不可达：{exc}") from exc
 
     # ---------------- 改写 ----------------
-    def wrap(self, slug: str, url: str) -> str:
-        """把上游地址换成本机的转发地址。"""
-        return f"/relay/{urllib.parse.quote(slug)}/p/{encode(url)}"
+    def wrap(self, slug: str, url: str, prefix: str = "") -> str:
+        """把上游地址换成本机的转发地址。
 
-    def _rewrite(self, text: str, base: str, slug: str) -> str:
+        ``prefix`` 是这次的对外地址（比如 ``http://192.168.1.10:9797``）。
+        给全路径而不是 ``/relay/...``：少数播放器不按清单地址解析相对路径，
+        拿到相对地址就直接报「格式不支持」。
+        """
+        return f"{prefix}/relay/{urllib.parse.quote(slug)}/p/{encode(url)}"
+
+    def _rewrite(self, text: str, base: str, slug: str, prefix: str = "") -> str:
         out: list[str] = []
         for line in text.splitlines():
             stripped = line.strip()
@@ -303,50 +326,53 @@ class Relay:
             if stripped.startswith("#"):
                 out.append(
                     _URI_ATTR.sub(
-                        lambda m: f'URI="{self.wrap(slug, urllib.parse.urljoin(base, m.group(1)))}"',
+                        lambda m: f'URI="{self.wrap(slug, urllib.parse.urljoin(base, m.group(1)), prefix)}"',
                         line,
                     )
                 )
             else:
-                out.append(self.wrap(slug, urllib.parse.urljoin(base, stripped)))
+                out.append(self.wrap(slug, urllib.parse.urljoin(base, stripped), prefix))
         return "\n".join(out) + "\n"
 
     # ---------------- 对外 ----------------
-    def playlist(self, slug: str) -> str:
+    def playlist(self, slug: str, prefix: str = "") -> str:
         """返回改写后的 m3u8 文本。
 
         失败时优先返回上一份成功的结果——播放器拿不到清单就会直接跳到列表中
         的下一个频道，那正是「看十几秒跳台」的表现，比给一份稍旧的清单糟得多。
+
+        缓存按「对外地址 + 频道」分开存：内网和外网访问拿到的该是两套地址。
         """
+        key = f"{prefix}|{slug}"
         now = time.time()
         with self._lock:
-            cached = self._playlists.get(slug)
+            cached = self._playlists.get(key)
             if cached and now - cached[0] <= self._playlist_ttl:
                 return cached[1]
-            flight = self._flights.setdefault(slug, threading.Lock())
+            flight = self._flights.setdefault(key, threading.Lock())
 
         # 同一频道的并发刷新只让一个去上游，其余等它把结果放进缓存
         with flight:
             with self._lock:
-                cached = self._playlists.get(slug)
+                cached = self._playlists.get(key)
                 if cached and time.time() - cached[0] <= self._playlist_ttl:
                     return cached[1]
 
             try:
-                text = self._fetch_playlist(slug)
+                text = self._fetch_playlist(slug, prefix)
             except RelayError:
                 with self._lock:
-                    stale = self._playlists.get(slug)
+                    stale = self._playlists.get(key)
                 if stale and time.time() - stale[0] <= self._stale_max:
                     self.stale_served += 1
                     return stale[1]
                 raise
 
             with self._lock:
-                self._playlists[slug] = (time.time(), text)
+                self._playlists[key] = (time.time(), text)
             return text
 
-    def _fetch_playlist(self, slug: str) -> str:
+    def _fetch_playlist(self, slug: str, prefix: str = "") -> str:
         url, ua = self.upstream(slug)
         status, _, body = self._fetch(url, ua)
         if status in _GONE:
@@ -361,10 +387,10 @@ class Relay:
         if "#EXTM3U" not in text:
             self._mark_failed(slug, "上游返回的不是 m3u8 清单")
             raise RelayError("上游返回的不是 m3u8 清单")
-        return self._rewrite(text, url, slug)
+        return self._rewrite(text, url, slug, prefix)
 
     def resource(
-        self, slug: str, token: str, range_spec: str = ""
+        self, slug: str, token: str, range_spec: str = "", prefix: str = ""
     ) -> tuple[int, str, bytes, dict]:
         """转发一个分片 / 密钥 / 子清单。
 
@@ -406,7 +432,7 @@ class Relay:
         # 拿着上游地址直连，又回到被 UA 拒绝的老问题
         if _is_playlist(url, headers, body):
             text = body.decode("utf-8", "replace")
-            rewritten = self._rewrite(text, url, slug).encode("utf-8")
+            rewritten = self._rewrite(text, url, slug, prefix).encode("utf-8")
             return 200, "application/vnd.apple.mpegurl; charset=utf-8", rewritten, {}
 
         ctype = headers.get("Content-Type") or _guess_type(url)

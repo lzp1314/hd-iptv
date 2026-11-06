@@ -1,12 +1,21 @@
 const $ = (id) => document.getElementById(id);
 let cache = [];
+let apiBase = "";
+let settingsDirty = false;
 
+// 面板上展示的地址用服务端算出来的对外地址：套了反代时它才是外网能用的那个
 function base() {
-  return location.origin;
+  return (apiBase || location.origin).replace(/\/+$/, "");
 }
 
 function fillUrls() {
-  for (const [id, path] of [["urlM3u", "/m3u"], ["urlTxt", "/txt"], ["urlJson", "/json"]]) {
+  const map = {
+    urlM3u: "/playlist.m3u",
+    urlTxt: "/txt",
+    urlEpg: "/epg.xml",
+    urlJson: "/json",
+  };
+  for (const [id, path] of Object.entries(map)) {
     const el = $(id);
     if (el) el.value = base() + path;
   }
@@ -17,6 +26,17 @@ function setDot(state) {
   dot.className = "dot " + state;
 }
 
+function epgText(epg) {
+  if (!epg) return "节目单：-";
+  const n = epg.channels || 0;
+  if (n > 0) {
+    const ago = epg.age == null ? "" : `（${epg.age} 秒前生成）`;
+    return `节目单：已对上 ${n} 个频道${ago}`;
+  }
+  if (epg.error) return `节目单：${epg.error}`;
+  return "节目单：等待生成（更新一次即可，或者直接打开 /epg.xml 触发）";
+}
+
 async function loadStatus() {
   try {
     const r = await fetch("/api/status", { cache: "no-store" });
@@ -24,6 +44,11 @@ async function loadStatus() {
     $("version").textContent = "v" + (d.version || "-");
     if ($("curVersion")) $("curVersion").textContent = "v" + (d.version || "-");
     const rep = d.report || {};
+
+    if (d.base && d.base !== apiBase) {
+      apiBase = d.base;
+      fillUrls();
+    }
 
     setDot(d.running ? "busy" : (d.last_error ? "err" : "ok"));
     $("btnUpdate").disabled = !!d.running;
@@ -42,11 +67,14 @@ async function loadStatus() {
         banner.hidden = false;
         banner.textContent =
           `上游最近拒绝 ${relay.failures} 次请求，已用缓存顶住 ${relay.stale_served || 0} 次${detail}。` +
-          "这段时间画面可能卡顿，通常一两分钟自动恢复；恢复前少切台能少触发请求。";
+          "这段时间画面可能卡顿，通常一两分钟自动恢复；恢复前少切台能少触发请求，也可以把「播放清单缓存」调大一点。";
       } else {
         banner.hidden = true;
       }
     }
+
+    if ($("epgNote")) $("epgNote").textContent = epgText(d.epg);
+    fillSettings(d.settings || {});
 
     const logs = (d.logs || []).join("\n");
     const box = $("log");
@@ -55,6 +83,44 @@ async function loadStatus() {
   } catch (e) {
     setDot("err");
     $("log").textContent = "无法连接服务：" + e;
+  }
+}
+
+function fillSettings(s) {
+  if (settingsDirty) return;
+  if ($("setPublicUrl")) $("setPublicUrl").value = s.public_url || "";
+  if ($("setInterval")) $("setInterval").value = s.interval_hours != null ? s.interval_hours : "";
+  if ($("setTtl")) $("setTtl").value = s.playlist_ttl != null ? s.playlist_ttl : "";
+  if ($("setCache")) $("setCache").value = s.cache_mb != null ? s.cache_mb : "";
+}
+
+async function saveSettings() {
+  const btn = $("btnSaveSettings");
+  const note = $("settingsNote");
+  const payload = {
+    public_url: $("setPublicUrl").value.trim(),
+    interval_hours: Number($("setInterval").value || 0),
+    playlist_ttl: Number($("setTtl").value || 2),
+    cache_mb: Number($("setCache").value || 96),
+  };
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    settingsDirty = false;
+    note.textContent = `已保存：更新间隔 ${d.settings.interval_hours} 小时、`
+      + `清单缓存 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB。`
+      + "播放器里的地址如果变了，重新拉一次列表即可。";
+    await refresh();
+  } catch (e) {
+    note.textContent = "保存失败：" + e.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -88,6 +154,10 @@ function rateTitle(stream) {
   return parts.join("\n") || "这一轮没测到速率（多半被上游限流，播放不受影响）";
 }
 
+function gradePillClass(grade) {
+  return grade === "4K" ? "g4k" : grade === "1080P" ? "g1080" : grade === "720P" ? "g720" : "";
+}
+
 function streamMeta(stream) {
   const size = stream.width && stream.height ? `${stream.width}×${stream.height}` : "";
   const rate = rateText(stream);
@@ -95,10 +165,6 @@ function streamMeta(stream) {
   return `<span class="pill ${gradePillClass(stream.grade)}">${stream.grade || "未知"}</span>
     ${size ? `<span class="res">${size}</span>` : ""}
     <span class="rate ${cls}" title="${rateTitle(stream).replace(/"/g, "&quot;")}">${rate}</span>`;
-}
-
-function gradePillClass(grade) {
-  return grade === "4K" ? "g4k" : grade === "1080P" ? "g1080" : grade === "720P" ? "g720" : "";
 }
 
 function renderChannels(channels) {
@@ -210,7 +276,14 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btnUpdate").addEventListener("click", triggerUpdate);
   $("btnRefresh").addEventListener("click", refresh);
   $("btnCheckUpdate").addEventListener("click", checkUpdate);
+  $("btnSaveSettings").addEventListener("click", saveSettings);
   $("search").addEventListener("input", () => renderChannels(cache));
+
+  // 用户正在改设置时不要被轮询覆盖
+  ["setPublicUrl", "setInterval", "setTtl", "setCache"].forEach((id) => {
+    const el = $(id);
+    if (el) el.addEventListener("input", () => { settingsDirty = true; });
+  });
 
   document.querySelectorAll("[data-copy]").forEach((btn) => {
     btn.addEventListener("click", async () => {

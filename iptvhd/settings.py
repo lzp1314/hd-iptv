@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tomllib
@@ -13,6 +14,20 @@ from pathlib import Path
 DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
 DEFAULT_FILES = ("config.toml", "channels.txt", "sources.toml")
 DEFAULT_CONFIG_DIRNAME = "config"
+
+# 面板上可改的项存这里，而不是回写 config.toml：
+# TOML 没有标准写入库，手写补丁容易把注释和格式搞乱。
+PANEL_FILE = "panel.json"
+
+# 允许面板修改的数值项及其取值范围，越界一律夹回区间内
+PANEL_BOUNDS = {
+    "interval_hours": (0.0, 168.0),
+    "playlist_ttl": (0.5, 60.0),
+    "cache_mb": (0.0, 4096.0),
+}
+
+# 公共节目单源：epg.pw 的国内频道表，用 display-name 反查 id
+DEFAULT_EPG_SOURCE = "https://epg.pw/xmltv/epg_CN.xml"
 
 DEFAULT_CONFIG = """\
 [app]
@@ -40,11 +55,63 @@ max_per_channel = 4
 allow_unknown_resolution = false
 probe_playlist_children = true
 
+[relay]
+playlist_ttl = 2
+cache_mb = 96
+
+[epg]
+source = "https://epg.pw/xmltv/epg_CN.xml"
+ttl_hours = 6
+
 [output]
 epg_url = ""
 logo_base = ""
 public_url = ""
 """
+
+
+def read_panel(path: Path) -> dict:
+    """读面板覆盖项，坏文件当作空。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def coerce_panel(raw: dict) -> dict:
+    """把面板提交的内容收敛成合法值，非法项直接丢掉。"""
+    out: dict = {}
+    for key, value in (raw or {}).items():
+        if key in ("public_url", "epg_url"):
+            text = str(value or "").strip()
+            out[key] = text.rstrip("/") if key == "public_url" else text
+        elif key in PANEL_BOUNDS:
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            if num != num:  # NaN
+                continue
+            low, high = PANEL_BOUNDS[key]
+            num = max(low, min(high, num))
+            out[key] = int(round(num)) if key == "cache_mb" else round(num, 2)
+    return out
+
+
+def write_panel(path: Path, values: dict) -> dict:
+    """合并写入并返回完整内容。"""
+    path = Path(path)
+    merged = read_panel(path)
+    merged.update(coerce_panel(values))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+    return merged
 
 
 @dataclass(slots=True)
@@ -53,6 +120,9 @@ class Settings:
     data: dict = field(default_factory=dict)
     channels_file: Path = field(default_factory=lambda: Path("config/channels.txt"))
     sources_file: Path = field(default_factory=lambda: Path("config/sources.toml"))
+    # 面板上改过的项（panel.json），优先级高于 config.toml 与环境变量
+    panel: dict = field(default_factory=dict)
+    panel_path: Path = field(default_factory=lambda: Path("config/panel.json"))
 
     # ---- 便捷读取 ----
     def section(self, name: str) -> dict:
@@ -61,6 +131,9 @@ class Settings:
 
     def get(self, section: str, key: str, default=None):
         return self.section(section).get(key, default)
+
+    def panel_get(self, key: str):
+        return self.panel.get(key)
 
     # ---- 常用项 ----
     @property
@@ -115,18 +188,62 @@ class Settings:
 
     @property
     def public_url(self) -> str:
-        return os.environ.get("PUBLIC_URL") or self.get("output", "public_url", "")
+        """对外地址。面板里填过就用面板的，其次环境变量，最后配置文件。
+
+        留空时由服务端按请求的 Host / X-Forwarded-Host 现算，反代场景不用手改。
+        """
+        panel = self.panel_get("public_url")
+        if panel is not None:
+            return str(panel).strip().rstrip("/")
+        return (os.environ.get("PUBLIC_URL") or self.get("output", "public_url", "")).strip().rstrip("/")
 
     @property
     def epg_url(self) -> str:
-        return self.get("output", "epg_url", "")
+        panel = self.panel_get("epg_url")
+        if panel is not None:
+            return str(panel).strip()
+        return str(self.get("output", "epg_url", "") or "").strip()
 
     @property
     def logo_base(self) -> str:
         return self.get("output", "logo_base", "")
 
     @property
+    def epg_source(self) -> str:
+        return str(self.get("epg", "source", DEFAULT_EPG_SOURCE) or "").strip()
+
+    @property
+    def epg_ttl_hours(self) -> float:
+        return float(os.environ.get("HDIPTV_EPG_TTL_HOURS") or self.get("epg", "ttl_hours", 6))
+
+    @property
+    def playlist_ttl(self) -> float:
+        """播放器取清单时，多久回上游要一次。越小越实时，越大越省请求。"""
+        panel = self.panel_get("playlist_ttl")
+        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 2)
+        try:
+            return max(0.5, float(raw))
+        except (TypeError, ValueError):
+            return 2.0
+
+    @property
+    def relay_cache_mb(self) -> float:
+        """分片中转缓存上限（MB）。多客户端共用一个缓存，越小越容易被上游限流。"""
+        panel = self.panel_get("cache_mb")
+        raw = panel if panel is not None else os.environ.get("HDIPTV_RELAY_CACHE_MB") or self.get("relay", "cache_mb", 96)
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return 96.0
+
+    @property
     def interval_hours(self) -> float:
+        panel = self.panel_get("interval_hours")
+        if panel is not None:
+            try:
+                return max(0.0, float(panel))
+            except (TypeError, ValueError):
+                pass
         return float(os.environ.get("HDIPTV_INTERVAL_HOURS") or self.get("update", "interval_hours", 6))
 
     @property
@@ -172,4 +289,6 @@ def load_settings(root: Path | str = ".", config_file: str | Path | None = None)
     settings = Settings(root=root, data=data)
     settings.channels_file = root / "config" / "channels.txt"
     settings.sources_file = root / "config" / "sources.toml"
+    settings.panel_path = cfg_path.parent / PANEL_FILE
+    settings.panel = coerce_panel(read_panel(settings.panel_path))
     return settings

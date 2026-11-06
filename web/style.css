@@ -121,6 +121,35 @@ main { max-width: 1080px; margin: 0 auto; padding: 20px 22px 40px; }
   width: 220px;
 }
 
+.form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px 14px;
+  margin-bottom: 10px;
+}
+.form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.form input {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: 13px/1.5 inherit;
+  color: var(--text);
+  background: #fbfcfd;
+}
+.form input:focus { outline: none; border-color: var(--accent); background: #fff; }
+code {
+  font: 12px/1.5 ui-monospace, Consolas, monospace;
+  background: #f1f3f5;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
 .channel-list { display: flex; flex-direction: column; gap: 6px; max-height: 520px; overflow: auto; }
 .group-title {
   font-size: 12px; color: var(--muted);
