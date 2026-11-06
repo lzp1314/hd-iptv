@@ -15,7 +15,7 @@ from .models import Channel, RunReport, Stream
 from .net import build_client
 from .normalize import ChannelMatcher, load_channels
 from .probe import probe_many
-from .settings import Settings
+from .settings import Settings, upgrade_channels
 
 Logger = Callable[[str], None]
 
@@ -148,6 +148,10 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     report = RunReport(started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     started = time.monotonic()
 
+    # 容器里挂着的旧默认模板不会随镜像更新，这里补一刀（用户改过的不动）
+    if upgrade_channels(settings.channels_file):
+        log(f"[模板] 旧版默认频道模板已换成新版：{settings.channels_file}")
+
     channels = load_channels(settings.channels_file)
     report.channels_total = len(channels)
     if not channels:
@@ -221,6 +225,16 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
             matched += 1
     report.channels_matched = matched
 
+    # 这一轮被上游 403 打下来的台，只要上一轮还是好的就别让它消失
+    carried = _carry_over(settings, channels, log)
+    if carried:
+        report.channels_matched = matched + carried
+
+    report.missing = _missing(channels)
+    if report.missing:
+        names = "、".join(row["name"] for row in report.missing[:10])
+        log(f"[缺失] {len(report.missing)} 个台没有流：{names}" + ("…" if len(report.missing) > 10 else ""))
+
     out_dir = settings.data_dir
     m3u_path = out_dir / "result.m3u"
     txt_path = out_dir / "result.txt"
@@ -264,6 +278,134 @@ def _previous_published(settings: Settings) -> int:
         return int((load_result(settings).get("report") or {}).get("published") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _carry_over(settings: Settings, channels: list[Channel], log: Logger) -> int:
+    """本轮没取到的台，把上一轮能用的条目补回来。
+
+    上游是按出口 IP 限流的，同一轮里总有七八个台被 403 打下来。这些台上一轮明明
+    是好的，直接从列表里抹掉的话，播放器里就整台消失——那正是「好多台根本没拉
+    取到」的观感。
+
+    列表里的地址是中转地址（/live/<slug>.m3u8），播放时由中转层**实时**换票，
+    所以这里只要保住「这个台存在」这一条就够了，旧地址过不过期都不影响。
+    上一轮本身就有的台才补，源里从来没有的台不会凭空多出一个点进去报错的条目。
+    """
+    prev = load_result(settings) or {}
+    old_rows = prev.get("channels") or []
+    if not old_rows:
+        return 0
+
+    generated = str(prev.get("generated_at") or "")
+    try:
+        age_h = (datetime.now() - datetime.strptime(generated, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+    except ValueError:
+        age_h = 0.0
+    if age_h > _CARRY_MAX_HOURS:
+        log(f"[继承] 上一轮结果已是 {age_h:.1f} 小时前，地址大概率失效，跳过")
+        return 0
+
+    old = {str(c.get("name") or ""): c for c in old_rows}
+    limit = settings.max_per_channel
+    filled: list[str] = []
+    for ch in channels:
+        if ch.streams:
+            continue
+        row = old.get(ch.name)
+        if not row:
+            continue
+        streams: list[Stream] = []
+        for item in row.get("streams") or []:
+            slug = str(item.get("slug") or "").strip()
+            if not slug:
+                continue
+            # 落盘用的是 bandwidth_kbps，读回来换算成 bps
+            kbps = int(item.get("bandwidth_kbps") or 0)
+            streams.append(
+                Stream(
+                    url=str(item.get("url") or ""),
+                    raw_name=ch.name,
+                    group=ch.group,
+                    slug=slug,
+                    tvg_id=str(item.get("tvg_id") or ""),
+                    width=int(item.get("width") or 0),
+                    height=int(item.get("height") or 0),
+                    bandwidth=int(item.get("bandwidth") or kbps * 1000),
+                    codec=str(item.get("codec") or ""),
+                    segment_duration=float(item.get("segment_duration") or 0.0),
+                    playlist_only=True,
+                    stale=True,
+                    ok=True,
+                    note="本轮上游未响应，播放时重新换地址",
+                )
+            )
+            if len(streams) >= limit:
+                break
+        if streams:
+            ch.streams = streams
+            filled.append(ch.name)
+
+    if filled:
+        log(f"[继承] {len(filled)} 个台本轮没取到，沿用上一轮条目：" + "、".join(filled[:12])
+            + ("…" if len(filled) > 12 else ""))
+    return len(filled)
+
+
+_CARRY_MAX_HOURS = 6.0
+
+
+def _covered_by_upstream(name: str, keys: list[str]) -> bool:
+    """模板里的名字，上游有没有对应频道。
+
+    两边都归一化后再比，而且要能双向容纳：模板写 CCTV-1、源里叫 cctv1综合，
+    模板的 key 是源 key 的前缀。数字边界要卡住，否则 cctv1 会把 cctv11 也算上。
+    """
+    from .normalize import normalize
+
+    key = normalize(name)
+    if not key:
+        return False
+    for other in keys:
+        if other == key:
+            return True
+        for short, long_ in ((key, other), (other, key)):
+            if not long_.startswith(short):
+                continue
+            rest = long_[len(short):]
+            if not rest[:1].isdigit():
+                return True
+    return False
+
+
+def _missing(channels: list[Channel]) -> list[dict]:
+    """哪些台这轮没拿到，以及原因。
+
+    区分「上游根本没有这个台」和「这轮被限流打下来」很重要：前者该从模板里删掉，
+    后者等下一轮就好。混在一起说「有 10 个台缺失」，用户只能干瞪眼。
+    """
+    empty = [ch for ch in channels if not ch.streams]
+    if not empty:
+        return []
+    try:
+        from . import ysp
+        from .normalize import normalize
+
+        keys = [normalize(row[1]) for row in ysp.CHANNELS]
+        keys = [k for k in keys if k]
+    except Exception:  # noqa: BLE001
+        keys = []
+
+    out: list[dict] = []
+    for ch in empty:
+        unknown = bool(keys) and not _covered_by_upstream(ch.name, keys)
+        out.append(
+            {
+                "name": ch.name,
+                "group": ch.group,
+                "reason": "上游没有这个台" if unknown else "本轮没取到（限流或临时故障）",
+            }
+        )
+    return out
 
 
 def load_result(settings: Settings) -> dict:

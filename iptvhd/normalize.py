@@ -47,6 +47,11 @@ _NOISE = re.compile(
 _SEPCHARS = " \u3000_-\u2014\u00b7\u2022|/\\()[]<>\"'`~!@#$%^&*+=,\u3001,\u3002:\uff1a;\uff1b?\uff1f\u300c\u300d"
 _SPLIT = re.compile("[" + re.escape(_SEPCHARS) + "]+")
 
+# 「CCTV-4K」「CCTV-8K」「CCTV-16 4K」里的 4K/8K 是频道名的一部分，不是画质标记：
+# 抹掉的话 CCTV-4K 会归一成 cctv、CCTV-16 4K 会和 CCTV-16 撞成同一个 key。
+# 先把它们捏成一个整体（cctv4k / cctv164k），后面去噪就咬不到了。
+_CCTV_UHD = re.compile(r"(?i)cctv[\s\-]*(\d{1,2})?[\s\-]*(4k|8k)(?:\s*超高清)?")
+
 _BUILTIN_ALIASES = {
     "央视一套": "cctv1", "中央一台": "cctv1", "中央一套": "cctv1", "cctv1综合": "cctv1",
     "央视二套": "cctv2", "中央二台": "cctv2", "cctv2财经": "cctv2",
@@ -79,6 +84,8 @@ def normalize(text: str) -> str:
         return ""
     s = unicodedata.normalize("NFKC", text)
     s = to_simplified(s).lower()
+    # 4K/8K 紧跟在 CCTV 后面时是频道名的一部分，先保护起来
+    s = _CCTV_UHD.sub(lambda m: f"cctv{m.group(1) or ''}{m.group(2)}", s)
     # 「+」是频道名的一部分：CCTV-5+ 和 CCTV-5 是两个台，不能当分隔符抹掉
     s = s.replace("+", "plus")
     s = _NOISE.sub("", s)

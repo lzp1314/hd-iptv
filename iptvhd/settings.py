@@ -56,7 +56,7 @@ allow_unknown_resolution = false
 probe_playlist_children = true
 
 [relay]
-playlist_ttl = 2
+playlist_ttl = 5
 cache_mb = 96
 
 [epg]
@@ -123,6 +123,8 @@ class Settings:
     # 面板上改过的项（panel.json），优先级高于 config.toml 与环境变量
     panel: dict = field(default_factory=dict)
     panel_path: Path = field(default_factory=lambda: Path("config/panel.json"))
+    # 本次加载时把旧的默认频道模板换成了新版（只发生一次，用来打日志）
+    channels_upgraded: bool = False
 
     # ---- 便捷读取 ----
     def section(self, name: str) -> dict:
@@ -223,7 +225,7 @@ class Settings:
     def playlist_ttl(self) -> float:
         """播放器取清单时，多久回上游要一次。越小越实时，越大越省请求。"""
         panel = self.panel_get("playlist_ttl")
-        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 2)
+        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 5)
         try:
             return max(0.5, float(raw))
         except (TypeError, ValueError):
@@ -294,4 +296,36 @@ def load_settings(root: Path | str = ".", config_file: str | Path | None = None)
     settings.sources_file = root / "config" / "sources.toml"
     settings.panel_path = cfg_path.parent / PANEL_FILE
     settings.panel = coerce_panel(read_panel(settings.panel_path))
+    settings.channels_upgraded = upgrade_channels(settings.channels_file)
     return settings
+
+
+# 旧版默认频道模板的特征行。只在这句还在时替换——用户自己改过的模板一定
+# 删掉了它，绝不会被这段逻辑覆盖。
+_OLD_CHANNEL_MARKERS = (
+    "地方台、港澳台、体育赛事、平台直播都不在",
+    "频道越少，每轮探测越快",
+)
+
+
+def upgrade_channels(path: Path) -> bool:
+    """把「没改过的旧默认频道模板」换成新的。
+
+    Docker 用户把 config/ 挂到宿主机后，镜像里的新模板再也进不去，光改代码
+    等于没改：面板上照样少十几个台。这里只在文件仍然是旧默认模板时替换，
+    用户自己加过台的（那几句注释早被删了）一律不动。
+    """
+    source = DEFAULTS_DIR / "channels.txt"
+    if not source.exists() or not path.exists():
+        return False
+    try:
+        current = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    if not any(marker in current for marker in _OLD_CHANNEL_MARKERS):
+        return False
+    try:
+        shutil.copyfile(source, path)
+    except OSError:
+        return False
+    return True

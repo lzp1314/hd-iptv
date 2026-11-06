@@ -185,6 +185,18 @@ class RelayPolicyTest(unittest.TestCase):
         relay.playlist("cctv1")
         self.assertEqual(relay.calls, 1)
 
+    def test_address_is_renewed_after_ttl(self):
+        """同一张票据用太久会被 CDN 拒（403），到期要主动换一张。"""
+        import time
+
+        relay = CountingRelay()
+        relay._addr_ttl = 0.05
+        relay.upstream("cctv1")
+        self.assertEqual(relay.calls, 1)
+        time.sleep(0.08)
+        relay.upstream("cctv1")
+        self.assertEqual(relay.calls, 2)
+
     def test_failed_resolve_enters_cooldown(self):
         relay = FlakyResolver()
         for _ in range(5):

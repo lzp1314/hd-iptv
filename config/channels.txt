@@ -5,8 +5,8 @@
 #   频道名,别名1,别名2    额外的匹配别名（源里的叫法不同时很有用）
 # 注意：模板里没有的频道不会被输出；名字匹配不上的源会被丢弃。
 #
-# 这一份只保留「央视 + 卫视」。地方台、港澳台、体育赛事、平台直播都不在
-# 范围里——频道越少，每轮探测越快，结果也越稳定。
+# 这一份只保留「央视 + 卫视」，且只列央视频**确实提供**的台——列了上游没有的台，
+# 结果就是面板上那些台常年空缺，看着像程序坏了。
 
 央视,#genre#
 CCTV-1,CCTV1,央视一套,中央一套,CCTV-1 综合
@@ -14,7 +14,7 @@ CCTV-2,CCTV2,央视二套,CCTV-2 财经
 CCTV-3,CCTV3,央视三套,CCTV-3 综艺
 CCTV-4,CCTV4,央视四套,CCTV-4 中文国际
 CCTV-5,CCTV5,央视五套,CCTV-5 体育
-CCTV-5+,CCTV5+,央视五加,CCTV-5+ 体育赛事
+CCTV-5+,CCTV5+,央视五加,CCTV5PLUS
 CCTV-6,CCTV6,央视六套,CCTV-6 电影
 CCTV-7,CCTV7,央视七套,CCTV-7 国防军事
 CCTV-8,CCTV8,央视八套,CCTV-8 电视剧
@@ -27,19 +27,26 @@ CCTV-14,CCTV14,央视十四套,CCTV-14 少儿
 CCTV-15,CCTV15,央视十五套,CCTV-15 音乐
 CCTV-16,CCTV16,央视十六套,CCTV-16 奥林匹克
 CCTV-17,CCTV17,央视十七套,CCTV-17 农业农村
+CCTV-16 4K,CCTV164K
+CCTV-4K 超高清,CCTV4K
+CCTV-8K 超高清,CCTV8K,CCTV8K超高清
+CCTV 风云剧场,风云剧场
+CCTV 第一剧场,第一剧场
+CCTV 怀旧剧场,怀旧剧场
 CGTN,CGTN外语,CCTV英语,CGTN英语
 CGTN 法语,CGTN法语,CGTN French
 CGTN 俄语,CGTN俄语,CGTN Russian
 CGTN 阿拉伯语,CGTN阿语,CGTN Arabic
 CGTN 西班牙语,CGTN西语,CGTN Spanish
 CGTN 纪录,CGTN纪录频道,CGTN Documentary
+国学频道
+CETV-1,CETV1,CETV 1,中国教育电视台一套
 
 卫视,#genre#
 湖南卫视
 浙江卫视
 江苏卫视
-东方卫视
-上海卫视
+东方卫视,上海卫视
 北京卫视
 广东卫视
 深圳卫视
@@ -51,8 +58,7 @@ CGTN 纪录,CGTN纪录频道,CGTN Documentary
 河南卫视
 河北卫视
 江西卫视
-福建卫视
-东南卫视
+东南卫视,福建卫视
 辽宁卫视
 黑龙江卫视
 吉林卫视
@@ -69,10 +75,13 @@ CGTN 纪录,CGTN纪录频道,CGTN Documentary
 内蒙古卫视
 新疆卫视
 西藏卫视
-兵团卫视
-三沙卫视
-海峡卫视
-厦门卫视
-大湾区卫视
-延边卫视
-农林卫视
+
+# 下面这些台央视频没有直播信号（2026-11 实测，官网频道表里也没有）。
+# 留着只会让结果里常年空几个台，需要的话自己接一个订阅源再取消注释：
+#   兵团卫视
+#   三沙卫视
+#   海峡卫视
+#   厦门卫视
+#   大湾区卫视
+#   延边卫视
+#   农林卫视

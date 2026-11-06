@@ -36,6 +36,8 @@ class Stream:
     first_segment: str = ""     # 采集端已验证过的首个分片地址（省一次列表请求）
     segment_duration: float = 0.0  # 分片时长（秒），用来从分片大小推算码率
     playlist_only: bool = False  # 采集端能保证列表有效：分片被限流时不做否决
+    verified_at: float = 0.0    # 采集端确认「清单 + 分片」可用的时刻（time.time()）
+    stale: bool = False         # 本轮没取到，沿用上一轮的地址
     note: str = ""              # 补充说明，不参与过滤
 
     # ---- 探测结果 ----
@@ -99,6 +101,8 @@ class RunReport:
     channels_total: int = 0
     channels_matched: int = 0
     sources: list[dict] = field(default_factory=list)
+    # 模板里有、这轮却拿不到的台；reason 说明是上游没有还是被限流
+    missing: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -112,4 +116,5 @@ class RunReport:
             "channels_total": self.channels_total,
             "channels_matched": self.channels_matched,
             "sources": self.sources,
+            "missing": self.missing,
         }

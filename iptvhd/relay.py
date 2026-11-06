@@ -179,7 +179,8 @@ class Relay:
         timeout: float = 8.0,
         seg_timeout: float = 20.0,
         retry_gap: float = 45.0,
-        playlist_ttl: float = 2.0,
+        playlist_ttl: float = 5.0,
+        addr_ttl: float = 300.0,
         stale_max: float = 120.0,
         cache_bytes: int = 96 * 1024 * 1024,
         cache_ttl: float = 300.0,
@@ -189,6 +190,7 @@ class Relay:
         self._seg_timeout = seg_timeout
         self._retry_gap = retry_gap
         self._playlist_ttl = playlist_ttl
+        self._addr_ttl = addr_ttl
         self._stale_max = stale_max
         self._lock = threading.Lock()
         self._cache: dict[str, tuple[float, str, str]] = {}   # slug -> (时间, 地址, UA)
@@ -199,6 +201,10 @@ class Relay:
         self._segments = _SegmentCache(cache_bytes, cache_ttl)
         self.failures = 0                                     # 累计失败次数
         self.stale_served = 0                                 # 用旧清单兜住的次数
+        # 出口级限流：上游按 IP 限流，一旦被限，所有频道会一起 403。
+        # 这时继续换票只会把限流拖得更长，所以短暂拦住「没有缓存地址」的频道。
+        self._forbidden_hits = 0
+        self._forbidden_until = 0.0
 
     # ---------------- 上游 ----------------
     def upstream(self, slug: str, *, fresh: bool = False) -> tuple[str, str]:
@@ -211,15 +217,24 @@ class Relay:
         with self._lock:
             hit = self._cache.get(slug)
             cooling = now - self._failed.get(slug, 0.0) < self._retry_gap
+            blocked = now < self._forbidden_until
 
         if hit and not fresh:
-            return hit[1], hit[2]
+            # 地址用久了要主动换票。CDN 对同一张票据上的重复请求会越来越容易
+            # 回 403（换一个 token 就正常），所以别一直抱着同一张用。
+            if now - hit[0] <= self._addr_ttl:
+                return hit[1], hit[2]
+            fresh = True
 
         if cooling:
             # 冷却期内不再敲门：有旧地址就继续用，没有就把上次的错抛出去
             if hit:
                 return hit[1], hit[2]
             raise RelayError(self._errors.get(slug, "上游暂时不可用，稍后自动重试"))
+
+        if blocked and not hit:
+            # 整条出口正被上游限流：这个台连地址都没有，硬敲只会让所有人更久播不了
+            raise RelayError("上游限流中（403），等十几秒再换台")
 
         try:
             url, ua = self._resolver(slug)
@@ -278,6 +293,16 @@ class Relay:
             self._failed[slug] = time.time()
             self._errors[slug] = message
             self.failures += 1
+            if "403" in message:
+                # 连续三个频道都被 403，基本可以认定是本机出口被限流，
+                # 而不是某个台单独坏了。停 20 秒，让上游的计数缓一缓。
+                self._forbidden_hits += 1
+                if self._forbidden_hits >= 3:
+                    self._forbidden_until = time.time() + 20.0
+                    self._forbidden_hits = 0
+            else:
+                self._forbidden_hits = 0
+            self.failures += 1
 
     def stats(self) -> dict:
         """给面板看的简况。"""
@@ -294,6 +319,8 @@ class Relay:
             "errors": dict(self._errors),
             "failures": self.failures,
             "stale_served": self.stale_served,
+            # 出口被限流时，没缓存的台会被直接挡回来，面板据此提示等一下
+            "blocked_for": max(0, round(self._forbidden_until - now)),
         }
 
     def _fetch(self, url: str, ua: str, *, timeout: float | None = None) -> tuple[int, dict, bytes]:

@@ -70,7 +70,7 @@ class TestPanelSettings(unittest.TestCase):
     def test_defaults_when_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = load_settings(Path(tmp))
-            self.assertEqual(settings.playlist_ttl, 2.0)
+            self.assertEqual(settings.playlist_ttl, 5.0)
             self.assertEqual(settings.relay_cache_mb, 96.0)
             self.assertEqual(settings.public_url, "")
 

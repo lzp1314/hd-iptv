@@ -63,6 +63,16 @@ _VCODEC_CAP = base64.b64encode(b"H(30:1080,60:1080|30:1080,60:1080)").decode()
 UA = "qqlive"
 REFERER = "https://live.cctv.cn/"
 
+# 取清单和分片时带上的头。官方 CDN 对缺 Referer 的请求更容易回 403，
+# 这和播放器自己取流时带的一致。
+HLS_HEADERS = {
+    "Accept": "application/vnd.apple.mpegurl,application/json,*/*",
+    "Referer": REFERER,
+}
+
+# 一次分片采样读多少字节（用于测速和读 SPS 里的真实分辨率）
+SAMPLE_BYTES = 262144
+
 # 码率档位 → 高度，用于给探测阶段提供分辨率提示
 DEFN_HEIGHT = {"fhd": 1080, "shd": 720, "hd": 540}
 
@@ -85,13 +95,22 @@ CHANNELS: tuple[tuple[str, str, str, str, str], ...] = (
     ("cctv14", "CCTV-14 少儿", "2027248901", "600001809", "fhd"),
     ("cctv15", "CCTV-15 音乐", "2027249001", "600001815", "fhd"),
     ("cctv16", "CCTV-16 奥林匹克", "2027249101", "600098637", "fhd"),
+    ("cctv164k", "CCTV-16 4K", "2027249301", "600099502", "fhd"),
     ("cctv17", "CCTV-17 农业农村", "2027249401", "600001810", "fhd"),
+    # 4K / 8K 频道在匿名接口上只给 1080P（实测 SPS 是 1920×1080），
+    # 想要真 4K 得登录 + 会员，这里保留是因为「能看到这个台」本身有用
+    ("cctv4k", "CCTV-4K 超高清", "2029810301", "600002264", "fhd"),
+    ("cctv8k", "CCTV-8K 超高清", "2026774101", "600156816", "fhd"),
     ("cgtn", "CGTN", "2024181701", "600014550", "fhd"),
     ("cgtnfr", "CGTN 法语", "2024181801", "600084704", "fhd"),
     ("cgtnru", "CGTN 俄语", "2024181901", "600084758", "fhd"),
     ("cgtnar", "CGTN 阿拉伯语", "2024182001", "600084782", "fhd"),
     ("cgtnes", "CGTN 西班牙语", "2024182101", "600084744", "fhd"),
     ("cgtndoc", "CGTN 纪录", "2024182301", "600084781", "fhd"),
+    # 三个剧场频道只认 720P 档，报 fhd 会被回 iretcode=25「无登录信息」
+    ("cctvfyjc", "CCTV 风云剧场", "2025637103", "600099658", "shd"),
+    ("cctvdyjc", "CCTV 第一剧场", "2026874203", "600099655", "shd"),
+    ("cctvhjjc", "CCTV 怀旧剧场", "2026874303", "600099620", "shd"),
     ("bjws", "北京卫视", "2024052703", "600002309", "fhd"),
     ("jsws", "江苏卫视", "2024171103", "600002521", "fhd"),
     ("dfws", "东方卫视", "2024054503", "600002483", "fhd"),
@@ -125,6 +144,7 @@ CHANNELS: tuple[tuple[str, str, str, str, str], ...] = (
     ("xizangws", "西藏卫视", "2025558003", "600190403", "fhd"),
     ("xjws", "新疆卫视", "2019927403", "600152138", "fhd"),
     ("cetv1", "CETV-1", "2022823801", "600171827", "fhd"),
+    ("cctvgx", "国学频道", "2029360403", "600213139", "fhd"),
 )
 
 CHANNEL_BY_SLUG = {row[0]: row for row in CHANNELS}
@@ -133,12 +153,51 @@ CHANNEL_BY_SLUG = {row[0]: row for row in CHANNELS}
 _ERR_HINT = {
     12: "应版权方要求暂停提供（平台授权问题，无法绕过）",
     14: "请求格式被拒绝（协议可能已变更）",
+    25: "需要登录（该频道匿名接口不开放）",
     400: "参数错误（频道号可能失效）",
 }
 
 
 _pace_lock = threading.Lock()
 _pace_last = 0.0
+
+# 出口级熔断。上游按 IP 限流，一旦被限就是「所有频道一起 403」——这时候还会
+# 把剩下几十个台挨个敲一遍，恰好把限流拖得更长，下次恢复得更慢。实测被限后
+# 硬跑一轮要 4 分钟、结果 0 条；熔断后几秒就停手。
+_deny_lock = threading.Lock()
+_deny_streak = 0
+_deny_until = 0.0
+_DENY_STREAK = 5
+_DENY_SECONDS = 60.0
+
+
+def denied() -> bool:
+    """出口是否正处于限流冷却中。"""
+    return time.time() < _deny_until
+
+
+def note_denied() -> None:
+    """记一次「被上游拒绝」。连续几次就认为整条出口被限，停一分钟。"""
+    global _deny_streak, _deny_until
+    with _deny_lock:
+        _deny_streak += 1
+        if _deny_streak >= _DENY_STREAK:
+            _deny_until = time.time() + _DENY_SECONDS
+            _deny_streak = 0
+
+
+def note_ok() -> None:
+    global _deny_streak
+    with _deny_lock:
+        _deny_streak = 0
+
+
+def reset_deny() -> None:
+    """测试用：清掉熔断状态。"""
+    global _deny_streak, _deny_until
+    with _deny_lock:
+        _deny_streak = 0
+        _deny_until = 0.0
 
 
 def pace(min_gap: float = 0.3) -> None:
@@ -285,6 +344,8 @@ def make_ckey(channel_id: str) -> dict:
 # --------------------------------------------------------------------------- #
 def play_info(cnlid: str, livepid: str, defn: str = "fhd", client: HttpClient | None = None) -> dict:
     """换取频道播放信息，原样返回接口的 JSON。"""
+    if denied():
+        raise YspError("上游限流中，暂停请求 60 秒")
     token = make_ckey(cnlid)
     query = urlencode({
         "atime": "120", "livepid": livepid, "cnlid": cnlid,
@@ -304,6 +365,10 @@ def play_info(cnlid: str, livepid: str, defn: str = "fhd", client: HttpClient | 
     client = client or HttpClient(user_agent=UA, timeout=10, retries=2)
     pace()
     resp = client.get(_INFO_URL + "?" + query, headers={"Accept": "application/json"})
+    if resp.status in (403, 429):
+        note_denied()
+    elif _usable(resp):
+        note_ok()
     if not _usable(resp):
         raise YspError(f"接口无响应（{resp.error or resp.status}）")
 
@@ -404,6 +469,9 @@ def resolve(
             raise
         except YspError as exc:
             last = str(exc)
+            if "限流" in last:
+                # 出口已经进冷却，重试只是陪跑，立即交给上层跳过
+                break
             time.sleep(pause)
             continue
 
@@ -413,9 +481,15 @@ def resolve(
             time.sleep(pause)
             continue
 
+        forbidden = 0
         for url in urls:
             pace()
-            resp = client.get(url, limit=131072)
+            resp = client.get(url, limit=131072, headers=HLS_HEADERS)
+            if resp.status in (403, 429):
+                forbidden += 1
+                note_denied()
+            elif resp.status == 200:
+                note_ok()
             if not _usable(resp) or not resp.body.lstrip().startswith(b"#EXTM3U"):
                 last = f"列表 {resp.status or resp.error or '非播放列表'}"
                 continue
@@ -429,13 +503,23 @@ def resolve(
                 meta["segments"] = len(segs)
             if not verify_segment:
                 return url, info, first
+            # 顺手读一片：确认真能出流，并拿到测速和 SPS 里的真实分辨率。
+            # 读不到**不算失败**——清单已经证明这条地址是活的，分片被拒多半只是
+            # 出口限流（403），拿它否掉一条能播的流是过去「好多台没拉取到」的主因。
             pace()
-            probe = client.get(first, limit=131072)
-            if _usable(probe) and len(probe.body) > 5000:
-                return url, info, first
-            last = f"分片 {probe.status or probe.error}"
+            probe = client.get(first, limit=SAMPLE_BYTES, headers=HLS_HEADERS)
+            if meta is not None:
+                meta["segment_status"] = probe.status
+                if _usable(probe):
+                    meta["segment_body"] = probe.body
+                    meta["speed_mbps"] = probe.speed_mbps
+                    meta["ttfb_ms"] = probe.ttfb_ms
+            return url, info, first
 
         if round_no + 1 < attempts:
-            time.sleep(pause)
+            # 主备 CDN 全 403 = 本机出口正被官方限流，等久一点再换票，
+            # 马上重试只会把限流拖得更长。
+            all_forbidden = bool(urls) and forbidden == len(urls)
+            time.sleep(pause if not all_forbidden else pause + 3.0 * (round_no + 1))
 
     raise YspError(last)

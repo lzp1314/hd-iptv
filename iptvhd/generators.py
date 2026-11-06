@@ -296,14 +296,16 @@ class YangshipinCollector(Collector):
     kind = "yangshipin"
 
     def collect(self, client: HttpClient) -> list[Stream]:
-        from . import ysp
+        from . import probe, ysp
 
         want = {str(x).strip().lower() for x in (self.config.get("channels") or []) if str(x).strip()}
         groups = {str(x).strip() for x in (self.config.get("groups") or []) if str(x).strip()}
         defn_override = str(self.config.get("defn", "") or "").strip()
         # 接口对并发敏感，默认串行；调大只会更容易被限流，不建议
         workers = max(1, int(self.config.get("workers", 1)))
-        verify = bool(self.config.get("verify_segment", False))
+        # 换地址时顺手读一片：分辨率、码率、测速一次拿全。
+        # 探测阶段因此不再向同一个 CDN 打第二次（那一次拿的还是过期地址）。
+        verify = bool(self.config.get("verify_segment", True))
 
         rows = [
             row for row in ysp.CHANNELS
@@ -324,6 +326,10 @@ class YangshipinCollector(Collector):
 
         def resolve_one(row: tuple[str, str, str, str, str]) -> tuple[str, Stream | None, str]:
             slug, name, cnlid, livepid, defn = row
+            if ysp.denied():
+                # 出口已被限流，剩下的台先不敲门——硬敲只会让恢复更慢，
+                # 这一轮的缺台由「沿用上一轮」兜住
+                return slug, None, ""
             target_defn = defn_override or defn
             meta: dict = {}
             try:
@@ -344,7 +350,11 @@ class YangshipinCollector(Collector):
                 user_agent=ysp.UA,
                 first_segment=first_seg,
                 playlist_only=True,
+                # 采集阶段已经连分片一起验过，探测阶段直接采信这个时间点
+                verified_at=time.time() if verify else 0.0,
             )
+            if verify:
+                probe.apply_sample(stream, meta)
             return slug, stream, ""
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -355,6 +365,12 @@ class YangshipinCollector(Collector):
                     results[slug] = stream
                 elif note:
                     self.notes.append(note)
+
+        skipped = len(rows) - len(results) - len(self.notes)
+        if ysp.denied() and skipped > 0:
+            self.notes.append(
+                f"其余 {skipped} 个台跳过：上游按 IP 限流，冷却 60 秒（这一轮先沿用上一轮的地址）"
+            )
 
         # 按配置顺序输出，保证每次生成的列表顺序稳定
         ordered = [results[row[0]] for row in rows if row[0] in results]

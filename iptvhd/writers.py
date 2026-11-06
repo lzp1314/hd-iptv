@@ -170,6 +170,7 @@ def write_json(channels: list[Channel], path: Path, report: RunReport | None = N
                         "url": s.url,
                         # slug 必须落盘：服务端要靠它把播放地址拼成 /live/<slug>.m3u8
                         "slug": s.slug,
+                        "tvg_id": s.tvg_id,
                         "height": s.height,
                         "width": s.width,
                         "grade": s.grade,
@@ -177,7 +178,11 @@ def write_json(channels: list[Channel], path: Path, report: RunReport | None = N
                         "bandwidth_kbps": round(s.bandwidth / 1000) if s.bandwidth else 0,
                         "speed_mbps": s.speed_mbps,
                         "delay_ms": s.delay_ms,
+                        "segment_duration": round(s.segment_duration, 2),
                         "source": s.source,
+                        # 本轮上游没响应、沿用上一轮条目：中转层播放时会重新换地址
+                        "stale": s.stale,
+                        "note": s.note,
                     }
                     for s in ch.streams
                 ],

@@ -37,8 +37,29 @@ function epgText(epg) {
   return "节目单：等待生成（更新一次即可，或者直接打开 /epg.xml 触发）";
 }
 
-async function loadStatus() {
-  try {
+function renderMissing(rows) {
+  const box = $("missingNote");
+  if (!box) return;
+  if (!rows.length) {
+    box.hidden = true;
+    return;
+  }
+  const absent = rows.filter((r) => (r.reason || "").includes("没有这个台"));
+  const failed = rows.filter((r) => !(r.reason || "").includes("没有这个台"));
+  const parts = [];
+  if (failed.length) {
+    parts.push(`本轮没取到 ${failed.length} 个：${failed.map((r) => r.name).join("、")}`);
+  }
+  if (absent.length) {
+    parts.push(`上游没有 ${absent.length} 个：${absent.map((r) => r.name).join("、")}`);
+  }
+  box.hidden = false;
+  box.textContent =
+    "频道缺口 — " + parts.join("；") +
+    (absent.length ? "。上游没有的台不用管，模板里已注释掉；想加就自己接一个订阅源。" : "。下一轮会自动重试，已取到过的台不会从列表里消失。");
+}
+
+async function loadStatus() {  try {
     const r = await fetch("/api/status", { cache: "no-store" });
     const d = await r.json();
     $("version").textContent = "v" + (d.version || "-");
@@ -62,7 +83,13 @@ async function loadStatus() {
     const relay = d.relay || {};
     const banner = $("relayBanner");
     if (banner) {
-      if (relay.failures > 0) {
+      const blocked = relay.blocked_for || 0;
+      if (blocked > 0) {
+        banner.hidden = false;
+        banner.textContent =
+          `上游正在按 IP 限流，${blocked} 秒内不再去要新地址（避免越要越死）。` +
+          "已经播着的台不受影响，这时候连切台会更容易卡。";
+      } else if (relay.failures > 0) {
         const detail = (relay.errors && relay.errors[0]) ? `（${relay.errors[0]}）` : "";
         banner.hidden = false;
         banner.textContent =
@@ -72,6 +99,8 @@ async function loadStatus() {
         banner.hidden = true;
       }
     }
+
+    renderMissing(rep.missing || []);
 
     if ($("epgNote")) $("epgNote").textContent = epgText(d.epg);
     fillSettings(d.settings || {});

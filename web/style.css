@@ -203,6 +203,12 @@ code {
 }
 .empty { color: var(--muted); font-size: 13px; }
 
+.banner.quiet {
+  background: #f6f7f9;
+  border-color: #e3e6ea;
+  color: #4a5158;
+}
+
 .banner {
   margin: 0 0 14px;
   padding: 10px 14px;

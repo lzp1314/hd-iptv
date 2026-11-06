@@ -14,11 +14,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable
 
-from . import hls, videoinfo
+from . import hls, videoinfo, ysp
 from .models import Stream
 from .net import HttpClient
 
 _OK_STATUS = (200, 206)
+
+# 采集阶段的验证结论能用多久。央视频的清单 5 秒滚一轮、只留 3 片，
+# 超过这个时间旧结论就不再可靠，得重新读清单。
+_REUSE_WINDOW = 120.0
 
 # 全局节拍器：对「热门接口」类源（央视频）限速，避免并发探测触发对方的
 # 请求频率限制——被限流的表现是一律 403，和死链长得一模一样，很容易误杀。
@@ -39,22 +43,32 @@ def _pace(min_gap: float = 0.25) -> None:
 
 
 def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> Stream:
-    """采集阶段已经验证过列表、并留下首个分片地址的流。
+    """采集阶段已经验证过清单和首个分片的流。
 
-    省掉一次列表请求，直接读分片测速；被限流时仍保留，只标记未测速。
+    这类源（央视频）的清单只有 3 个分片、5 秒滚一轮，采集时拿到的分片地址过一分钟
+    就被 CDN 回收了。以前这里拿那个旧地址重试，403/404 一律判死——那正是「明明
+    采集到 55 个台，面板只剩 36 个」的来源。所以只认采集时的验证结果，不再重复
+    打上游：既省掉每条流一次请求，也不会拿过期地址冤枉一条能播的流。
     """
-    from . import ysp
+    if stream.verified_at and time.time() - stream.verified_at <= _REUSE_WINDOW:
+        stream.ok = True
+        stream.status = stream.status or 200
+        if not stream.height:
+            stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name)
+        return stream
 
+    # 采集距今太久，当时的结论已经不作数：重新读一份清单，用里面最新的分片测速。
     extra = {"User-Agent": stream.user_agent} if stream.user_agent else None
     ysp.pace()
-    seg = client.get(stream.first_segment, limit=sample_bytes, headers=extra)
-    if seg.status in (403, 429):
-        for _ in range(2):
-            time.sleep(1.5)
-            ysp.pace()
-            seg = client.get(stream.first_segment, limit=sample_bytes, headers=extra)
-            if seg.status not in (403, 429):
-                break
+    fresh = client.get(stream.url, limit=131072, headers=extra)
+    text = fresh.text if fresh.body[:64].lstrip().startswith(b"#EXTM3U") else ""
+    seg_url = ""
+    if text:
+        info = hls.parse_media(text, fresh.url or stream.url)
+        seg_url = info["first_segment"]
+        if not stream.segment_duration:
+            stream.segment_duration = info["segment_duration"] or info["target_duration"]
+    seg = client.get(seg_url, limit=sample_bytes, headers=extra) if seg_url else fresh
 
     stream.status = seg.status
     if seg.status in _OK_STATUS and seg.body:
@@ -225,6 +239,24 @@ def _read_resolution(stream: Stream, data: bytes) -> None:
         stream.codec = found.codec
     if stream.hint_height and found.height < stream.hint_height:
         stream.note = f"实际 {found.height}P（接口标 {stream.hint_height}P）"
+
+
+def apply_sample(stream: Stream, meta: dict) -> None:
+    """把采集阶段顺手读到的那一片数据用上。
+
+    取源器（央视频）在换地址时已经下载过一片，这里直接从中读出真实分辨率和
+    码率，探测阶段就不用再向同一个 CDN 打第二次。
+    """
+    body = meta.get("segment_body") or b""
+    if not body:
+        return
+    stream.speed_mbps = float(meta.get("speed_mbps") or 0.0)
+    stream.delay_ms = int(meta.get("ttfb_ms") or 0)
+    stream.status = int(meta.get("segment_status") or 0)
+    _read_resolution(stream, body)
+    if stream.bandwidth or stream.segment_duration <= 0:
+        return
+    stream.bandwidth = int(len(body) * 8 / stream.segment_duration)
 
 
 def probe_many(

@@ -404,6 +404,7 @@ def make_handler(state: State):
                         "relay": {
                             "failures": relay_stats["failures"],
                             "stale_served": relay_stats["stale_served"],
+                            "blocked_for": relay_stats.get("blocked_for", 0),
                             "plays": len(relay_stats["cached"]),
                             "errors": list(relay_stats["errors"].values())[:3],
                             "segments": relay_stats["segments"],
