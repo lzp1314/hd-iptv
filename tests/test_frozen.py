@@ -100,14 +100,18 @@ class TestWindow(unittest.TestCase):
         self.assertIn("105.ts", text)
 
     def test_window_is_capped(self):
-        relay, _ = _relay([_playlist(100 + 3 * i) for i in range(6)])
+        from iptvhd import relay as relay_mod
+
+        relay, _ = _relay([_playlist(100 + 3 * i) for i in range(10)])
         relay.playlist_info("cctv1")
-        for _ in range(5):
+        for _ in range(9):
             relay._prefetch("cctv1")
 
         text, _, _seq = relay.playlist_info("cctv1")
-        self.assertEqual(text.count("#EXTINF"), 12, "窗口最多 12 片，不能无限长")
-        self.assertIn("114.ts", text)
+        self.assertEqual(
+            text.count("#EXTINF"), relay_mod._WINDOW_SEGMENTS, "窗口片数不能超过上限"
+        )
+        self.assertIn("124.ts", text)
         self.assertNotIn("100.ts", text, "旧分片要滚出去，否则播放器可能取到已被回收的地址")
 
     def test_sequence_jump_resets_window(self):
@@ -133,7 +137,7 @@ class TestPrefetch(unittest.TestCase):
     def test_sweep_prefetches_channel_being_watched(self):
         relay, fetch = _relay([_playlist(100), _playlist(103)])
         relay.playlist_info("cctv1")
-        _age_window(relay, fetched=3)   # 超过预取间隔
+        _age_window(relay, fetched=5)   # 超过预取间隔
 
         relay._sweep()
 

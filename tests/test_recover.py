@@ -229,21 +229,23 @@ class TestDenyBreaker(unittest.TestCase):
         self.ysp.reset_deny()
 
     def test_trips_after_five_rejections(self):
-        for _ in range(4):
+        n = self.ysp._DENY_STREAK
+        for _ in range(n - 1):
             self.ysp.note_denied()
         self.assertFalse(self.ysp.denied())
         self.ysp.note_denied()
         self.assertTrue(self.ysp.denied())
 
     def test_success_resets_the_streak(self):
-        for _ in range(4):
+        n = self.ysp._DENY_STREAK
+        for _ in range(n - 1):
             self.ysp.note_denied()
         self.ysp.note_ok()
         self.ysp.note_denied()
         self.assertFalse(self.ysp.denied(), "成功一次就该重新计数")
 
     def test_play_info_stops_calling_upstream_when_denied(self):
-        for _ in range(5):
+        for _ in range(self.ysp._DENY_STREAK):
             self.ysp.note_denied()
         with self.assertRaises(self.ysp.YspError) as ctx:
             self.ysp.play_info("2024078201", "600001859")

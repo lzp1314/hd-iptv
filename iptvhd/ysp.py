@@ -164,8 +164,8 @@ _pace_last = 0.0
 _deny_lock = threading.Lock()
 _deny_streak = 0
 _deny_until = 0.0
-_DENY_STREAK = 5
-_DENY_SECONDS = 60.0
+_DENY_STREAK = 8
+_DENY_SECONDS = 30.0
 
 
 def denied() -> bool:

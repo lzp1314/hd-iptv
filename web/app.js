@@ -647,14 +647,14 @@ function openPlayer(slug, name, keepRestarts) {
     // 播放器会当成「返回得太快=没新东西」立刻再问一次，几十秒就把本机的
     // 上游配额抽干，接着清单拿不到、画面停在播完的那十几秒上。
     lowLatencyMode: false,
-    // 服务端把上游那 3 片拼成了 12 片（约 60 秒）的窗口。目标落后 5 片
-    // （约 25 秒），手里攥着 35 秒余量——上游限流断个几十秒也不怕。
-    // 落后超过 9 片（45 秒）才加速追，别让延迟一路滚下去。
-    liveSyncDurationCount: 5,
-    liveMaxLatencyDurationCount: 9,
+    // 服务端把上游那 3 片拼成了 18 片（约 90 秒）的窗口。目标落后 8 片
+    // （约 40 秒），手里攥着 50 秒余量——上游限流断个几十秒也不怕。
+    // 落后超过 12 片（60 秒）才加速追，别让延迟一路滚下去。
+    liveSyncDurationCount: 8,
+    liveMaxLatencyDurationCount: 12,
     maxLiveSyncPlaybackRate: 1.5,
     backBufferLength: 30,
-    maxBufferLength: 60,
+    maxBufferLength: 90,
     manifestLoadingTimeOut: 15000,
     fragLoadingTimeOut: 20000,
     // 上游时不时回一两次 403/超时，重试要够多，别一次就判死
