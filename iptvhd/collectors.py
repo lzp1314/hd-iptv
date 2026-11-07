@@ -241,14 +241,14 @@ _REGISTRY = {
 
 
 def _full_registry() -> dict:
-    """采集器 + 取源器。
+    """采集器 + 解析器。
 
     generators 依赖本模块的 Collector，所以放在函数里延迟导入，避免循环依赖。
     """
     registry = dict(_REGISTRY)
     try:
         from .generators import GENERATORS
-    except Exception:  # noqa: BLE001 - 取源器不可用不应拖垮基础采集
+    except Exception:  # noqa: BLE001 - 解析器不可用不应拖垮基础采集
         return registry
     registry.update(GENERATORS)
     return registry

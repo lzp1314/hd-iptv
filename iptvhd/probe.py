@@ -20,11 +20,11 @@ from .net import HttpClient
 
 _OK_STATUS = (200, 206)
 
-# 采集阶段的验证结论能用多久。央视频的清单 5 秒滚一轮、只留 3 片，
+# 采集阶段的验证结论能用多久。部分平台的清单 5 秒滚一轮、只留 3 片，
 # 超过这个时间旧结论就不再可靠，得重新读清单。
 _REUSE_WINDOW = 120.0
 
-# 全局节拍器：对「热门接口」类源（央视频）限速，避免并发探测触发对方的
+# 全局节拍器：对「热门接口」类源限速，避免并发探测触发对方的
 # 请求频率限制——被限流的表现是一律 403，和死链长得一模一样，很容易误杀。
 _pace_lock = threading.Lock()
 _pace_last = 0.0
@@ -45,7 +45,7 @@ def _pace(min_gap: float = 0.25) -> None:
 def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> Stream:
     """采集阶段已经验证过清单和首个分片的流。
 
-    这类源（央视频）的清单只有 3 个分片、5 秒滚一轮，采集时拿到的分片地址过一分钟
+    这类源（部分平台）的清单只有 3 个分片、5 秒滚一轮，采集时拿到的分片地址过一分钟
     就被 CDN 回收了。以前这里拿那个旧地址重试，403/404 一律判死——那正是「明明
     采集到 55 个台，面板只剩 36 个」的来源。所以只认采集时的验证结果，不再重复
     打上游：既省掉每条流一次请求，也不会拿过期地址冤枉一条能播的流。
@@ -92,7 +92,7 @@ def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> 
 def probe_one(stream: Stream, client: HttpClient, sample_bytes: int = 262144) -> Stream:
     """探测单条流，结果写回 stream 自身。
 
-    部分平台（央视频）要求特定 UA 才放行分片，所以流自带 UA 时优先用它。
+    部分平台（如综合频道）要求特定 UA 才放行分片，所以流自带 UA 时优先用它。
     """
     if stream.playlist_only and not stream.url:
         # 采集阶段只登记了频道、没取地址：能不能播由播放时的中转层决定，
@@ -252,7 +252,7 @@ def _read_resolution(stream: Stream, data: bytes) -> None:
 def apply_sample(stream: Stream, meta: dict) -> None:
     """把采集阶段顺手读到的那一片数据用上。
 
-    取源器（央视频）在换地址时已经下载过一片，这里直接从中读出真实分辨率和
+    解析器（综合频道）在换地址时已经下载过一片，这里直接从中读出真实分辨率和
     码率，探测阶段就不用再向同一个 CDN 打第二次。
     """
     body = meta.get("segment_body") or b""

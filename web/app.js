@@ -208,11 +208,11 @@ function shortTime(value) {
   return m ? `${m[1]}-${m[2]} ${m[3]}:${m[4]}` : String(value);
 }
 
-// 测出来的数字是「本机从这台取流能跑多快」，不是视频码率，鼠标悬停写清楚
+// 测出来的数字是「本机从这台下载能跑多快」，不是视频码率，鼠标悬停写清楚
 function rateTitle(stream) {
   const parts = [];
   if (stream.bandwidth_kbps) parts.push(`码率 ${(stream.bandwidth_kbps / 1000).toFixed(1)} Mbps（分片大小 ÷ 分片时长）`);
-  if (stream.speed_mbps) parts.push(`采样下载 ${stream.speed_mbps.toFixed(1)} Mbps（NAS 到 CDN 的取流能力）`);
+  if (stream.speed_mbps) parts.push(`采样下载 ${stream.speed_mbps.toFixed(1)} Mbps（NAS 到 CDN 的下载能力）`);
   if (stream.delay_ms) parts.push(`首字节 ${stream.delay_ms} ms`);
   return parts.join("\n") || "这一轮没测到速率（多半被上游限流，播放不受影响）";
 }

@@ -111,7 +111,7 @@ class TestMissing(unittest.TestCase):
         missing = _missing(channels)
         self.assertEqual(len(missing), 2)
         by_name = {row["name"]: row["reason"] for row in missing}
-        # 湖南卫视是央视频有的台，缺了那就是限流/故障
+        # 湖南卫视是主源有的台，缺了那就是限流/故障
         self.assertIn("限流", by_name["湖南卫视"])
         # 兵团卫视上游根本没有，说清楚，别让人以为是程序坏了
         self.assertIn("没有这个台", by_name["兵团卫视"])

@@ -14,7 +14,7 @@ from .settings import ensure_defaults, load_settings
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="iptvhd",
-        description="hd-iptv：高清 IPTV 直播源采集 / 清洗 / 测速 / 分发",
+        description="hd-iptv：高清 IPTV 播放列表管理 / 清洗 / 测速 / 分发",
     )
     parser.add_argument("--root", default=".", help="项目根目录（默认当前目录）")
     parser.add_argument("--config", default=None, help="配置文件路径（默认 <root>/config/config.toml）")
@@ -40,7 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def cmd_probe(root: Path, config: str | None, urls: list[str]) -> int:
     """逐条探测地址：能不能出流、分辨率多少、速率多少。
 
-    用来在把某个平台接进取源器之前先验证——比直接跑整轮更新快得多。
+    用来在把某个平台接入解析器之前先验证——比直接跑整轮更新快得多。
     """
     from .models import Stream
     from .net import build_client

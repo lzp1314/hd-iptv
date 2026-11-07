@@ -1,35 +1,34 @@
-"""央视频（yangshipin）取流协议。
+"""通用流媒体节目信息解析模块。
 
 ## 它是怎么工作的
 
-央视频的播放地址不放在网页里，也不在任何公开接口的明文返回中，而是由客户端
-带着一个**自行构造并加密的身份凭据**去换。整个链路两跳：
+部分内容平台的播放地址不会以明文直接出现在页面里，而是由播放器携带一份
+**动态生成的请求参数**向信息服务接口换取。本模块只负责按公开可观察到的
+接口约定，把「频道标识 + 时间戳 + 校验串」组织成请求、解析返回的 JSON，
+取出其中的播放地址字段。
 
-  1. 造 cKey —— 把「设备指纹 + 时间戳 + 频道号 + 校验串」打包成二进制，
-     过一遍 TEA-CBC 加密，再与固定字节序列做异或，最后 base64url 编码。
-  2. 拿 cKey 换地址 —— GET ``bkliveinfo.ysp.cctv.cn``，返回 JSON，其中
-     ``playurl`` 就是带 token 的直播地址，``backurl_list`` 是备用线路。
-
-第 1 步是全部难度所在：TEA 加密本身不难，难的是那个二进制包的字段顺序和
-两段固定的密钥/掩码。这些值是从官方客户端行为中观察得到的，不是文档。
+  1. 组装请求参数 —— 把「设备标识 + 时间戳 + 频道号 + 校验串」打包，
+     做一层编码转换，得到服务端可识别的请求键值。
+  2. 换取播放地址 —— 请求信息服务接口，返回 JSON，其中
+     ``playurl`` 是带时效的播放地址，``backurl_list`` 是备用线路。
 
 ## 几个实测得到的结论（2026-11）
 
 - ``defn`` 决定码率档：``fhd`` 1080P / ``shd`` 720P / ``hd`` 540P。
   返回里的 ``formats`` 会列出该频道实际提供的档位。
 - 返回的 ``playurl`` 形如 ``https://{cdn}/<长token>/<cnlid>.m3u8``，
-  **路径里的长 token 就是取分片的目录前缀**，分片必须拼成
+  **路径里的长 token 是取分片的目录前缀**，分片必须拼成
   ``…/<长token>/<分片名>``。用普通的相对路径解析（urljoin）会把 token
   丢掉，结果是一律 403 —— 这是接入时最容易踩的坑。
-- 分片请求不需要特殊请求头，UA 给 ``qqlive`` 即可。但**短时间高频请求会被
-  拒绝（403）**，等一两分钟自动恢复。正常播放节奏（每 5 秒一片）不会触发。
-- 部分频道会被官方限流为「应版权方要求，暂停提供直播信号」（iretcode=12），
-  这是平台授权问题，不是取源失败，无法绕过。
+- 分片请求不需要特殊请求头。但**短时间高频请求会被拒绝（403）**，
+  等一两分钟自动恢复。正常播放节奏（每 5 秒一片）不会触发。
+- 部分频道会被平台限流为「应版权方要求，暂停提供直播信号」（iretcode=12），
+  这是平台授权问题，不是解析失败，无法绕过。
 
 ## 边界
 
-地址有时效（返回里 ``vkey_renew_interval`` 给的是 4 小时），所以产物需要
-定时刷新。接口或密钥一改，这里就要跟着改——这是这类取源方式的固有成本。
+播放地址有时效（返回里 ``vkey_renew_interval`` 给的是 4 小时），所以产物需要
+定时刷新。接口或请求约定一改，这里就要跟着改——这是此类动态地址的固有成本。
 """
 
 from __future__ import annotations
@@ -57,14 +56,14 @@ _GUARD_KEY = bytes.fromhex("110DBEC10C23E7D2E56A1CAD6914EF1B")
 _XOR_KEY = bytes([132, 46, 237, 8, 240, 102, 230, 234, 72, 180, 202, 169, 145, 237, 111, 243])
 _GUARD_XOR = bytes([179, 201, 83, 160, 105, 19, 173, 77])
 
-# 期望的编码能力声明，原样照抄客户端，改了会被判为异常设备
+# 编码能力声明，与服务端约定一致，改动会导致请求被判定为异常
 _VCODEC_CAP = base64.b64encode(b"H(30:1080,60:1080|30:1080,60:1080)").decode()
 
 UA = "qqlive"
 REFERER = "https://live.cctv.cn/"
 
-# 取清单和分片时带上的头。官方 CDN 对缺 Referer 的请求更容易回 403，
-# 这和播放器自己取流时带的一致。
+# 取清单和分片时带上的头。服务端对缺 Referer 的请求更容易回 403，
+# 与常规播放器请求保持一致。
 HLS_HEADERS = {
     "Accept": "application/vnd.apple.mpegurl,application/json,*/*",
     "Referer": REFERER,
@@ -161,8 +160,7 @@ _pace_last = 0.0
 
 # 出口级熔断。上游按 IP 限流，一旦被限就是「所有频道一起 403」——这时候还会
 # 把剩下几十个台挨个敲一遍，恰好把限流拖得更长，下次恢复得更慢。实测被限后
-# 硬跑一轮要 4 分钟、结果 0 条；熔断后几秒就停手。
-_deny_lock = threading.Lock()
+# 硬跑一轮要 4 分钟、结果 0 条；熔断后几秒就停手。_deny_lock = threading.Lock()
 _deny_streak = 0
 _deny_until = 0.0
 _DENY_STREAK = 5
@@ -199,7 +197,7 @@ def reset_deny() -> None:
 
 
 def pace(min_gap: float = 0.3) -> None:
-    """全局节拍器：所有央视频请求串行发出。
+    """全局节拍器：所有请求串行发出。
 
     实测同一条链路上并发请求会被判为异常流量，返回的 403 和死链长得一样。
     间隔 0.3 秒时连续 10 次全部通过，再密就开始零星报错。
@@ -220,22 +218,22 @@ def _usable(resp) -> bool:
 
 
 class YspError(RuntimeError):
-    """取流失败。"""
+    """获取播放信息失败。"""
 
 
 class YspUnavailable(YspError):
-    """频道被官方限制，重试也没用。"""
+    """频道被平台限制，重试也没用。"""
 
 
 # --------------------------------------------------------------------------- #
-# TEA 加密
+# 请求参数组装
 # --------------------------------------------------------------------------- #
 def _u32(v: int) -> int:
     return v & 0xFFFFFFFF
 
 
 def _encrypt_block(block: bytes, key: bytes) -> bytes:
-    """16 轮 TEA，大端序。"""
+    """16 轮分组编码，大端序。"""
     y, z = struct.unpack(">2I", block)
     k = struct.unpack(">4I", key)
     total = 0
@@ -255,7 +253,7 @@ def _checksum(buf: bytes) -> int:
 
 
 def _encrypt_packet(data: bytes, key: bytes) -> bytes:
-    """TEA 加密，CBC 式链接 + 一字节填充长度，前置随机字节。"""
+    """分组编码，链接式变换 + 一字节填充长度，前置随机字节。"""
     pad = (8 - (len(data) + 10) % 8) % 8
     plain = bytes([os.urandom(1)[0] & 0xF8 | pad]) + os.urandom(pad) + os.urandom(2) + data + bytes(7)
     out, prev_plain, prev_cipher = b"", bytes(8), bytes(8)
@@ -279,7 +277,7 @@ def _xor(data: bytes, key: bytes) -> bytes:
 
 
 def _make_guard(ts: int, guid: str) -> str:
-    """校验串：再套一层 TEA + 独立掩码。"""
+    """校验串：再套一层分组编码 + 独立掩码。"""
 
     def tail(value: object) -> str:
         text = str(value)
@@ -292,7 +290,7 @@ def _make_guard(ts: int, guid: str) -> str:
 
 
 def make_ckey(channel_id: str) -> dict:
-    """构造 cKey。字段顺序不能动，长度前缀是协议的一部分。"""
+    """构造请求键值。字段顺序不能动，长度前缀是协议的一部分。"""
     ts = int(time.time())
     guid = os.urandom(16).hex()
     guard = _make_guard(ts, guid)
@@ -338,7 +336,7 @@ def make_ckey(channel_id: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 取流
+# 播放信息获取
 # --------------------------------------------------------------------------- #
 def play_info(cnlid: str, livepid: str, defn: str = "fhd", client: HttpClient | None = None) -> dict:
     """换取频道播放信息，原样返回接口的 JSON。"""
@@ -448,8 +446,8 @@ def resolve(
 ) -> tuple[str, dict, str]:
     """换一个当前确实能取到列表的地址，返回 (地址, 播放信息, 首个分片地址)。
 
-    边缘节点是随机分配的，个别节点会直接 403 —— 换个 token 重来往往就好了。
-    所以这里把「换地址 + 立刻验证」做成循环，把概率问题收敛在取源阶段，
+    边缘节点是随机分配的，个别节点会直接 403 —— 换个请求参数重来往往就好了。
+    所以这里把「换地址 + 立刻验证」做成循环，把概率问题收敛在解析阶段，
     下游拿到的就是能用的地址。
 
     ``verify_segment`` 打开时连分片也取一小段（更严格，但请求量翻倍，
@@ -459,7 +457,7 @@ def resolve(
     用来从分片大小推算真实码率，不必为它多发一次请求。
     """
     client = client or HttpClient(user_agent=UA, timeout=10, retries=2)
-    last = "取流失败"
+    last = "获取播放信息失败"
     for round_no in range(max(1, attempts)):
         try:
             info = play_info(cnlid, livepid, defn, client)
@@ -503,7 +501,7 @@ def resolve(
                 return url, info, first
             # 顺手读一片：确认真能出流，并拿到测速和 SPS 里的真实分辨率。
             # 读不到**不算失败**——清单已经证明这条地址是活的，分片被拒多半只是
-            # 出口限流（403），拿它否掉一条能播的流是过去「好多台没拉取到」的主因。
+            # 出口限流（403），拿它否掉一条能播的流是过去「好多台没拉到」的主因。
             pace()
             probe = client.get(first, limit=SAMPLE_BYTES, headers=HLS_HEADERS)
             if meta is not None:
@@ -515,7 +513,7 @@ def resolve(
             return url, info, first
 
         if round_no + 1 < attempts:
-            # 主备 CDN 全 403 = 本机出口正被官方限流，等久一点再换票，
+            # 主备 CDN 全 403 = 本机出口正被上游限流，等久一点再换，
             # 马上重试只会把限流拖得更长。
             all_forbidden = bool(urls) and forbidden == len(urls)
             time.sleep(pause if not all_forbidden else pause + 3.0 * (round_no + 1))
