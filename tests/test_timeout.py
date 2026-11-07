@@ -225,5 +225,50 @@ class DeadlinePruneTest(unittest.TestCase):
         self.assertTrue(all(s.error == "探测超时" for s in streams))
 
 
+class ProbeStatsTest(unittest.TestCase):
+    """成功分支必须记下速率与分辨率。
+
+    回归用例：这四行曾写在「分片不可用」的分支里，只在失败时执行。结果是
+    所有能播的流 speed=0、height=0，再被「画质 ≥720P」整批筛掉——卫视直连
+    源几乎全军覆没，只能落回央视频兜底（播放时每 15 秒换一次票）。
+    """
+
+    def test_successful_probe_records_speed_and_bitrate(self):
+        manifest = b"#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXTINF:5,\nseg1.ts\n#EXTINF:5,\nseg2.ts\n"
+
+        class Resp:
+            def __init__(self, status, body, ctype=""):
+                self.status = status
+                self.body = body
+                self.url = "http://cdn/live.m3u8"
+                self.headers = {"content-length": str(len(body)), "content-type": ctype}
+                self.ttfb_ms = 20
+                self.elapsed_ms = 100
+                self.error = ""
+                self.truncated = False
+
+            @property
+            def text(self):
+                return self.body.decode("utf-8", "ignore")
+
+            @property
+            def speed_mbps(self):
+                return 8.0 if self.body else 0.0
+
+        class Fake:
+            def get(self, url, **k):  # noqa: ANN003
+                if url.endswith(".m3u8"):
+                    return Resp(200, manifest)
+                return Resp(206, b"\x00" * 20000)
+
+        stream = Stream(url="http://cdn/live.m3u8", channel="湖南卫视", hint_height=1080)
+        out = probe_one(stream, Fake(), 262144, time.monotonic() + 5)
+
+        self.assertTrue(out.ok)
+        self.assertGreater(out.speed_mbps, 0, "能播的流必须留下实测速率")
+        self.assertGreater(out.bandwidth, 0, "分片大小 + 时长要能算出码率")
+        self.assertEqual(out.height, 1080, "读不到分辨率时用采集端已知档位")
+
+
 if __name__ == "__main__":
     unittest.main()

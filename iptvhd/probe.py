@@ -270,6 +270,12 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
                 return
             stream.error = f"分片不可用: {seg.error or seg.status}"
             return
+
+    # 分片读到了：测速、读真实分辨率、估码率。
+    # 这三件事曾经被写在「分片不可用」的分支里，等于只在失败时统计——成功
+    # 的流永远是 0 速率、0 分辨率，随后被「画质 ≥720P」整批筛掉。卫视的
+    # 直连源几乎全军覆没、只剩央视频兜底，根子就在这里。
+    if seg is not None and seg.body and seg.status in _OK_STATUS:
         stream.speed_mbps = seg.speed_mbps
         if seg.ttfb_ms:
             stream.delay_ms = max(stream.delay_ms, seg.ttfb_ms)
