@@ -26,6 +26,7 @@ class Stream:
 
     url: str
     raw_name: str = ""          # 采集到的原始频道名
+    alt_name: str = ""          # 备用频道名（raw_name 匹配不上时再试）
     group: str = ""             # 采集到的原始分组
     tvg_id: str = ""
     logo: str = ""

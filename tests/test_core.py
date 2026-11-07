@@ -72,9 +72,23 @@ class TestCollectors(unittest.TestCase):
         streams = parse_m3u(text)
         self.assertEqual(len(streams), 2)
         self.assertEqual(streams[0].tvg_id, "cctv1")
-        self.assertEqual(streams[0].raw_name, "CCTV-1")
+        # 显示名优先：tvg-name 是给 EPG 对表用的粗粒名字，同名会套在好几个台上
+        self.assertEqual(streams[0].raw_name, "CCTV-1 综合")
+        self.assertEqual(streams[0].alt_name, "CCTV-1")
         self.assertEqual(streams[0].group, "央视")
         self.assertEqual(streams[1].url, "http://s/2.m3u8")
+
+    def test_parse_m3u_duplicate_tvg_name(self):
+        """两个台的 tvg-name 相同时，不能靠它区分，必须看显示名。"""
+        text = (
+            "#EXTM3U\n"
+            '#EXTINF:-1 tvg-name="CCTV5" group-title="央视频道",CCTV-5体育\n'
+            "http://s/5.m3u8\n"
+            '#EXTINF:-1 tvg-name="CCTV5" group-title="央视频道",CCTV-5+体育赛事\n'
+            "http://s/5p.m3u8\n"
+        )
+        streams = parse_m3u(text)
+        self.assertEqual([s.raw_name for s in streams], ["CCTV-5体育", "CCTV-5+体育赛事"])
 
     def test_parse_txt(self):
         text = "央视,#genre#\nCCTV-1,http://s/1.m3u8\n\n卫视,#genre#\n湖南卫视,http://s/2.m3u8\n"

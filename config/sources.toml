@@ -31,25 +31,34 @@
 [[source]]
 name = "开放源-央视卫视"
 type = "subscription"
-url = "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u"
+# 三个镜像同一个文件，按顺序试，第一个拿到内容就用。
+# GitHub raw 在国内时快时慢、偶尔直接超时；只写一个地址等于把整套采集
+# 押在一条不稳定的链路上。jsDelivr 走国内 CDN，通常最快。
+urls = [
+  "https://cdn.jsdelivr.net/gh/fanmingming/live@main/tv/m3u/ipv6.m3u",
+  "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u",
+  "https://gh-proxy.com/https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u",
+]
 enabled = true
 # 该源偶发需要特定 UA 才能拉，留空则用全局 UA
 # ua = "okhttp/3.12.0"
 
 # ======================= 解析器 =======================
 
-# ---------------- 综合频道信息服务接口（备用） ----------------
-# 央视频加密接口：覆盖最全，但按出口 IP 限流，频繁请求会被风控成「所有台一起 403」。
-# 默认关闭；上面静态源缺台时，可以打开做兜底（resolve=false 只登记频道、播放时现换票）。
+# ---------------- 综合频道信息服务接口（兜底） ----------------
+# 央视频加密接口：覆盖最全，但按出口 IP 限流，全量请求会被风控成「所有台一起 403」。
 #
-# 只想要一部分：channels 列 slug（见 iptvhd/ysp.py 里的 CHANNELS）
-#   channels = ["cctv1", "cctv5", "hnws", "zjws"]
-# 只要主频道：groups = ["央视"]      只要卫视：groups = ["卫视"]
-# 想省点流量可以降到 720P：defn = "shd"
+# 这里只留一个用途：静态源里没有、而你又想看的台。实测静态开放源缺「河南卫视」，
+# 所以下面只开这一个 slug。resolve = false 时采集阶段**零请求**（只登记频道，
+# 地址在真的要播放时才换一次票），不会因为补一个台把整条出口拖进限流。
+#
+# 想补更多：在 channels 里加 slug（见 iptvhd/ysp.py 的 CHANNELS），
+#   或整组打开 groups = ["央视", "卫视"]（这时建议先把静态源关掉，别两边都跑）
 [[source]]
 name = "综合频道"
 type = "yangshipin"
-enabled = false
+enabled = true
+channels = ["henanws"]
 # 默认只登记频道、不逐台向平台要地址：地址在播放时由中转层现换，采集阶段
 # 拿它没有意义，而「一次打五十多个请求」正是被上游按 IP 限频、之后所有台
 # 都 403 的主因。留 false 就是零请求。
@@ -58,8 +67,6 @@ enabled = false
 resolve = false
 # 只在 resolve = true 时生效：顺手读一片，拿到真实分辨率和码率（每台多一次请求）
 verify_segment = false
-# groups = ["央视", "卫视"]
-# channels = ["cctv1", "hnws"]
 
 # ---------------- 央视：官方 CDN（备用线路） ----------------
 # 这条 CDN 对 17 个台都返回 200，但实测只有 CCTV-1 和 CCTV-13 是真流，

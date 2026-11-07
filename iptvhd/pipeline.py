@@ -16,7 +16,7 @@ from .models import Channel, RunReport, Stream
 from .net import build_client
 from .normalize import ChannelMatcher, load_channels
 from .probe import probe_many
-from .settings import Settings, upgrade_channels
+from .settings import Settings, upgrade_channels, upgrade_sources
 
 Logger = Callable[[str], None]
 
@@ -201,6 +201,9 @@ def _collect(settings: Settings, collectors: list[Collector], log: Logger) -> tu
                 }
             )
             log(f"[采集] {collector.name} 失败：{exc}")
+            # 失败时的诊断信息（比如镜像挨个试都没通）比错误本身更有用
+            for note in getattr(collector, "notes", []) or []:
+                log(f"    {note}")
     return streams, stats
 
 
@@ -224,6 +227,9 @@ def _assign(streams: list[Stream], channels: list[Channel], matcher: ChannelMatc
         if not s.raw_name and s.group:
             s.raw_name = s.group  # 少数列表把频道名写在分组里
         result = matcher.match(s.raw_name)
+        # 显示名匹配不上时退回 tvg-name：有的列表显示名带长后缀，反而对不上
+        if result.channel is None and s.alt_name:
+            result = matcher.match(s.alt_name)
         if result.channel is None:
             unmatched += 1
             continue
@@ -265,6 +271,11 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     # 容器里挂着的旧默认模板不会随镜像更新，这里补一刀（用户改过的不动）
     if upgrade_channels(settings.channels_file):
         log(f"[模板] 旧版默认频道模板已换成新版：{settings.channels_file}")
+    # 同理：旧默认采集源（走央视频接口，会被按 IP 限流）换成静态开放源。
+    # 不换的话，宿主机上那份旧 sources.toml 会一直盖着镜像里的新配置，
+    # 删容器重建也没用——起来的还是那个被限流的源。
+    if upgrade_sources(settings.sources_file):
+        log(f"[源] 旧版默认采集源已换成静态开放源：{settings.sources_file}")
 
     channels = load_channels(settings.channels_file)
     report.channels_total = len(channels)

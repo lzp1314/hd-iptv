@@ -25,7 +25,15 @@ _ATTR = re.compile(r'([a-zA-Z0-9_-]+)="([^"]*)"')
 # 解析
 # --------------------------------------------------------------------------- #
 def parse_m3u(text: str) -> list[Stream]:
-    """解析 m3u/m3u8 播放列表。"""
+    """解析 m3u/m3u8 播放列表。
+
+    频道名优先取逗号后面那段「显示名」，``tvg-name`` 只作备用：
+
+    ``tvg-name`` 是给 EPG 对表用的粗粒名字，同一个名字会套在好几个台上。
+    例如 fanmingming 的源里 ``CCTV-5体育`` 和 ``CCTV-5+体育赛事`` 的
+    ``tvg-name`` 都是 ``CCTV5``——照它取名，CCTV-5+ 会被当成 CCTV-5，
+    两个台抢同一个位置，其中一个直接消失。显示名才是列表作者写的真频道名。
+    """
     streams: list[Stream] = []
     pending: dict | None = None
     for raw in text.splitlines():
@@ -34,9 +42,14 @@ def parse_m3u(text: str) -> list[Stream]:
             continue
         if line.upper().startswith("#EXTINF:"):
             meta = dict(_ATTR.findall(line))
-            name = line.split(",", 1)[1].strip() if "," in line else ""
+            shown = line.split(",", 1)[1].strip() if "," in line else ""
+            tvg_name = (meta.get("tvg-name") or "").strip()
+            primary = shown or tvg_name
+            # 两个名字都有且不一样时都留着：先用显示名匹配，不中再试 tvg-name
+            alt = tvg_name if tvg_name and tvg_name != primary else ""
             pending = {
-                "name": (meta.get("tvg-name") or name).strip(),
+                "name": primary,
+                "alt_name": alt,
                 "tvg_id": meta.get("tvg-id", ""),
                 "logo": meta.get("tvg-logo", ""),
                 "group": meta.get("group-title", ""),
@@ -48,6 +61,7 @@ def parse_m3u(text: str) -> list[Stream]:
                 Stream(
                     url=line,
                     raw_name=pending["name"],
+                    alt_name=pending["alt_name"],
                     tvg_id=pending["tvg_id"],
                     logo=pending["logo"],
                     group=pending["group"],
@@ -112,17 +126,47 @@ class SubscriptionCollector(Collector):
     kind = "subscription"
 
     def collect(self, client: HttpClient) -> list[Stream]:
-        url = self.config.get("url", "")
-        if not url:
+        """拉订阅列表。
+
+        ``urls`` 可以给多个地址（镜像），按顺序试，第一个拿到内容就用它。
+        国内拉 GitHub raw 时常抽风（超时/被限速），只写一个地址等于把整套
+        采集押在一条不稳定的链路上；配几个镜像就能自动绕开。
+        """
+        urls = [str(u).strip() for u in (self.config.get("urls") or []) if str(u).strip()]
+        single = str(self.config.get("url", "") or "").strip()
+        if single:
+            urls.insert(0, single)
+        if not urls:
             return []
+
         ua = self.config.get("ua", "")
         headers = dict(self.config.get("headers") or {})
         if ua:
             headers["User-Agent"] = ua
-        resp = client.get(url, headers=headers or None)
-        if not resp.body:
-            raise RuntimeError(f"订阅获取失败: {resp.error or resp.status}")
-        return self._tag(parse_list(resp.text))
+
+        self.notes = []
+        last = ""
+        for url in urls:
+            try:
+                resp = client.get(url, headers=headers or None)
+            except Exception as exc:  # noqa: BLE001 - 换下一个镜像
+                last = f"{url} → {type(exc).__name__}: {exc}"
+                self.notes.append(f"订阅地址不可用（{last}）")
+                continue
+            if not resp.body:
+                last = f"{url} → {resp.error or resp.status}"
+                self.notes.append(f"订阅地址不可用（{last}）")
+                continue
+            streams = parse_list(resp.text)
+            if not streams:
+                last = f"{url} → 内容为空或不是列表"
+                self.notes.append(f"订阅地址不可用（{last}）")
+                continue
+            if url != urls[0]:
+                self.notes.append(f"主地址不通，改用镜像：{url}")
+            return self._tag(streams)
+
+        raise RuntimeError(f"所有订阅地址都取不到内容（最后一个：{last}）")
 
 
 class LocalCollector(Collector):
