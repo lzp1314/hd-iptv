@@ -21,15 +21,17 @@ services:
 
     environment:
       TZ: Asia/Shanghai
-      # 刷新间隔（小时）。主源只登记频道、不逐台请求，一轮几秒钟。
-      # 列表过期不影响正在看的台，播放时地址是按需取的。
+      # 刷新间隔（小时）。主源改成静态直连地址后，一轮要并发探测几百条候选，
+      # 大概 1 分钟，别设太短。
       HDIPTV_INTERVAL_HOURS: "24"
       # 画质区间：720 起步、1080 封顶
       HDIPTV_MIN_HEIGHT: "720"
       HDIPTV_MAX_HEIGHT: "1080"
+      # 速率门槛。聚合源多为第三方转发，速率波动比运营商源大，这里用环境变量
+      # 压到 0.8，盖掉 config.toml 里可能残留的旧值 1.5，免得能播的台被误杀。
+      HDIPTV_MIN_SPEED: "0.8"
       # 播放方式：direct = 清单由本机下发、分片由播放器直连 CDN。
-      # 实测只有 direct 稳定：全转发（proxy）时本机去拉分片会被平台判成
-      # 异常流量回 403，播放器自己直连带 TLS 会话复用反而没事。
+      # 静态源就是播放器直连、中转层不参与；这条只影响兜底的央视频流。
       HDIPTV_PLAY_MODE: direct
       # 分片缓存上限（MB），只对 proxy 模式生效
       HDIPTV_RELAY_CACHE_MB: "96"

@@ -61,8 +61,14 @@ class Stream:
         return height_grade(self.height)
 
     def sort_key(self) -> tuple:
-        """排序：分辨率优先，其次速率，再次延迟。"""
-        return (-self.height, -self.speed_mbps, self.delay_ms)
+        """排序：直连源优先，其次分辨率、速率、延迟。
+
+        第一项区分「能不能直连」：有真实地址的静态源排前面，只登记了 slug、
+        地址要等播放时现换的源（央视频接口）排后面。换票本身会吃上游的按 IP
+        配额，能不用就不用——同画质下宁可走静态直连，卡顿和限流都少得多。
+        """
+        direct = 0 if self.url else 1
+        return (direct, -self.height, -self.speed_mbps, self.delay_ms)
 
 
 @dataclass(slots=True)

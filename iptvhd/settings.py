@@ -48,7 +48,7 @@ http_proxy = ""
 enabled = true
 concurrency = 24
 sample_bytes = 262144
-min_speed_mbps = 1.5
+min_speed_mbps = 0.8
 min_height = 720
 max_height = 1080
 max_per_channel = 4
@@ -196,7 +196,7 @@ class Settings:
 
     @property
     def min_speed_mbps(self) -> float:
-        return float(os.environ.get("HDIPTV_MIN_SPEED") or self.get("probe", "min_speed_mbps", 1.5))
+        return float(os.environ.get("HDIPTV_MIN_SPEED") or self.get("probe", "min_speed_mbps", 0.8))
 
     @property
     def min_height(self) -> int:
@@ -394,10 +394,12 @@ def upgrade_channels(path: Path) -> bool:
 # 每次换主源，模板里的注释标题都会跟着变，这里把历史版本的特征行都列上，
 # 命中任意一条就当成旧模板替换。新版自己的特征单独判，命中就绝不重复替换。
 _OLD_SOURCES_MARKERS = (
-    "静态开放源（主源）",            # 0.9.3：静态源当主源（移动专属，联通/电信全 403）
+    "静态开放源（主源）",            # 0.9.3：静态源当主源（移动专属，跨省/联通全 403）
+    "静态开放源（默认关闭",          # 0.9.4：静态源关掉、央视频改回主源（仍会被按 IP 限流）
     "综合频道信息服务接口（主源）",   # 0.9.2 及更早：央视频全量 resolve，一次打五十多个请求
 )
-_NEW_SOURCES_MARKER = "静态开放源（默认关闭"
+# 0.9.5：聚合源直连当主源，央视频降为兜底。这条特征只在新版模板里有。
+_NEW_SOURCES_MARKER = "聚合源-多线路"
 
 
 def upgrade_sources(path: Path) -> bool:
