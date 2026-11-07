@@ -54,7 +54,7 @@ timeout = 15
 budget = 180
 min_speed_mbps = 0.8
 min_height = 720
-max_height = 1080
+max_height = 2160
 max_per_channel = 4
 allow_unknown_resolution = false
 probe_playlist_children = true
@@ -223,8 +223,11 @@ class Settings:
 
     @property
     def max_height(self) -> int:
-        """画质上限。默认 1080：4K 档匿名接口拿不到真 4K，留着只会多几个坏台。"""
-        return int(os.environ.get("HDIPTV_MAX_HEIGHT") or self.get("probe", "max_height", 1080))
+        """画质上限。默认 2160：芒果、浙江广电这些官方源常常只给 4K 一路，
+        卡在 1080 会把唯一可用的地址整条丢掉，然后退到 1 Mbps 的中转空壳上。
+        环境变量 ``HDIPTV_MAX_HEIGHT`` 优先级最高，compose 里写了就以它为准。
+        """
+        return int(os.environ.get("HDIPTV_MAX_HEIGHT") or self.get("probe", "max_height", 2160))
 
     @property
     def max_per_channel(self) -> int:

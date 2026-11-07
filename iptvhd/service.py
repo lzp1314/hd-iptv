@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -729,6 +730,14 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
     )
     if not settings.public_url:
         state.log("提示：未设置对外地址，列表按请求的 Host 现拼；套了反代会自动用外网域名")
+    # 画质上限被环境变量压住时给一句明说：配置文件里改对了也不生效，
+    # 而这一项直接决定「4K 官方源要不要」，卡在 1080 就是卫视退回空壳源。
+    if os.environ.get("HDIPTV_MAX_HEIGHT") and settings.max_height <= 1080:
+        state.log(
+            f"注意：环境变量 HDIPTV_MAX_HEIGHT={settings.max_height} 把画质上限压住了，"
+            "只有 4K 一路的官方源（芒果、浙江广电）会被整条丢掉；"
+            "不需要就删掉这条环境变量，或改成 2160"
+        )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
