@@ -129,6 +129,8 @@ def parse_media(text: str, base_url: str = "") -> dict:
         "segments": 0,
         "encrypted": False,
         "first_segment": "",
+        "last_segment": "",
+        "has_endlist": False,
         "segment_duration": 0.0,
     }
     extinf = 0.0
@@ -146,10 +148,15 @@ def parse_media(text: str, base_url: str = "") -> dict:
                 extinf = float(line.split(":", 1)[1].split(",")[0])
             except ValueError:
                 extinf = 0.0
+        elif line.startswith("#EXT-X-ENDLIST"):
+            # 带结束标记 = 点播（或已结束的直播），播完就停，不能当直播源
+            info["has_endlist"] = True
         elif line and not line.startswith("#"):
             info["segments"] += 1
+            seg = urljoin(base_url, line)
             if not info["first_segment"]:
-                info["first_segment"] = urljoin(base_url, line)
+                info["first_segment"] = seg
+            info["last_segment"] = seg
     info["segment_duration"] = extinf
     return info
 

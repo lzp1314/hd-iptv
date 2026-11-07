@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -19,6 +20,26 @@ from .models import Stream
 from .net import HttpClient
 
 _OK_STATUS = (200, 206)
+
+# 分片数超过这个数，基本可以断定不是直播：直播 HLS 只保留几片到十几片的滑动窗口。
+# 实测见过 2096 片的清单（快手 CDN 上的视频文件），速度漂亮但播完就黑屏。
+_VOD_SEGMENTS = 60
+
+# 分片数不超过这个值，说明上游只留了个很短的滑动窗口，必须额外确认它在滚动。
+# 这是「点进去播十几秒就停」和「能一直看」的分水岭。
+_SHORT_WINDOW = 6
+# 复核清单是否在滚之前统一等多久。要大于上游分片时长，否则「正常但片长 6 秒」
+# 的源会被误判冻结（湖南卫视的官方 2160P 源就是这么被冤枉的：33 Mbps、分片
+# 全 200，只是片长 6 秒）。所有待复核的源共用这一次等待，不是每条各睡一遍。
+_ROLL_GAP = 8.0
+
+_SEQ_LINE = re.compile(r"#EXT-X-MEDIA-SEQUENCE:\s*(\d+)")
+
+
+def _seq_of(text: str) -> int:
+    """清单滚到第几片；没有这个标签返回 -1（主清单常见）。"""
+    match = _SEQ_LINE.search(text or "")
+    return int(match.group(1)) if match else -1
 
 # 采集阶段的验证结论能用多久。部分平台的清单 5 秒滚一轮、只留 3 片，
 # 超过这个时间旧结论就不再可靠，得重新读清单。
@@ -241,19 +262,31 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
     if info["segments"] <= 0:
         stream.error = "播放列表无分片"
         return
+
+    # 点播清单要挡掉：带 #EXT-X-ENDLIST 的播完就停；分片数远超直播窗口的
+    # （实测见过 2096 片的）本质是视频文件，播完露出结局就黑屏。
+    if info["has_endlist"] or info["segments"] > _VOD_SEGMENTS:
+        stream.ok = False
+        stream.error = f"点播清单（{info['segments']} 片），非直播"
+        return
+
     if not stream.segment_duration:
         stream.segment_duration = info["segment_duration"] or info["target_duration"]
 
-    # 读第一个分片，既验证真能出流，又顺带测速
-    seg_url = info["first_segment"]
+    # 读「最后一片」而不是第一片：第一片是 15 秒前的内容，上游早就不管它了，
+    # 拿它测速永远漂亮。真正会断的是清单不滚、最新片 404 的那种源——
+    # 107.150.60.122 的湖南卫视就是这样：清单 3 片，末片 404，却因为读了
+    # 首片而被判「可用」，排到播放列表第一位，播 15 秒就停。
+    seg_url = info["last_segment"] or info["first_segment"]
     if seg_url and stream.playlist_only:
         _pace()
     seg = _fetch(client, seg_url, limit=sample_bytes, deadline=deadline) if seg_url else None
     if seg is not None and (seg.status not in _OK_STATUS or not seg.body):
-        # 有些平台对同一 token 的高频请求返回 403（限流，不是死链）。这类源在
-        # 采集阶段已确认列表有效，播放器按正常节奏取片不会触发，所以不当死链处理，
-        # 只标记为「未测速」——保留但拿不到速率。
-        if stream.playlist_only and seg.status in (403, 429):
+        # 分不清「限流」和「死链」是之前最大的坑：只要 playlist_only 为真，
+        # 404 / 连不上 / 5xx 一律按「未测速」放行，死源就这么混进了播放列表。
+        # 限流的特征是 403 / 429，只有这两种宽容；其余一律判死。
+        soft = seg.status in (403, 429)
+        if soft:
             for _ in range(2):
                 time.sleep(1.5)
                 _pace()
@@ -262,12 +295,13 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
                     seg = again
                     break
         if seg.status not in _OK_STATUS or not seg.body:
-            if stream.playlist_only:
+            if soft and stream.playlist_only:
                 stream.note = f"分片限流({seg.status})，未测速"
                 if not stream.height:
                     stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name)
                 stream.ok = True
                 return
+            stream.ok = False
             stream.error = f"分片不可用: {seg.error or seg.status}"
             return
 
@@ -285,6 +319,17 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
     if not stream.height:
         # 媒体清单本身不带分辨率（单码率直播常见），优先用采集端已知的档位
         stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name, stream.raw_name)
+
+    # 短窗口清单还要确认它真的在往前滚。清单不滚的源，播放器播完手里这几片
+    # 就停在原地。这里只登记「待复核」，真正的等待与复核放到 probe_many 里
+    # 统一做——每条源各睡 4 秒的话，332 条要多花好几分钟，而它们完全可以
+    # 一起等同一个 8 秒。
+    if not stream.playlist_only and info["segments"] <= _SHORT_WINDOW:
+        seq = _seq_of(text)
+        if seq >= 0:
+            stream.roll_url = base
+            stream.roll_seq = seq
+
     stream.ok = True
 
 
@@ -359,6 +404,38 @@ def _probe_with_budget(
     deadline = time.monotonic() + timeout if timeout and timeout > 0 else None
     holder.append(deadline)
     return probe_one(stream, client, sample_bytes, deadline)
+
+
+def _verify_roll(streams: list[Stream], client: HttpClient, concurrency: int) -> None:
+    """统一复核「短窗口清单是否在往前滚」。
+
+    直播 HLS 只保留几片，播放器把这几个放完就只能等新片。上游要是压根不滚，
+    画面就停在原地——公开转发源里这种空壳非常多：清单能拉到、分片也能下，
+    序号却一动不动，播十几秒必然卡死。
+
+    做法是整个批次共用**一次**等待：所有待复核的源一起睡 8 秒，再并发各取
+    一次清单比对序号。逐条各睡一遍的话，三百多条要多花好几分钟。
+    """
+    targets = [s for s in streams if s.ok and s.roll_url and s.roll_seq >= 0]
+    if not targets:
+        return
+
+    time.sleep(_ROLL_GAP)
+
+    def check(stream: Stream) -> None:
+        try:
+            resp = client.get(stream.roll_url, limit=131072)
+        except Exception:  # noqa: BLE001 - 复核失败按「不动」处理会误杀，直接放过
+            return
+        if not resp.body[:64].lstrip().startswith(b"#EXTM3U"):
+            return
+        seq_now = _seq_of(resp.text)
+        if seq_now >= 0 and seq_now == stream.roll_seq:
+            stream.ok = False
+            stream.error = "清单不滚动（冻结），播十几秒就停"
+
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        list(pool.map(check, targets))
 
 
 def probe_many(
@@ -465,4 +542,5 @@ def probe_many(
         # 不能 wait=True：那样等于把「不等长尾」的初衷又撤销了
         pool.shutdown(wait=False, cancel_futures=True)
 
+    _verify_roll(items, client, concurrency)
     return items

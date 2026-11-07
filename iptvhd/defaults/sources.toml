@@ -18,7 +18,25 @@
 
 # ======================= 采集器 =======================
 
-# ---------------- 聚合源：多线路直连地址（主源） ----------------
+# ---------------- 官方直连源（优先采集） ----------------
+# akiralereal/iptv 的成品列表，地址全部来自各省广电 / 央视的官方 CDN：
+#   湖南卫视  hlsal-ldvt.qing.mgtv.com（芒果 TV）
+#   浙江卫视  ali-xwl.cztv.com（浙江广电）
+# 实测（2026-11-07，同一网络、同一时刻）：
+#   官方直连  湖南 3 片全 200（每片 1.1MB）、浙江 6 片全 200
+#   公开中转  清单能拉到、序号也在滚，但分片整片 404 —— 播十几秒必停
+# 这就是「别人播着不卡、我一放就卡」的真正差别所在，所以排在聚合源前面。
+[[source]]
+name = "官方直连"
+type = "subscription"
+urls = [
+  "https://cdn.jsdelivr.net/gh/akiralereal/iptv@main/IPTV.m3u",
+  "https://gh-proxy.com/https://raw.githubusercontent.com/akiralereal/iptv/main/IPTV.m3u",
+  "https://raw.githubusercontent.com/akiralereal/iptv/main/IPTV.m3u",
+]
+enabled = true
+
+# ---------------- 聚合源：多线路直连地址 ----------------
 # Guovin/TV 定时发布的成品列表：把几十个公开源聚合、测速后按速率排序，
 # 条目都是可直接播放的 m3u8 地址，以 IPv4 公网为主，**不依赖运营商 IPv6**。
 #
@@ -110,7 +128,7 @@ name = "浙江广电"
 type = "zhejiang"
 quality = "1080P"
 group = "卫视"
-enabled = false
+enabled = true
 channels = ["浙江卫视"]
 
 # ---------------- 通用模板：自己接一个平台 ----------------

@@ -5,6 +5,35 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+# 各档画质「能连续播」所需的带宽（Mbps）。1080P 直播码率普遍 4~8 Mbps，
+# 720P 在 2~4 Mbps；低于这个数播放器就会一直等下一片，表现就是卡一下停一下。
+_NEED_MBPS = ((2160, 8.0), (1080, 4.0), (720, 2.0))
+
+
+def need_mbps(height: int) -> float:
+    """这一档画质大概需要多少带宽才播得动。"""
+    for h, mbps in _NEED_MBPS:
+        if height >= h:
+            return mbps
+    return 1.0
+
+
+def _prefer_rank(height: int) -> int:
+    """同档速度下的画质偏好：1080P > 720P > 4K > 其他。
+
+    4K 排在 1080P 后面不是嫌它差，而是它的码率是 1080P 的三四倍，电视盒子和
+    网页播放器更容易解不动、更容易卡。只有同台 1080P 全都不行时，才退到 4K
+    顶上去（官方源经常只有 4K 一路，湖南卫视就是这种情况）。
+    """
+    if 1080 <= height < 2160:
+        return 0
+    if 720 <= height < 1080:
+        return 1
+    if height >= 2160:
+        return 2
+    return 3
+
+
 def height_grade(height: int) -> str:
     """按高度给出画质等级标签。"""
     if height >= 2160:
@@ -52,6 +81,10 @@ class Stream:
     delay_ms: int = 0           # 首字节延迟
     speed_mbps: float = 0.0     # 实测下载速率（Mbps）
 
+    # ---- 滚动校验（由探测的第二阶段用，不参与过滤）----
+    roll_url: str = ""          # 需要复核「清单是否在滚」的清单地址，空 = 不用复核
+    roll_seq: int = -1          # 首次取到的分片序号
+
     # ---- 匹配结果（由管线回填）----
     channel: str = ""
     channel_group: str = ""
@@ -61,14 +94,25 @@ class Stream:
         return height_grade(self.height)
 
     def sort_key(self) -> tuple:
-        """排序：直连源优先，其次分辨率、速率、延迟。
+        """排序：直连优先 → 速度能不能撑住画质 → 画质 → 速率 → 延迟。
 
         第一项区分「能不能直连」：有真实地址的静态源排前面，只登记了 slug、
         地址要等播放时现换的源（央视频接口）排后面。换票本身会吃上游的按 IP
-        配额，能不用就不用——同画质下宁可走静态直连，卡顿和限流都少得多。
+        配额，能不用就不用。
+
+        第二项是这次补的：**只看画质不看速度会选出必卡的源**。湖南卫视的
+        1080P 源实测 1.33 Mbps，1080P 直播至少要 4 Mbps，播起来只能一直等分片；
+        而它一直排第一，仅仅因为分辨率标签比 720P 那条高。
         """
         direct = 0 if self.url else 1
-        return (direct, -self.height, -self.speed_mbps, self.delay_ms)
+        need = need_mbps(self.height)
+        if self.speed_mbps <= 0:
+            fit = 1          # 没测到速率：放在「够快」之后、「不够快」之前
+        elif self.speed_mbps >= need:
+            fit = 0          # 撑得住这一档画质
+        else:
+            fit = 2          # 标着高画质却跑不动，宁可用低一档的
+        return (direct, fit, _prefer_rank(self.height), -self.speed_mbps, self.delay_ms)
 
 
 @dataclass(slots=True)

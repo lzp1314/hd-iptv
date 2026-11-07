@@ -12,7 +12,7 @@ from typing import Callable
 
 from . import writers
 from .collectors import Collector, SubscriptionCollector, build_collectors, parse_list
-from .models import Channel, RunReport, Stream
+from .models import Channel, RunReport, Stream, need_mbps
 from .net import build_client
 from .normalize import ChannelMatcher, load_channels
 from .probe import probe_many
@@ -257,8 +257,14 @@ def _filter(streams: list[Stream], settings: Settings) -> list[Stream]:
                 continue
         elif not allow_unknown:
             continue
-        if s.speed_mbps and s.speed_mbps < min_speed:
-            continue
+        if s.speed_mbps:
+            # 门槛按画质分档，不再一刀切 0.8 Mbps：那个数字连 480P 都勉强，
+            # 1080P 标称 1.33 Mbps 的源照样放行，结果就是播一卡一。
+            # 取「该档画质的一半」当底线——留出线路波动的余量，又不至于把
+            # 1.5~2 Mbps 这类凑合能看的源全砍光（砍光就只能回落央视频换票）。
+            floor = max(min_speed, need_mbps(s.height) * 0.5)
+            if s.speed_mbps < floor:
+                continue
         kept.append(s)
     return kept
 
@@ -275,7 +281,9 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     # 不换的话，宿主机上那份旧 sources.toml 会一直盖着镜像里的新配置，
     # 删容器重建也没用——起来的还是那个被限流的源。
     if upgrade_sources(settings.sources_file):
-        log(f"[源] 旧版默认采集源已换成静态开放源：{settings.sources_file}")
+        log(f"[源] 旧版默认采集源已换成新版（含官方直连）：{settings.sources_file}")
+    if settings.config_upgraded:
+        log("[配置] 画质上限已从 1080 放开到 4K —— 官方源常常只有 4K 一路")
 
     channels = load_channels(settings.channels_file)
     report.channels_total = len(channels)

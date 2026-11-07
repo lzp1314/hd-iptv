@@ -156,6 +156,7 @@ class Settings:
     panel_path: Path = field(default_factory=lambda: Path("config/panel.json"))
     # 本次加载时把旧的默认频道模板换成了新版（只发生一次，用来打日志）
     channels_upgraded: bool = False
+    config_upgraded: bool = False
 
     # ---- 便捷读取 ----
     def section(self, name: str) -> dict:
@@ -364,6 +365,9 @@ def ensure_defaults(root: Path | str) -> list[str]:
 def load_settings(root: Path | str = ".", config_file: str | Path | None = None) -> Settings:
     root = Path(root).resolve()
     cfg_path = Path(config_file) if config_file else root / "config" / "config.toml"
+    # 先就地把旧默认值改掉，再读进内存——挂载在宿主机的旧 config.toml 不会
+    # 随镜像更新，不改的话「画质上限 1080」会一直把 4K 官方源整条挡掉。
+    config_upgraded = upgrade_config(cfg_path)
     data: dict = {}
     if cfg_path.exists():
         with cfg_path.open("rb") as fp:
@@ -374,7 +378,36 @@ def load_settings(root: Path | str = ".", config_file: str | Path | None = None)
     settings.panel_path = cfg_path.parent / PANEL_FILE
     settings.panel = coerce_panel(read_panel(settings.panel_path))
     settings.channels_upgraded = upgrade_channels(settings.channels_file)
+    settings.config_upgraded = config_upgraded
     return settings
+
+
+def upgrade_config(path: Path) -> bool:
+    """就地把旧默认 config.toml 里「会挡住功能」的默认值改掉。
+
+    整份替换会把用户的自定义（并发数、UA、分组）一起冲掉，所以只动具体的键。
+
+    目前只有一个键：``max_height = 1080``。很多官方源只提供 4K 一路（芒果、
+    浙江广电都是），上限卡在 1080 会把唯一可用的那条地址整条丢掉，然后退到
+    公开列表里 1 Mbps 的中转空壳上——湖南卫视卡顿的根源就是这里。
+    """
+    if not path.exists():
+        return False
+    try:
+        current = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    if "max_height = 1080" not in current:
+        return False
+    new = (
+        "max_height = 2160            # 画质上限：放开到 4K。官方源常常只有 4K 一路，\n"
+        "                             # 卡在 1080 会把唯一可用的地址整条丢掉"
+    )
+    try:
+        path.write_text(current.replace("max_height = 1080", new, 1), encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 # 旧版默认频道模板的特征行。只在这句还在时替换——用户自己改过的模板一定
@@ -408,16 +441,16 @@ def upgrade_channels(path: Path) -> bool:
     return True
 
 
-# 判断「这份 sources.toml 还是出厂的默认模板、没被人改过」。
-# 每次换主源，模板里的注释标题都会跟着变，这里把历史版本的特征行都列上，
+# 判断「这份 sources.toml 还是出厂的默认模板、没被人改过」。# 每次换主源，模板里的注释标题都会跟着变，这里把历史版本的特征行都列上，
 # 命中任意一条就当成旧模板替换。新版自己的特征单独判，命中就绝不重复替换。
 _OLD_SOURCES_MARKERS = (
     "静态开放源（主源）",            # 0.9.3：静态源当主源（移动专属，跨省/联通全 403）
     "静态开放源（默认关闭",          # 0.9.4：静态源关掉、央视频改回主源（仍会被按 IP 限流）
     "综合频道信息服务接口（主源）",   # 0.9.2 及更早：央视频全量 resolve，一次打五十多个请求
+    "聚合源-多线路",                 # 0.9.5~0.9.8：只有公开聚合源，没有官方直连
 )
-# 0.9.5：聚合源直连当主源，央视频降为兜底。这条特征只在新版模板里有。
-_NEW_SOURCES_MARKER = "聚合源-多线路"
+# 0.9.9：加上官方直连源（芒果、浙江广电），排在聚合源前面。这条特征只在新模板里有。
+_NEW_SOURCES_MARKER = "官方直连"
 
 
 def upgrade_sources(path: Path) -> bool:

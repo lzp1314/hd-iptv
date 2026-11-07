@@ -159,9 +159,23 @@ class TestWriters(unittest.TestCase):
             self.assertTrue(text.startswith('#EXTM3U x-tvg-url="http://e/epg.xml"'))
             self.assertIn('tvg-name="CCTV-1"', text)
             self.assertIn("group-title=\"央视\"", text)
-            # 4K 应排在 1080P 前面，且名字带画质后缀
-            self.assertLess(text.index("4k.m3u8"), text.index("1080.m3u8"))
-            self.assertIn("CCTV-1·4K", text)
+            # 1080P 排在 4K 前面：4K 码率是 1080P 的数倍，盒子/网页播放器更容易
+            # 解不动。只有同台 1080P 全不行时，才让 4K 顶上来（官方源常只有 4K 一路）
+            self.assertLess(text.index("1080.m3u8"), text.index("4k.m3u8"))
+            self.assertIn("CCTV-1·1080P", text)
+
+    def test_4k_takes_over_when_1080p_is_bad(self):
+        """同台 1080P 撑不住时，4K 官方源要能顶上来。
+
+        湖南卫视就是这种情况：唯一可播的是芒果官方 4K（43 Mbps），
+        而 1080P 候选全是 1 Mbps 的中转空壳。要是 4K 永远排最后，
+        这一台就会一直播那个必然卡顿的 1 Mbps 源。
+        """
+        slow = Stream(url="http://a/1080-slow.m3u8", height=1080, speed_mbps=1.1)
+        official = Stream(url="http://a/4k-official.m3u8", height=2160, speed_mbps=43.0)
+        ch = Channel(name="湖南卫视", group="卫视", streams=[slow, official])
+        ch.accept(4)
+        self.assertEqual(ch.streams[0].url, "http://a/4k-official.m3u8")
 
     def test_txt(self):
         with tempfile.TemporaryDirectory() as tmp:
