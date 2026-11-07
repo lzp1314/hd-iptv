@@ -33,7 +33,7 @@ CGTN 法语,CGTN法语,CGTN French
 CGTN 俄语,CGTN俄语,CGTN Russian
 CGTN 阿拉伯语,CGTN阿语,CGTN Arabic
 CGTN 西班牙语,CGTN西语,CGTN Spanish
-CGTN 纪录,CGTN纪录频道,CGTN Documentary
+CGTN 纪录,CGTN纪录频道,CGTN Documentary,CGTN记录
 
 卫视,#genre#
 湖南卫视

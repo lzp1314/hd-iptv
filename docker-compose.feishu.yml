@@ -1,0 +1,57 @@
+# hd-iptv —— 飞牛 OS 部署版（用预构建镜像，不本地构建）
+#
+# 用法：把这个文件内容贴进飞牛「Docker → 项目 / Compose」，或复制到 NAS 上
+#       用 `docker compose -f docker-compose.feishu.yml up -d` 起服务。
+#
+# 关键点：
+#   1. 用的是预构建镜像 ghcr.io/lzp1314/hd-iptv:latest（面板里没有源码也能跑）
+#   2. PUBLIC_URL 留空 —— 服务端按请求头自动判断内网/外网，套 Lucky 反代也能
+#      两边自适应，订阅链接不再写死内网 IP
+#   3. 画质下限 720（不是 1080），避免「只有 720P 的台」整个消失
+#   4. 采集只走静态开放源，不再打央视频加密接口（那是被按 IP 限流的根源）
+
+services:
+  hd-iptv:
+    image: ghcr.io/lzp1314/hd-iptv:latest
+    container_name: hd-iptv
+    restart: unless-stopped
+
+    ports:
+      # 左边是 NAS 上的端口，冲突了改左边（比如 9798:9797）
+      - "9797:9797"
+
+    volumes:
+      # 配置目录：频道模板 channels.txt、采集源 sources.toml、config.toml
+      # 改成你自己的绝对路径，目录为空也没关系，首次启动会自动写入默认配置
+      - /vol2/1000/docker/hd-iptv/config:/app/config
+      # 结果目录：result.m3u / result.txt / result.json
+      - /vol2/1000/docker/hd-iptv/output:/app/output
+
+    environment:
+      TZ: Asia/Shanghai
+      # 定时刷新间隔（小时）。现在只拉一个静态源，24 小时足够；地址会随源轮换，
+      # 想更跟手可以调成 6。播放时列表过期也不影响正在看的台。
+      HDIPTV_INTERVAL_HOURS: "24"
+      # 画质区间：720 起步、1080 封顶
+      HDIPTV_MIN_HEIGHT: "720"
+      HDIPTV_MAX_HEIGHT: "1080"
+      # 播放方式：direct = 清单本机下发、分片播放器直连 CDN（最流畅）
+      HDIPTV_PLAY_MODE: direct
+      # 分片缓存上限（MB），只对 proxy 模式生效
+      HDIPTV_RELAY_CACHE_MB: "96"
+      # 对外地址。留空即可：内网访问拿内网地址，套反代外网访问拿外网地址，两边都能播。
+      # 只有当反代不透传 Host 头时才需要手填，例如 https://tv.example.com:8443
+      PUBLIC_URL: ""
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
