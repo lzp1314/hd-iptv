@@ -371,6 +371,59 @@ class RelayStabilityTest(unittest.TestCase):
         self.assertIsNone(parse_range("bytes=200-300", 100))
         self.assertIsNone(parse_range("bytes=0-1,3-4", 100))
 
+    def test_backoff_serves_stale_window_without_upstream(self):
+        """限流退避期间，窗口过期了也别同步去上游（会被 403），先把手里的发给播放器。"""
+        relay = ToggleRelay()
+        first = relay.playlist("cctv1")
+        self.assertEqual(relay.fetches, 1)
+        # 进入退避：把 _forbidden_until 拨到未来
+        relay._forbidden_until = time.time() + 60.0
+        # 窗口过期（超过 _WINDOW_MAX_AGE）
+        _expire(relay, seconds=20.0)
+        fetches_before = relay.fetches
+        text, stale, _seq = relay.playlist_info("cctv1")
+        # 退避期间直接用了旧窗口，没有再去上游要
+        self.assertEqual(relay.fetches, fetches_before)
+        self.assertTrue(stale)
+        self.assertIn("#EXTINF", text)
+
+    def test_discontinuity_keeps_window_and_preserves_marker(self):
+        """预告片/广告切正片时的 #EXT-X-DISCONTINUITY 不再让清单退化成 3 片原文。
+
+        断点标记要原位保留在窗口输出里，播放器才知道「这里要跳一下」，而不是
+        回跳到缓冲里残留的旧分片重播（用户看到的「又重复放」）。
+        """
+        from iptvhd.relay import _parse_media, _Window
+
+        # 3 片里第 2 片前有个断点（预告片结束切回正片）
+        text = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:5
+#EXT-X-MEDIA-SEQUENCE:100
+#EXTINF:5.000,
+seg-100.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5.000,
+seg-101.ts
+#EXTINF:5.000,
+seg-102.ts
+"""
+        head, seq, segs = _parse_media(text, "https://cdn.ysp.cctv.cn/TOKEN/")
+        self.assertEqual(seq, 100)
+        self.assertEqual(len(segs), 3)
+        # 第 1 片无断点，第 2 片带断点
+        self.assertFalse(segs[0][3])
+        self.assertTrue(segs[1][3])
+        self.assertFalse(segs[2][3])
+
+        w = _Window()
+        w.feed(head, seq, segs, time.time())
+        out = w.text()
+        # 断点标记被原位还原，且只出现在第 2 片前
+        self.assertEqual(out.count("#EXT-X-DISCONTINUITY"), 1)
+        self.assertLess(out.index("#EXT-X-DISCONTINUITY"), out.index("seg-101.ts"))
+        self.assertGreater(out.index("#EXT-X-DISCONTINUITY"), out.index("seg-100.ts"))
+
 
 if __name__ == "__main__":
     unittest.main()

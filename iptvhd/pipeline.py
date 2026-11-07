@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import tomllib
@@ -49,6 +50,118 @@ def load_sources(settings: Settings) -> list[dict]:
             if not p.is_absolute():
                 item["path"] = str(settings.root / p)
     return sources
+
+
+# --------------------------------------------------------------------------- #
+# 低频抽测：默认零请求防限流，但每隔几轮做一次真实测速，把码率/速率缓存起来，
+# 让面板能持续显示「码率/测速」而不是永远「未测速」。
+# --------------------------------------------------------------------------- #
+_MEASURE_FILE = "measure.json"          # 抽测结果缓存，落在 output 目录下
+_MEASURE_EVERY = 4                       # 每 4 轮抽测一次（config 可覆盖）
+
+
+def _measure_path(settings: Settings) -> Path:
+    return settings.data_dir / _MEASURE_FILE
+
+
+def _load_measure(settings: Settings) -> dict:
+    try:
+        data = json.loads(_measure_path(settings).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_measure(settings: Settings, data: dict) -> None:
+    try:
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        _measure_path(settings).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _measure_every(settings: Settings) -> int:
+    try:
+        return max(1, int(settings.get("probe", "measure_every", _MEASURE_EVERY)))
+    except (TypeError, ValueError):
+        return _MEASURE_EVERY
+
+
+def _is_measure_round(settings: Settings) -> bool:
+    """这一轮要不要做真实抽测。
+
+    用一个计数文件记录轮次：每轮 +1，``round % every == 0`` 时抽测。
+    计数文件不存在时视为第 1 轮（立即抽一次，好让面板第一次就有数据）。
+    """
+    counter = settings.data_dir / "measure_round"
+    try:
+        round_no = int(counter.read_text(encoding="utf-8").strip() or "0") + 1
+    except (OSError, ValueError):
+        round_no = 1
+    try:
+        counter.write_text(str(round_no), encoding="utf-8")
+    except OSError:
+        pass
+    return round_no % _measure_every(settings) == 0
+
+
+def _enable_measure(sources: list[dict]) -> list[dict]:
+    """抽测轮：给主源临时打开 resolve + verify_segment，采集阶段会去取地址并读分片测速。
+
+    只改内存里的副本，不落盘——下一轮自动回到零请求模式，不会让限流常态化。
+    """
+    out: list[dict] = []
+    for item in sources:
+        item = dict(item)
+        if str(item.get("type", "")).lower() == "yangshipin":
+            item["resolve"] = True
+            item["verify_segment"] = True
+        out.append(item)
+    return out
+
+
+def _apply_measure_cache(streams: list, settings: Settings) -> None:
+    """非抽测轮：把上一轮缓存下来的测速值按 slug 回填到 Stream 上。
+
+    回填的是「上一次真实测速」的结果，可能已经过了一段时间，所以标个 note
+    说明是历史抽测值；面板照常显示码率/测速，不用永远「未测速」。
+    """
+    cache = _load_measure(settings)
+    if not cache:
+        return
+    for s in streams:
+        if not s.slug:
+            continue
+        row = cache.get(s.slug)
+        if not row:
+            continue
+        if s.bandwidth <= 0:
+            s.bandwidth = int(row.get("bandwidth") or 0)
+        if s.speed_mbps <= 0:
+            s.speed_mbps = float(row.get("speed_mbps") or 0.0)
+        if s.delay_ms <= 0:
+            s.delay_ms = int(row.get("delay_ms") or 0)
+        if (s.bandwidth or s.speed_mbps) and not s.note:
+            s.note = "历史抽测"
+
+
+def _extract_measure(streams: list, settings: Settings) -> None:
+    """抽测轮：把这一轮真实测到的码率/速率按 slug 存进缓存，供后续轮次回填。"""
+    cache = _load_measure(settings)
+    for s in streams:
+        if not s.slug:
+            continue
+        if not (s.bandwidth or s.speed_mbps):
+            continue
+        cache[s.slug] = {
+            "bandwidth": s.bandwidth,
+            "speed_mbps": s.speed_mbps,
+            "delay_ms": s.delay_ms,
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    _save_measure(settings, cache)
 
 
 def _collect(settings: Settings, collectors: list[Collector], log: Logger) -> tuple[list[Stream], list[dict]]:
@@ -161,6 +274,12 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     log(f"[模板] 载入 {len(channels)} 个频道")
 
     sources = load_sources(settings)
+    measure_round = _is_measure_round(settings)
+    if measure_round:
+        # 抽测轮：主源临时打开 resolve + verify_segment，去取真实地址并测速。
+        # 这一轮会多打几十个上游请求，但每 N 轮才一次，不会让限流常态化。
+        sources = _enable_measure(sources)
+        log(f"[抽测] 本轮开启真实测速（每 {_measure_every(settings)} 轮一次）")
     collectors = build_collectors(sources)
     if not collectors:
         log("! 没有启用的采集源，请检查 config/sources.toml")
@@ -209,6 +328,14 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
 
     alive = _filter([s for s in candidates], settings)
     report.alive = len(alive)
+
+    # 抽测数据落地：抽测轮把真实测速结果存进缓存；非抽测轮把历史测速回填，
+    # 让面板持续显示码率/测速而不是永远「未测速」。
+    if measure_round:
+        _extract_measure(alive, settings)
+    else:
+        _apply_measure_cache(alive, settings)
+
     log(
         f"[过滤] 可用 {len(alive)} 条"
         f"（画质 {settings.min_height}~{settings.max_height}P，速率门槛 {settings.min_speed_mbps}Mbps）"

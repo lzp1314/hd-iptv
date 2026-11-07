@@ -160,7 +160,8 @@ _pace_last = 0.0
 
 # 出口级熔断。上游按 IP 限流，一旦被限就是「所有频道一起 403」——这时候还会
 # 把剩下几十个台挨个敲一遍，恰好把限流拖得更长，下次恢复得更慢。实测被限后
-# 硬跑一轮要 4 分钟、结果 0 条；熔断后几秒就停手。_deny_lock = threading.Lock()
+# 硬跑一轮要 4 分钟、结果 0 条；熔断后几秒就停手。
+_deny_lock = threading.Lock()
 _deny_streak = 0
 _deny_until = 0.0
 _DENY_STREAK = 5

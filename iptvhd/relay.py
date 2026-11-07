@@ -194,23 +194,29 @@ _FROZEN_AFTER = 10.0       # 分片序号这么久没往前滚，判定上游冻
 
 
 def _parse_media(text: str, base: str):
-    """把媒体清单拆成 ``(头部行, 首个分片序号, [(时长, 绝对地址, 时间戳)])``。
+    """把媒体清单拆成 ``(头部行, 首个分片序号, [(时长, 绝对地址, 时间戳, 断点)])``。
 
     不是「能安全拼接」的媒体清单就返回 ``None``：主清单（带 EXT-X-STREAM-INF）、
-    带加密 / 初始化段 / 断点的清单，攒窗口都会攒错，这类还是走原来的直接改写。
+    带加密 / 初始化段的清单，攒窗口都会攒错，这类还是走原来的直接改写。
+
+    ``#EXT-X-DISCONTINUITY``（预告片 / 广告切回正片时必然出现）不再让整份清单
+    退化成「不攒窗口的 3 片原文」——那样短片段播完、清单衔接不上时，播放器会
+    回跳到缓冲里残留的旧分片重播，就是「又重复放」。这里把断点作为分片前的
+    一个标志位保留下来，输出时原位还原，让播放器知道这里要跳一下而不是回跳。
     """
     if "#EXTINF" not in text or "#EXT-X-STREAM-INF" in text:
         return None
-    if "#EXT-X-KEY:" in text or "#EXT-X-MAP:" in text or "#EXT-X-DISCONTINUITY" in text:
+    if "#EXT-X-KEY:" in text or "#EXT-X-MAP:" in text:
         return None
     if "#EXT-X-ENDLIST" in text:
         return None
 
     head: list[str] = []
-    segs: list[tuple[float, str, str]] = []
+    segs: list[tuple[float, str, str, bool]] = []
     seq = -1
     duration = 0.0
     stamp = ""
+    discontinuity = False
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -224,6 +230,9 @@ def _parse_media(text: str, base: str):
         if line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
             stamp = line.split(":", 1)[1].strip()
             continue
+        if line.startswith("#EXT-X-DISCONTINUITY"):
+            discontinuity = True
+            continue
         if line.startswith("#EXTINF"):
             body = line.split(":", 1)[1] if ":" in line else ""
             try:
@@ -234,8 +243,9 @@ def _parse_media(text: str, base: str):
         if line.startswith("#"):
             head.append(line)
             continue
-        segs.append((duration, urllib.parse.urljoin(base, line), stamp))
+        segs.append((duration, urllib.parse.urljoin(base, line), stamp, discontinuity))
         stamp = ""
+        discontinuity = False
 
     if not segs:
         return None
@@ -254,7 +264,7 @@ class _Window:
 
     def __init__(self) -> None:
         self.head: list[str] = []
-        self.segs: list[tuple[float, str, str]] = []
+        self.segs: list[tuple[float, str, str, bool]] = []
         self.seq0 = -1
         self.at = 0.0        # 上次并进清单的时间
         self.moved_at = 0.0  # 上次出现新分片的时间（判断上游有没有冻住）
@@ -273,8 +283,13 @@ class _Window:
 
         have = self.seq0 + len(self.segs)   # 已经有到（不含）
         if seq > have:
-            # 中间缺了好几片，接不上：直接以新清单为准
+            # 中间缺了好几片，接不上：直接以新清单为准。序号跳变本身就意味着
+            # 内容不连续（预告片切回正片、上游序号重置都走这里），给新窗口第一
+            # 片补一个断点标记，让播放器重置解码器，而不是拿旧缓冲里的画面回跳。
             self.segs = list(segs)
+            if self.segs:
+                duration, uri, stamp, _disc = self.segs[0]
+                self.segs[0] = (duration, uri, stamp, True)
             self.seq0 = seq
             self.moved_at = now
             return True
@@ -294,7 +309,9 @@ class _Window:
     def text(self) -> str:
         out = list(self.head)
         out.append(f"#EXT-X-MEDIA-SEQUENCE:{max(0, self.seq0)}")
-        for duration, uri, stamp in self.segs:
+        for duration, uri, stamp, discontinuity in self.segs:
+            if discontinuity:
+                out.append("#EXT-X-DISCONTINUITY")
             if stamp:
                 out.append(f"#EXT-X-PROGRAM-DATE-TIME:{stamp}")
             out.append(f"#EXTINF:{duration:.3f},")
@@ -616,12 +633,22 @@ class Relay:
             self._active[slug] = now
             window = self._windows.get(slug)
             raw = self._raw.get(slug)
+            backing_off = now < self._forbidden_until
         self._ensure_ticker()
 
         if window is not None and window.segs and now - window.at <= _WINDOW_MAX_AGE:
             return self._rewrite(window.text(), "", slug, prefix), False, window.seq0
         if raw is not None and now - raw[0] <= _WINDOW_MAX_AGE:
             return self._rewrite(raw[1], raw[2], slug, prefix), False, raw[3]
+
+        # 退避期间：上游正被限流，同步去取基本会被 403，反而让播放器卡在等
+        # 上游的几秒上。窗口里的分片地址通常还没过期（token 时效比窗口长得多），
+        # 先把手里的继续发给播放器，让画面接着播；后台预取恢复后再补新分片。
+        if backing_off and (window is not None or raw is not None):
+            cached = self._cached(slug, prefix, stale=True)
+            if cached:
+                self.stale_served += 1
+                return cached
 
         # 手上没得读：同步取一次。从没成功过的台多等一会儿，让它排上队；
         # 有旧数据的台别等——播放器最怕的就是卡在这儿。

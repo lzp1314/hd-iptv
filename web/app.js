@@ -4,12 +4,17 @@ let cacheKey = "";
 let settings = {};
 let settingsDirty = false;
 
-// 面板上展示的地址：手填了「对外地址」就以它为准，否则就是你打开面板用的这个地址。
-// 不用服务端从请求头猜出来的那个——不少反代会把 Host 改回内网地址，服务端那边
-// 只能看到 192.168.x.x，于是从外网进来的面板反而给你一个内网订阅地址。
+// 面板上展示的地址，优先级从高到低：
+//   1. 手填的「对外地址」public_url —— 用户明确指定，最权威；
+//   2. 服务端算出来的 base —— 服务端会识别 X-Forwarded-Host、并记住它见过的外网
+//      域名，所以即便你是用内网 IP 打开面板、外面套了反代，它也能给对外网地址；
+//   3. location.origin —— 什么都没配时的兜底（就是你现在打开面板用的这个地址）。
+let serverBase = "";
 function base() {
   const manual = String(settings.public_url || "").replace(/\/+$/, "");
-  return manual || location.origin.replace(/\/+$/, "");
+  if (manual) return manual;
+  if (serverBase) return serverBase.replace(/\/+$/, "");
+  return location.origin.replace(/\/+$/, "");
 }
 
 function esc(text) {
@@ -83,6 +88,12 @@ async function loadStatus() {
     const rep = d.report || {};
 
     settings = d.settings || {};
+    // 服务端算出的 base 是「针对这次请求」的：内网直连访问就返回内网地址，
+    // 经反代访问就返回外网域名。每次都无条件用它刷新，才能做到「内网看内网、
+    // 外网看外网」——两个地方同时用，各自拿到各自能直接播的订阅地址。
+    if (d.base) {
+      serverBase = d.base;
+    }
     fillUrls();
 
     setDot(d.running ? "busy" : (d.last_error ? "err" : "ok"));
