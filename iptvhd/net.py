@@ -7,8 +7,12 @@ urllib 本身不提供后两者的计时能力，所以这里自己用 http.clie
 from __future__ import annotations
 
 import gzip
+import socket
 import ssl
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -20,6 +24,62 @@ DEFAULT_UA = (
 )
 
 _MAX_REDIRECTS = 5
+
+# ---- 域名解析的独立闸门 ----
+# getaddrinfo 不受 socket 超时约束（它没有超时参数），解析器抽风时一个域名能
+# 卡住几十秒。探测 332 条时只要有几条卡在解析上，整轮更新就跟着挂住——
+# 这是「单条时限明明设了 15 秒，日志里却有 3 条跑了 90 秒」的来源。
+_DNS_TTL = 600.0        # 解析成功的缓存时长
+_DNS_FAIL_TTL = 120.0   # 解析失败的缓存时长（别反复撞同一个死域名）
+_DNS_TIMEOUT = 4.0      # 单次解析的兜底时限
+
+_dns_cache: dict[tuple[str, int], tuple[bool, float]] = {}
+_dns_lock = threading.Lock()
+_dns_pool: ThreadPoolExecutor | None = None
+
+
+def _dns_executor() -> ThreadPoolExecutor:
+    """解析专用线程池。
+
+    解析卡死时线程会一直挂着，这类线程回收不了；限定成小池子，卡住的
+    那几条最多占住自己的槽位，不会把探测线程一起拖死。
+    """
+    global _dns_pool
+    if _dns_pool is None:
+        _dns_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dns")
+    return _dns_pool
+
+
+def resolve(host: str, port: int, deadline: float | None = None) -> bool | None:
+    """带时限的域名解析。
+
+    返回 ``True`` 能解析、``False`` 解析失败、``None`` 超时（本次不等了）。
+    """
+    if not host:
+        return True
+    key = (host.lower(), int(port))
+    now = time.monotonic()
+    with _dns_lock:
+        hit = _dns_cache.get(key)
+        if hit and hit[1] > now:
+            return hit[0]
+
+    budget = _DNS_TIMEOUT
+    if deadline is not None:
+        budget = max(0.2, min(_DNS_TIMEOUT, deadline - now))
+    try:
+        future = _dns_executor().submit(socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM)
+        future.result(timeout=budget)
+    except FuturesTimeout:
+        return None
+    except OSError:
+        with _dns_lock:
+            _dns_cache[key] = (False, time.monotonic() + _DNS_FAIL_TTL)
+        return False
+
+    with _dns_lock:
+        _dns_cache[key] = (True, time.monotonic() + _DNS_TTL)
+    return True
 
 
 @dataclass(slots=True)
@@ -151,6 +211,14 @@ class HttpClient:
             if limit > 0:
                 hdrs["Range"] = f"bytes=0-{limit - 1}"
 
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+            state = resolve(parts.hostname or "", port, deadline)
+            if state is not True:
+                # 解析不出地址就没必要再走 socket：超时的不等、失败的也不重试
+                resp.error = "DNS 解析超时" if state is None else "域名解析失败"
+                resp.truncated = True
+                return resp
+
             started = time.monotonic()
             try:
                 conn = self._connect(parts, deadline)
@@ -271,4 +339,4 @@ def build_client(
     return HttpClient(user_agent=user_agent, timeout=timeout, retries=retries, proxy=proxy)
 
 
-__all__ = ["HttpClient", "Response", "build_client", "DEFAULT_UA", "__version__"]
+__all__ = ["HttpClient", "Response", "build_client", "resolve", "DEFAULT_UA", "__version__"]

@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 from iptvhd.models import Stream
-from iptvhd.net import HttpClient, Response
+from iptvhd.net import HttpClient, Response, resolve
 from iptvhd.probe import _Slow, _fetch, probe_many, probe_one
 
 
@@ -150,6 +150,79 @@ class BudgetTest(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(probe_many([], HttpClient()), [])
+
+
+class _Hang:
+    """模拟解析器卡死：getaddrinfo 迟迟不返回。"""
+
+    def __init__(self, delay: float = 3.0):
+        self.delay = delay
+        self.calls = 0
+
+    def __call__(self, *_args, **_kwargs):
+        self.calls += 1
+        time.sleep(self.delay)
+        return [(2, 1, 6, "", ("127.0.0.1", 80))]
+
+
+class ResolveTest(unittest.TestCase):
+    """getaddrinfo 不受 socket 超时约束，必须单独设闸。"""
+
+    def test_hanging_resolver_times_out(self):
+        hang = _Hang(3.0)
+        started = time.monotonic()
+        with mock.patch("iptvhd.net.socket.getaddrinfo", hang):
+            state = resolve("hang-test.example", 80, started + 0.3)
+        self.assertIsNone(state, "解析卡住时要报超时，而不是一直等")
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_success_is_cached(self):
+        calls = []
+
+        def fake(host, port, *_a, **_k):
+            calls.append(host)
+            return [(2, 1, 6, "", ("127.0.0.1", port))]
+
+        with mock.patch("iptvhd.net.socket.getaddrinfo", fake):
+            self.assertTrue(resolve("cache-test.example", 80))
+            self.assertTrue(resolve("cache-test.example", 80))
+        self.assertEqual(len(calls), 1, "同一个域名不该反复解析")
+
+    def test_dns_timeout_marks_response_truncated(self):
+        client = HttpClient()
+        started = time.monotonic()
+        with mock.patch("iptvhd.net.socket.getaddrinfo", _Hang(3.0)):
+            resp = client.get("http://dns-timeout-test.example/a.m3u8", limit=1024, deadline=started + 0.3)
+        self.assertTrue(resp.truncated)
+        self.assertIn("DNS", resp.error)
+
+
+class DeadlinePruneTest(unittest.TestCase):
+    """线程卡在 socket 之外的调用上时，调度线程要主动放手。"""
+
+    def test_stuck_thread_does_not_block_batch(self):
+        streams = [Stream(url=f"http://example.com/{i}.m3u8", channel=f"CH{i}") for i in range(3)]
+
+        def stuck(stream, _client, _sample, deadline=None):  # noqa: ANN001 - 无视时限的替身
+            time.sleep(2.0)
+            stream.ok = True
+            return stream
+
+        started = time.monotonic()
+        with mock.patch("iptvhd.probe.probe_one", side_effect=stuck):
+            probe_many(
+                streams,
+                HttpClient(),
+                concurrency=3,
+                per_stream_timeout=0.3,
+                deadline_grace=0.2,
+                budget=30,
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.5, "到点就该放手，不能陪着卡住的线程等 2 秒")
+        self.assertTrue(all(not s.ok for s in streams))
+        self.assertTrue(all(s.error == "探测超时" for s in streams))
 
 
 if __name__ == "__main__":

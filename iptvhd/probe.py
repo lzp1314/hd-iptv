@@ -53,9 +53,17 @@ DEFAULT_BATCH_BUDGET = 180.0
 # 多久没有一条探测完成就提醒一次（面板上能看到，不用等半小时才发现）
 STALL_WARN_SECONDS = 15.0
 
+# 截止时间过了这么久还没回来，调度线程就不再等它：线程可能卡在 socket 之外
+# 的调用上（DNS 解析没有超时可设），那种卡法只能由调度侧放手。
+DEADLINE_GRACE = 5.0
+
 
 class _Slow(Exception):
     """单条流超过截止时间还在滴流：判定为慢源，立刻放手。"""
+
+    def __init__(self, reason: str = "读取超时（慢源）"):
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _fetch(client: HttpClient, url: str, *, limit: int = 0, headers: dict | None = None,
@@ -64,7 +72,9 @@ def _fetch(client: HttpClient, url: str, *, limit: int = 0, headers: dict | None
     resp = client.get(url, limit=limit, headers=headers, deadline=deadline)
     # 测试替身/旧客户端可能没有这个字段，按「没截断」处理
     if getattr(resp, "truncated", False):
-        raise _Slow(url)
+        detail = getattr(resp, "error", "") or ""
+        # net 层已经给出具体原因（DNS 超时等），别一律推给「慢源」
+        raise _Slow("读取超时（慢源）" if detail in ("", "读取超时") else detail)
     return resp
 
 
@@ -133,11 +143,11 @@ def probe_one(
     """
     try:
         _probe_one(stream, client, sample_bytes, deadline)
-    except _Slow:
+    except _Slow as exc:
         stream.ok = False
         stream.speed_mbps = 0.0
-        stream.error = "读取超时（慢源）"
-        stream.note = "分片长时间读不完，已丢弃"
+        stream.error = exc.reason
+        stream.note = "长时间读不完，已丢弃"
     # 收尾时已经过点的，一律不算可用：哪怕它最后挤完了，速率也撑不起播放
     if deadline is not None and time.monotonic() > deadline and not stream.error:
         stream.ok = False
@@ -330,13 +340,18 @@ def _probe_with_budget(
     client: HttpClient,
     sample_bytes: int,
     timeout: float,
+    holder: list,
 ) -> Stream:
     """在工作线程里才算截止时刻。
 
     关键是「从真正开始探测时算」，不能用提交任务时算：332 条排 14 批，
     后面批次的流光排队就超过时限了，那样会把本来就是好的源全部误杀。
+
+    ``holder`` 把截止时刻回传给调度线程——线程万一卡在非 socket 的调用上
+    （典型是 DNS 解析），由调度线程按这个时间主动放手，不再等它。
     """
     deadline = time.monotonic() + timeout if timeout and timeout > 0 else None
+    holder.append(deadline)
     return probe_one(stream, client, sample_bytes, deadline)
 
 
@@ -348,6 +363,7 @@ def probe_many(
     sample_bytes: int = 262144,
     per_stream_timeout: float = DEFAULT_PER_STREAM_TIMEOUT,
     budget: float = DEFAULT_BATCH_BUDGET,
+    deadline_grace: float = DEADLINE_GRACE,
     on_progress: Callable[[int, int], None] | None = None,
     on_stall: Callable[[int, float], None] | None = None,
 ) -> list[Stream]:
@@ -374,19 +390,29 @@ def probe_many(
     pool = ThreadPoolExecutor(max_workers=max(1, concurrency))
     try:
         futures = {}
+        holders: dict = {}
         for s in items:
-            futures[pool.submit(_probe_with_budget, s, client, sample_bytes, per_stream)] = s
+            holder: list = []
+            fut = pool.submit(_probe_with_budget, s, client, sample_bytes, per_stream, holder)
+            futures[fut] = s
+            holders[fut] = holder
 
         pending = set(futures)
         last_done = time.monotonic()
         last_warn = 0.0
         while pending:
+            now = time.monotonic()
             wait_for = STALL_WARN_SECONDS
             if deadline_stop is not None:
-                left = deadline_stop - time.monotonic()
+                left = deadline_stop - now
                 if left <= 0:
                     break
                 wait_for = min(wait_for, left)
+            # 睡太久就赶不上「到点放手」这一步：等到最近一条的截止时刻就醒
+            for fut in pending:
+                holder = holders[fut]
+                if holder and holder[0] is not None:
+                    wait_for = min(wait_for, max(0.02, holder[0] + deadline_grace - now))
             finished, pending = wait(pending, timeout=wait_for, return_when=FIRST_COMPLETED)
             for fut in finished:
                 stream = futures[fut]
@@ -400,7 +426,23 @@ def probe_many(
                     on_progress(done, total)
             if finished:
                 last_done = time.monotonic()
-            elif on_stall:
+
+            # 超时已久的直接放手：线程可能卡在 socket 之外的地方（DNS 解析），
+            # 那种调用没有超时可设，只能调度线程这边不再等它。
+            now = time.monotonic()
+            for fut in list(pending):
+                deadline = holders[fut][0] if holders[fut] else None
+                if deadline is not None and now > deadline + deadline_grace:
+                    stream = futures[fut]
+                    fut.cancel()
+                    stream.ok = False
+                    stream.error = stream.error or "探测超时"
+                    pending.discard(fut)
+                    done += 1
+                    if on_progress:
+                        on_progress(done, total)
+
+            if not finished and on_stall:
                 stalled = time.monotonic() - last_done
                 if stalled >= STALL_WARN_SECONDS and time.monotonic() - last_warn >= STALL_WARN_SECONDS:
                     on_stall(len(pending), stalled)
