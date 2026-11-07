@@ -160,7 +160,10 @@ def cmd_doctor(root: Path, config: str | None) -> int:
         f"探测门槛：{settings.min_height}~{settings.max_height}P、"
         f"{settings.min_speed_mbps}Mbps 以上，每频道最多 {settings.max_per_channel} 条"
     )
-    print(f"并发：{settings.concurrency}  超时：{settings.timeout}s")
+    print(
+        f"并发：{settings.concurrency}  单次超时：{settings.timeout}s  "
+        f"单条时限：{settings.probe_timeout:g}s  整批预算：{settings.probe_budget:g}s"
+    )
 
     print("\n结论：" + ("配置可用，可以执行 update" if ok else "存在阻塞项，先按上面的 ✗ 修正"))
     return 0 if ok else 1

@@ -31,6 +31,9 @@ class Response:
     ttfb_ms: int = 0        # 首字节延迟
     elapsed_ms: int = 0     # 首字节到读完的耗时
     error: str = ""
+    # 读体被截止时间打断：body 不完整。有些源连得上、但一个字节一个字节往回滴，
+    # 每次 read 都在超时内返回一点点，光靠 socket 超时永远判不出它已经废了。
+    truncated: bool = False
 
     @property
     def content_type(self) -> str:
@@ -86,18 +89,38 @@ class HttpClient:
         limit: int = 0,
         headers: dict | None = None,
         allow_redirect: bool = True,
+        deadline: float | None = None,
     ) -> Response:
-        """读取 URL。limit > 0 时只读到 limit 字节就断开（用于测速）。"""
+        """读取 URL。limit > 0 时只读到 limit 字节就断开（用于测速）。
+
+        ``deadline`` 是 ``time.monotonic()`` 口径的绝对截止时刻：连接、首字节、
+        读体加起来不能超过它。慢滴流的源靠 socket 超时判不出来（每 8 秒挤一点，
+        永远不超时），必须给它一个总时限。
+        """
         last = Response(url=url, error="未执行")
         for attempt in range(self.retries):
-            last = self._get_once(url, limit=limit, headers=headers, allow_redirect=allow_redirect)
+            last = self._get_once(
+                url, limit=limit, headers=headers, allow_redirect=allow_redirect, deadline=deadline
+            )
+            if last.truncated:
+                return last  # 慢源不重试：重试只是把同样的等待再做一遍
             if last.status and last.status < 400 and last.body:
                 return last
             if last.status in (401, 403, 404, 410):
                 return last  # 明确的拒绝不必重试
+            if deadline is not None and time.monotonic() >= deadline:
+                return last  # 已经到点，别把重试的时间也搭进去
             if attempt + 1 < self.retries:
                 time.sleep(0.4 * (attempt + 1))
         return last
+
+    # ------------------------------------------------------------------ #
+    def _op_timeout(self, deadline: float | None) -> float:
+        """单次 socket 操作的超时：不超过配置值，也不越过截止时刻。"""
+        if deadline is None:
+            return self.timeout
+        left = deadline - time.monotonic()
+        return max(0.05, min(self.timeout, left))
 
     # ------------------------------------------------------------------ #
     def _get_once(
@@ -107,6 +130,7 @@ class HttpClient:
         limit: int,
         headers: dict | None,
         allow_redirect: bool,
+        deadline: float | None = None,
     ) -> Response:
         resp = Response(url=url)
         current = url
@@ -129,7 +153,7 @@ class HttpClient:
 
             started = time.monotonic()
             try:
-                conn = self._connect(parts)
+                conn = self._connect(parts, deadline)
                 if self.proxy and parts.scheme == "http":
                     target = current  # 走代理时 http 请求目标用绝对地址
                 else:
@@ -149,48 +173,67 @@ class HttpClient:
                     current = _join(current, location)
                     continue
 
+                # 首字节回来可能已经用掉大半个截止时间，读体按剩下的时间收紧
+                if conn.sock is not None:
+                    try:
+                        conn.sock.settimeout(self._op_timeout(deadline))
+                    except OSError:
+                        pass
                 body_started = time.monotonic()
-                resp.body = self._read_body(raw, limit)
+                resp.body, resp.truncated = self._read_body(raw, limit, deadline)
                 resp.elapsed_ms = int((time.monotonic() - body_started) * 1000)
+                if resp.truncated:
+                    resp.error = "读取超时"
                 conn.close()
                 return self._maybe_inflate(resp)
 
             except Exception as exc:  # noqa: BLE001 - 网络异常种类繁多
                 resp.error = f"{type(exc).__name__}: {exc}"
                 resp.status = resp.status or 0
+                resp.truncated = resp.truncated or (
+                    deadline is not None and time.monotonic() >= deadline
+                )
                 return resp
 
         resp.error = resp.error or "重定向次数过多"
         return resp
 
     # ------------------------------------------------------------------ #
-    def _connect(self, parts):
+    def _connect(self, parts, deadline: float | None = None):
         import http.client
 
+        timeout = self._op_timeout(deadline)
         proxy_host, _, proxy_port = self.proxy.partition(":")
         use_proxy = bool(self.proxy)
 
         if parts.scheme == "https":
             if use_proxy:
                 conn = http.client.HTTPSConnection(
-                    proxy_host, int(proxy_port or 8080), timeout=self.timeout, context=self._ssl
+                    proxy_host, int(proxy_port or 8080), timeout=timeout, context=self._ssl
                 )
                 conn.set_tunnel(parts.hostname, parts.port or 443)
                 return conn
             return http.client.HTTPSConnection(
-                parts.hostname, parts.port or 443, timeout=self.timeout, context=self._ssl
+                parts.hostname, parts.port or 443, timeout=timeout, context=self._ssl
             )
         if use_proxy:
-            return http.client.HTTPConnection(proxy_host, int(proxy_port or 8080), timeout=self.timeout)
-        return http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=self.timeout)
+            return http.client.HTTPConnection(proxy_host, int(proxy_port or 8080), timeout=timeout)
+        return http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout)
 
     @staticmethod
-    def _read_body(raw, limit: int) -> bytes:
+    def _read_body(raw, limit: int, deadline: float | None = None) -> tuple[bytes, bool]:
+        """读响应体，返回 ``(内容, 是否被截止时间截断)``。
+
+        只按字节数停是不够的：慢滴流每次 read 都能拿到一点，永远到不了 limit。
+        所以每轮都看一眼总时间，到点就走人。
+        """
         chunk = 16384
         buf = bytearray()
         while True:
             if limit > 0 and len(buf) >= limit:
                 break
+            if deadline is not None and time.monotonic() >= deadline:
+                return bytes(buf), True
             try:
                 piece = raw.read(chunk if limit <= 0 else min(chunk, limit - len(buf)))
             except Exception:  # noqa: BLE001 - 直播流常在读中途被截断
@@ -198,7 +241,9 @@ class HttpClient:
             if not piece:
                 break
             buf.extend(piece)
-        return bytes(buf)
+        if deadline is not None and time.monotonic() >= deadline:
+            return bytes(buf), True
+        return bytes(buf), False
 
     @staticmethod
     def _maybe_inflate(resp: Response) -> Response:

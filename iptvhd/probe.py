@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable, Iterable
 
 from . import hls, videoinfo, ysp
@@ -42,7 +42,34 @@ def _pace(min_gap: float = 0.25) -> None:
         _pace_last = now
 
 
-def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> Stream:
+# 单条流探测的默认时限（秒）：连接 + 读清单 + 读分片加起来。
+# 4 Mbps 的 1080P 拉 256KB 分片约 0.5 秒，15 秒足够；超过这个数还没完的，
+# 基本都是「连得上但一个字节一个字节往回滴」的废源，等下去只会让整轮更新卡死。
+DEFAULT_PER_STREAM_TIMEOUT = 15.0
+
+# 整批探测的总预算（秒）。到点就用已经回来的结果收工，不再等长尾。
+DEFAULT_BATCH_BUDGET = 180.0
+
+# 多久没有一条探测完成就提醒一次（面板上能看到，不用等半小时才发现）
+STALL_WARN_SECONDS = 15.0
+
+
+class _Slow(Exception):
+    """单条流超过截止时间还在滴流：判定为慢源，立刻放手。"""
+
+
+def _fetch(client: HttpClient, url: str, *, limit: int = 0, headers: dict | None = None,
+           deadline: float | None = None):
+    """带截止时间的取数：被截断就等于这条源不值得等。"""
+    resp = client.get(url, limit=limit, headers=headers, deadline=deadline)
+    # 测试替身/旧客户端可能没有这个字段，按「没截断」处理
+    if getattr(resp, "truncated", False):
+        raise _Slow(url)
+    return resp
+
+
+def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int,
+                      deadline: float | None = None) -> Stream:
     """采集阶段已经验证过清单和首个分片的流。
 
     这类源（部分平台）的清单只有 3 个分片、5 秒滚一轮，采集时拿到的分片地址过一分钟
@@ -60,7 +87,7 @@ def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> 
     # 采集距今太久，当时的结论已经不作数：重新读一份清单，用里面最新的分片测速。
     extra = {"User-Agent": stream.user_agent} if stream.user_agent else None
     ysp.pace()
-    fresh = client.get(stream.url, limit=131072, headers=extra)
+    fresh = _fetch(client, stream.url, limit=131072, headers=extra, deadline=deadline)
     text = fresh.text if fresh.body[:64].lstrip().startswith(b"#EXTM3U") else ""
     seg_url = ""
     if text:
@@ -68,7 +95,11 @@ def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> 
         seg_url = info["first_segment"]
         if not stream.segment_duration:
             stream.segment_duration = info["segment_duration"] or info["target_duration"]
-    seg = client.get(seg_url, limit=sample_bytes, headers=extra) if seg_url else fresh
+    seg = (
+        _fetch(client, seg_url, limit=sample_bytes, headers=extra, deadline=deadline)
+        if seg_url
+        else fresh
+    )
 
     stream.status = seg.status
     if seg.status in _OK_STATUS and seg.body:
@@ -89,11 +120,37 @@ def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int) -> 
     return stream
 
 
-def probe_one(stream: Stream, client: HttpClient, sample_bytes: int = 262144) -> Stream:
+def probe_one(
+    stream: Stream,
+    client: HttpClient,
+    sample_bytes: int = 262144,
+    deadline: float | None = None,
+) -> Stream:
     """探测单条流，结果写回 stream 自身。
 
     部分平台（如综合频道）要求特定 UA 才放行分片，所以流自带 UA 时优先用它。
+    ``deadline`` 为 ``time.monotonic()`` 口径的绝对截止时刻，到点即判为慢源。
     """
+    try:
+        _probe_one(stream, client, sample_bytes, deadline)
+    except _Slow:
+        stream.ok = False
+        stream.speed_mbps = 0.0
+        stream.error = "读取超时（慢源）"
+        stream.note = "分片长时间读不完，已丢弃"
+    # 收尾时已经过点的，一律不算可用：哪怕它最后挤完了，速率也撑不起播放
+    if deadline is not None and time.monotonic() > deadline and not stream.error:
+        stream.ok = False
+        stream.error = "探测超时"
+    return stream
+
+
+def _probe_one(
+    stream: Stream,
+    client: HttpClient,
+    sample_bytes: int = 262144,
+    deadline: float | None = None,
+) -> Stream:
     if stream.playlist_only and not stream.url:
         # 采集阶段只登记了频道、没取地址：能不能播由播放时的中转层决定，
         # 这里不该为它向上游发请求（那正是批量探测被限流的来源）
@@ -103,18 +160,18 @@ def probe_one(stream: Stream, client: HttpClient, sample_bytes: int = 262144) ->
         return stream
 
     if stream.playlist_only and stream.first_segment:
-        return _probe_prefetched(stream, client, sample_bytes)
+        return _probe_prefetched(stream, client, sample_bytes, deadline)
 
     extra = {"User-Agent": stream.user_agent} if stream.user_agent else None
     if stream.playlist_only:
         _pace()
-    resp = client.get(stream.url, limit=sample_bytes, headers=extra)
+    resp = _fetch(client, stream.url, limit=sample_bytes, headers=extra, deadline=deadline)
     if stream.playlist_only and resp.status in (403, 429):
         # 这类源对突发请求敏感，退避后再试几次，别把限流误判成死链
         for _ in range(3):
             time.sleep(2.0)
             _pace()
-            resp = client.get(stream.url, limit=sample_bytes, headers=extra)
+            resp = _fetch(client, stream.url, limit=sample_bytes, headers=extra, deadline=deadline)
             if resp.status not in (403, 429):
                 break
     stream.status = resp.status
@@ -130,7 +187,7 @@ def probe_one(stream: Stream, client: HttpClient, sample_bytes: int = 262144) ->
         body_text = resp.text
 
     if body_text:
-        _probe_hls(stream, client, body_text, resp, sample_bytes)
+        _probe_hls(stream, client, body_text, resp, sample_bytes, deadline)
         return stream
 
     # 非播放列表：直连 ts/flv/mp4，能下到字节即可认为可用
@@ -142,7 +199,8 @@ def probe_one(stream: Stream, client: HttpClient, sample_bytes: int = 262144) ->
     return stream
 
 
-def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_bytes: int) -> None:
+def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_bytes: int,
+               deadline: float | None = None) -> None:
     base = resp.url or stream.url
     text = body_text
     variant = None
@@ -158,7 +216,7 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
         stream.height = variant.height
         stream.bandwidth = variant.bandwidth
         stream.codec = variant.codecs
-        sub = client.get(variant.uri, limit=65536)
+        sub = _fetch(client, variant.uri, limit=65536, deadline=deadline)
         if sub.body[:64].lstrip().startswith(b"#EXTM3U"):
             text = sub.text
             base = sub.url or variant.uri
@@ -180,7 +238,7 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
     seg_url = info["first_segment"]
     if seg_url and stream.playlist_only:
         _pace()
-    seg = client.get(seg_url, limit=sample_bytes) if seg_url else None
+    seg = _fetch(client, seg_url, limit=sample_bytes, deadline=deadline) if seg_url else None
     if seg is not None and (seg.status not in _OK_STATUS or not seg.body):
         # 有些平台对同一 token 的高频请求返回 403（限流，不是死链）。这类源在
         # 采集阶段已确认列表有效，播放器按正常节奏取片不会触发，所以不当死链处理，
@@ -189,7 +247,7 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
             for _ in range(2):
                 time.sleep(1.5)
                 _pace()
-                again = client.get(seg_url, limit=sample_bytes)
+                again = _fetch(client, seg_url, limit=sample_bytes, deadline=deadline)
                 if again.status in _OK_STATUS and again.body:
                     seg = again
                     break
@@ -267,37 +325,96 @@ def apply_sample(stream: Stream, meta: dict) -> None:
     stream.bandwidth = int(len(body) * 8 / stream.segment_duration)
 
 
+def _probe_with_budget(
+    stream: Stream,
+    client: HttpClient,
+    sample_bytes: int,
+    timeout: float,
+) -> Stream:
+    """在工作线程里才算截止时刻。
+
+    关键是「从真正开始探测时算」，不能用提交任务时算：332 条排 14 批，
+    后面批次的流光排队就超过时限了，那样会把本来就是好的源全部误杀。
+    """
+    deadline = time.monotonic() + timeout if timeout and timeout > 0 else None
+    return probe_one(stream, client, sample_bytes, deadline)
+
+
 def probe_many(
     streams: Iterable[Stream],
     client: HttpClient,
     *,
     concurrency: int = 24,
     sample_bytes: int = 262144,
+    per_stream_timeout: float = DEFAULT_PER_STREAM_TIMEOUT,
+    budget: float = DEFAULT_BATCH_BUDGET,
     on_progress: Callable[[int, int], None] | None = None,
+    on_stall: Callable[[int, float], None] | None = None,
 ) -> list[Stream]:
-    """并发探测，保持输入顺序返回。"""
+    """并发探测，保持输入顺序返回。
+
+    两道闸门，缺一不可：
+
+    * ``per_stream_timeout``：单条流的绝对时限，慢滴流到点即弃；
+    * ``budget``：整批的总预算，到点就用已回来的结果收工。
+
+    以前只靠 socket 超时（每 8 秒无数据才断），碰上「连得上、但一个字节一个
+    字节往回挤」的源就会无限期挂着，一轮更新能卡半小时——面板上表现为
+    ``[探测] 297/332`` 再也不动。
+    """
     items = list(streams)
     total = len(items)
     if not total:
         return []
 
     done = 0
-    lock = threading.Lock()
-    started = time.monotonic()
+    per_stream = per_stream_timeout if per_stream_timeout and per_stream_timeout > 0 else 0.0
+    deadline_stop = time.monotonic() + budget if budget and budget > 0 else None
 
-    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        futures = {pool.submit(probe_one, s, client, sample_bytes): s for s in items}
-        for fut in as_completed(futures):
-            stream = futures[fut]
-            try:
-                fut.result()
-            except Exception as exc:  # noqa: BLE001 - 单条流异常不能中断整批
-                stream.ok = False
-                stream.error = f"探测异常: {type(exc).__name__}: {exc}"
-            with lock:
+    pool = ThreadPoolExecutor(max_workers=max(1, concurrency))
+    try:
+        futures = {}
+        for s in items:
+            futures[pool.submit(_probe_with_budget, s, client, sample_bytes, per_stream)] = s
+
+        pending = set(futures)
+        last_done = time.monotonic()
+        last_warn = 0.0
+        while pending:
+            wait_for = STALL_WARN_SECONDS
+            if deadline_stop is not None:
+                left = deadline_stop - time.monotonic()
+                if left <= 0:
+                    break
+                wait_for = min(wait_for, left)
+            finished, pending = wait(pending, timeout=wait_for, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                stream = futures[fut]
+                try:
+                    fut.result()
+                except Exception as exc:  # noqa: BLE001 - 单条流异常不能中断整批
+                    stream.ok = False
+                    stream.error = f"探测异常: {type(exc).__name__}: {exc}"
                 done += 1
                 if on_progress:
                     on_progress(done, total)
+            if finished:
+                last_done = time.monotonic()
+            elif on_stall:
+                stalled = time.monotonic() - last_done
+                if stalled >= STALL_WARN_SECONDS and time.monotonic() - last_warn >= STALL_WARN_SECONDS:
+                    on_stall(len(pending), stalled)
+                    last_warn = time.monotonic()
 
-    _ = time.monotonic() - started
+        # 到点还没回来的：排队的直接取消，正在跑的交给各自的单条时限收尾，
+        # 这里先按「超时」记下，别让它们拖着整轮不结束。
+        for fut in pending:
+            fut.cancel()
+            stream = futures[fut]
+            stream.ok = False
+            stream.error = stream.error or "探测超时"
+    finally:
+        # 不能 wait=True：那样等于把「不等长尾」的初衷又撤销了
+        pool.shutdown(wait=False, cancel_futures=True)
+
     return items

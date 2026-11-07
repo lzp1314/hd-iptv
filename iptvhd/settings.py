@@ -48,6 +48,10 @@ http_proxy = ""
 enabled = true
 concurrency = 24
 sample_bytes = 262144
+# 单条流探测的总时限（秒）。慢滴流到点即弃，避免整轮更新卡死。
+timeout = 15
+# 整批探测的总预算（秒）。到点用已回来的结果收工。
+budget = 180
 min_speed_mbps = 0.8
 min_height = 720
 max_height = 1080
@@ -193,6 +197,20 @@ class Settings:
     @property
     def sample_bytes(self) -> int:
         return int(os.environ.get("HDIPTV_SAMPLE_BYTES") or self.get("probe", "sample_bytes", 262144))
+
+    @property
+    def probe_timeout(self) -> float:
+        """单条流探测的绝对时限（秒）。
+
+        socket 超时只管「多久没数据」，管不住「一直慢慢挤数据」。后者会让
+        整轮更新无限期挂住，所以这里给每条流一个总时限。
+        """
+        return float(os.environ.get("HDIPTV_PROBE_TIMEOUT") or self.get("probe", "timeout", 15))
+
+    @property
+    def probe_budget(self) -> float:
+        """整批探测的总预算（秒）。到点就用已回来的结果收工。"""
+        return float(os.environ.get("HDIPTV_PROBE_BUDGET") or self.get("probe", "budget", 180))
 
     @property
     def min_speed_mbps(self) -> float:

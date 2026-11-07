@@ -314,11 +314,18 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     candidates = [s for group in by_channel.values() for s in group]
     report.probed = len(candidates)
     if candidates and bool(settings.get("probe", "enabled", True)):
-        log(f"[探测] 开始并发探测 {len(candidates)} 条（并发 {settings.concurrency}）")
+        log(
+            f"[探测] 开始并发探测 {len(candidates)} 条（并发 {settings.concurrency}，"
+            f"单条上限 {settings.probe_timeout:.0f}s，整批预算 {settings.probe_budget:.0f}s）"
+        )
 
         def on_progress(done: int, total: int) -> None:
             if done == total or done % max(1, total // 10) == 0:
                 log(f"[探测] {done}/{total}")
+
+        def on_stall(pending: int, seconds: float) -> None:
+            # 长尾阻塞的实时提示：以前面板停在「297/332」就再没动静，只能干等
+            log(f"! [探测] {pending} 条已 {seconds:.0f}s 没有返回（慢源，到点会丢弃）")
 
         client = build_client(
             user_agent=settings.user_agent,
@@ -331,7 +338,10 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
             client,
             concurrency=settings.concurrency,
             sample_bytes=settings.sample_bytes,
+            per_stream_timeout=settings.probe_timeout,
+            budget=settings.probe_budget,
             on_progress=on_progress,
+            on_stall=on_stall,
         )
     else:
         for s in candidates:
