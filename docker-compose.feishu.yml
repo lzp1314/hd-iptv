@@ -1,46 +1,39 @@
-# hd-iptv —— 飞牛 OS 部署版（用预构建镜像，不本地构建）
-#
-# 用法：把这个文件内容贴进飞牛「Docker → 项目 / Compose」，或复制到 NAS 上
-#       用 `docker compose -f docker-compose.feishu.yml up -d` 起服务。
-#
-# 关键点：
-#   1. 用的是预构建镜像 ghcr.io/lzp1314/hd-iptv:latest（面板里没有源码也能跑）
-#   2. PUBLIC_URL 留空 —— 服务端按请求头自动判断内网/外网，套 Lucky 反代也能
-#      两边自适应，订阅链接不再写死内网 IP
-#   3. 画质下限 720（不是 1080），避免「只有 720P 的台」整个消失
-#   4. 采集只走静态开放源，不再打央视频加密接口（那是被按 IP 限流的根源）
-
 services:
   hd-iptv:
     image: ghcr.io/lzp1314/hd-iptv:latest
     container_name: hd-iptv
     restart: unless-stopped
 
-    ports:
-      # 左边是 NAS 上的端口，冲突了改左边（比如 9798:9797）
-      - "9797:9797"
+    # ── 关键：必须用 host 网络 ────────────────────────────────────────────
+    # 静态源全是 IPv6 地址（http://[2409:8087:...]:6610/...）。Docker 默认的
+    # 桥接网络只有 IPv4，容器里连不上 IPv6，结果就是「源拉到了、探测全失败、
+    # 一个台都出不来」。host 模式让容器直接用宿主机的网络栈（含 IPv6）。
+    # 用 host 模式时不要再写 ports，端口就是宿主机的 9797。
+    network_mode: host
 
     volumes:
-      # 配置目录：频道模板 channels.txt、采集源 sources.toml、config.toml
-      # 改成你自己的绝对路径，目录为空也没关系，首次启动会自动写入默认配置
+      # 配置：频道模板 channels.txt、采集源 sources.toml、config.toml
       - /vol2/1000/docker/hd-iptv/config:/app/config
-      # 结果目录：result.m3u / result.txt / result.json
+      # 结果：result.m3u / result.txt / result.json
       - /vol2/1000/docker/hd-iptv/output:/app/output
 
     environment:
       TZ: Asia/Shanghai
-      # 定时刷新间隔（小时）。现在只拉一个静态源，24 小时足够；地址会随源轮换，
-      # 想更跟手可以调成 6。播放时列表过期也不影响正在看的台。
+      # 刷新间隔（小时）。现在只拉一个静态源，24 小时够；想更跟手改成 6。
+      # 列表过期不影响正在看的台，播放时地址是按需取的。
       HDIPTV_INTERVAL_HOURS: "24"
       # 画质区间：720 起步、1080 封顶
       HDIPTV_MIN_HEIGHT: "720"
       HDIPTV_MAX_HEIGHT: "1080"
-      # 播放方式：direct = 清单本机下发、分片播放器直连 CDN（最流畅）
+      # 播放方式：direct = 清单本机下发、分片由播放器直连源站。
+      # 注意：静态源的条目不走中转，播放器会直接连 IPv6 地址，所以「播放设备
+      # 本身」也要有 IPv6。手机/电脑连家里 WiFi 通常没问题；老电视盒子只有
+      # IPv4 的话放不了静态源（那种情况告诉我，我给静态源也加一层中转）。
       HDIPTV_PLAY_MODE: direct
       # 分片缓存上限（MB），只对 proxy 模式生效
       HDIPTV_RELAY_CACHE_MB: "96"
-      # 对外地址。留空即可：内网访问拿内网地址，套反代外网访问拿外网地址，两边都能播。
-      # 只有当反代不透传 Host 头时才需要手填，例如 https://tv.example.com:8443
+      # 对外地址。留空即可：内网访问拿内网地址、套 Lucky 反代外网访问拿外网
+      # 地址，两边都能用。只有当反代不透传 Host 头时才需要手填。
       PUBLIC_URL: ""
 
     healthcheck:
