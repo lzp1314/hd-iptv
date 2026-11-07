@@ -390,21 +390,26 @@ def upgrade_channels(path: Path) -> bool:
     return True
 
 
-# 旧版默认采集源的特征行：把央视频接口当主源。新版换成静态开放源，
-# 这句注释跟着改成了「备用」。两个条件一起判：旧特征在、新特征不在。
-_OLD_SOURCES_MARKER = "综合频道信息服务接口（主源）"
-_NEW_SOURCES_MARKER = "开放源-央视卫视"
+# 判断「这份 sources.toml 还是出厂的默认模板、没被人改过」。
+# 每次换主源，模板里的注释标题都会跟着变，这里把历史版本的特征行都列上，
+# 命中任意一条就当成旧模板替换。新版自己的特征单独判，命中就绝不重复替换。
+_OLD_SOURCES_MARKERS = (
+    "静态开放源（主源）",            # 0.9.3：静态源当主源（移动专属，联通/电信全 403）
+    "综合频道信息服务接口（主源）",   # 0.9.2 及更早：央视频全量 resolve，一次打五十多个请求
+)
+_NEW_SOURCES_MARKER = "静态开放源（默认关闭"
 
 
 def upgrade_sources(path: Path) -> bool:
-    """把「没改过的旧默认采集源」换成新的（央视频主源 → 静态开放源）。
+    """把「没改过的旧默认采集源」换成当前版本的默认配置。
 
     ``ensure_defaults`` 只在文件不存在时才写，宿主机上早就存在的那份旧
-    sources.toml 永远不会被换掉——用户删容器重建，起来的还是走央视频接口，
-    照样被按 IP 限流。这里补上这一刀：只在文件仍是旧默认模板时替换。
+    sources.toml 永远不会被换掉——用户删容器重建，起来的还是旧配置，
+    表面上「重建了」实际什么都没变。这里补上这一刀。
 
-    判断依据是注释文字（旧版写「（主源）」且没有开放源条目）。用户自己
-    改动过源的，要么删了这句注释，要么已经加了别的源，不会被误覆盖。
+    判断依据是模板里的注释标题：命中任一旧版特征、且不含新版特征，才替换。
+    用户自己改动过源的（改过 channels、加了自己的源、删了这些注释），
+    不会被误覆盖。
     """
     source = DEFAULTS_DIR / "sources.toml"
     if not source.exists() or not path.exists():
@@ -413,7 +418,9 @@ def upgrade_sources(path: Path) -> bool:
         current = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
-    if _OLD_SOURCES_MARKER not in current or _NEW_SOURCES_MARKER in current:
+    if _NEW_SOURCES_MARKER in current:
+        return False
+    if not any(marker in current for marker in _OLD_SOURCES_MARKERS):
         return False
     try:
         shutil.copyfile(source, path)
