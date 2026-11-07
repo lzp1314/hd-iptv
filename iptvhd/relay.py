@@ -36,13 +36,14 @@
 from __future__ import annotations
 
 import base64
+import math
 import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 # 允许中转的域名后缀。只放行上游自己的 CDN，不做通用代理。
 ALLOW_SUFFIX = (".cctv.cn", ".cctv.com", ".ysp.cctv.cn", ".cztv.com", ".cztvcloud.com")
@@ -182,17 +183,46 @@ class _SegmentCache:
 
 
 # ---------------- 分片滑动窗口 ----------------
-# 上游媒体清单只列 3 个分片（约 15 秒）。播放器稍一落后，要的那一片就已经被
-# 上游移出窗口了，只能跳到最新——表现就是「播一会儿停一下」「跳台」。把每次
-# 拿到的分片攒起来拼成更长的窗口，播放器才有缓冲可以吃，这才是别人家看起来
-# 顺畅的关键差别。
-_WINDOW_SEGMENTS = 18      # 最多保留 18 片，约 90 秒——把抗限流的余量拉长，上游限流几十秒也不怕
-_WINDOW_MAX_AGE = 12.0     # 窗口超过这么久没更新就當它不可信，重新同步取一次
-_PREFETCH_EVERY = 4.0      # 有人在看时，后台每隔这么久替播放器去要一次清单
-                           # 上游清单 5 秒才滚一片，2.5 秒取一次有一半是「同一份清单」的无效请求，
-                           # 白白烧出口配额；改成 4 秒，少一半无效请求，降低自己触发限流的概率
-_ACTIVE_FOR = 30.0         # 这么久没人要清单就认为没人看，停止预取
+# 上游媒体清单只列最近 3 个分片（约 16 秒），但**能取到的不止 3 片**：清单头的
+#   #EXT-QQHLS-SEGMENT_RANGE:1786524272-1786524282
+# 说明 CDN 上现存的序号范围是 11 片、约 55 秒，再往前的早就回收了。
+#
+# 以前这里攒到 18 片（90 秒），首片必然落在留存范围之外——播放器一旦从那儿续播
+# 就是一片接一片的 403/404，表现是「播一两分钟卡住、然后跳回去」。攒窗口本身没错，
+# 错在攒的比上游留得还久。压到 6 片（约 30 秒）刚好盖住播放器起步要的缓冲
+# （hls.js 默认 maxBufferLength 30 秒），又稳稳落在 11 片留存之内。
+_WINDOW_SEGMENTS = 6       # 最多保留几片。上限 = 上游 CDN 留存（实测 11 片）的一半，留足安全边际
+_FRESH_AGE = 6.0           # 窗口超过这么久没更新，就不再当它是新鲜的（会去上游要一份新的）
+                           # 实际取值 = max(这个, 预取间隔 + 2)，见 _fresh_age
+_STALE_MAX = 30.0          # 再旧也还能发给播放器：上游一时取不到时先顶着，别让画面断
+_PREFETCH_EVERY = 5.0      # 有人在看时，后台每隔这么久替播放器去要一次清单
+                           # 上游 5 秒滚一片，取更勤有一半是「同一份清单」的无效请求，
+                           # 白白烧出口配额，反过来把自己打成限流
+_ACTIVE_FOR = 15.0         # 这么久没人要清单就认为没人看，停止预取
 _FROZEN_AFTER = 10.0       # 分片序号这么久没往前滚，判定上游冻住
+
+# 「真的有播放器在看」的判定：同一台两次请求的间隔落在 (MIN, WINDOW] 之间才算。
+# 播放器拿到清单后要隔两三秒才会再来（hls.js 按分片时长、libVLC 约 5 秒）；
+# 而「刷新预览图 / 检测可用性 / 失败自动换台」式的扫台每台只碰一次，或者毫秒级
+# 连打两次——都够不到这个区间。只有判定在播的台才值得后台去刷新，否则扫一遍
+# 二十个台就是二十次换票加二十次取清单，直接把出口敲进限流。
+_PLAYING_MIN_GAP = 1.0
+_PLAYING_WINDOW = 15.0
+
+# 上游主备 CDN 全 403 = 本机出口正被限流。这个台冷却 30 秒、一枪不打上游：
+# 播放器失败后是毫秒级连环重试，每次重试都换票 + 试主备，只会把限流越拖越久。
+_FORBIDDEN_COOLDOWN = 30.0
+
+# 官方回「应版权方要求，暂停提供直播信号」后，这个台冷却一会儿再问。
+# 版权按节目走，一档节目没版权时整档都是这句话，换节目才可能恢复。
+_BLACKOUT_COOLDOWN = 180.0
+_BLACKOUT = "版权"
+
+# 换票预算：整台实例每分钟最多换这么多张票（只管「冷启动」，续播不受限）。
+# 一个人换台怎么也到不了一分钟 20 个新台，而把六十多个公开频道扫一遍会在第
+# 21 个被拦住——那正是把出口打进限流的典型动作。桶空时本地直接回错，不打上游。
+_TICKET_BUDGET = 20
+_TICKET_WINDOW = 60.0
 
 
 def _parse_media(text: str, base: str):
@@ -309,7 +339,21 @@ class _Window:
         return added
 
     def text(self) -> str:
-        out = list(self.head)
+        # TARGETDURATION 按**窗口里实际的**分片时长重算。上游那份是「最新 3 片」的
+        # 值，我们拼出的窗口里可能有更长的片；报小了播放器会按它算刷新节奏和缓冲，
+        # 短于实际片长时容易提前判定「这一片还没好」。
+        longest = max((seg[0] for seg in self.segs), default=0.0)
+        out: list[str] = []
+        for line in self.head:
+            if line.startswith("#EXT-X-TARGETDURATION"):
+                continue
+            if line.startswith("#EXT-QQHLS-SEGMENT_RANGE"):
+                # 上游「CDN 上还留着哪些序号」的诊断标签，播放器用不上；
+                # 留着反而和新拼出来的窗口不一致。
+                continue
+            out.append(line)
+        if longest > 0:
+            out.append(f"#EXT-X-TARGETDURATION:{math.ceil(longest)}")
         out.append(f"#EXT-X-MEDIA-SEQUENCE:{max(0, self.seq0)}")
         for duration, uri, stamp, discontinuity in self.segs:
             if discontinuity:
@@ -342,7 +386,7 @@ class Relay:
         retry_gap: float = 20.0,
         prefetch_every: float = _PREFETCH_EVERY,
         addr_ttl: float = 300.0,
-        stale_max: float = 120.0,
+        stale_max: float = _STALE_MAX,
         cache_bytes: int = 96 * 1024 * 1024,
         cache_ttl: float = 300.0,
         mode: str = "direct",
@@ -358,6 +402,9 @@ class Relay:
         # 有人在看时，后台每隔这么久替播放器去上游要一次新清单。
         # 调小=更实时但更费出口配额，调大=省配额但滞后一点。
         self._prefetch_every = max(0.5, float(prefetch_every))
+        # 「新鲜的」判定要跟着预取节奏走：预取间隔调大到 10 秒时，窗口本来就
+        # 会老到 10 秒，若还按固定 6 秒判，每次请求都被标成「旧的那份」。
+        self._fresh_age = max(_FRESH_AGE, self._prefetch_every + 2.0)
         self._addr_ttl = addr_ttl
         self._stale_max = stale_max
         self._lock = threading.Lock()
@@ -377,6 +424,17 @@ class Relay:
         self._ticker: threading.Thread | None = None
         self._stuck_note: dict[str, float] = {}               # slug -> 上次报告冻住的时间
         self._reticket_at: dict[str, float] = {}              # slug -> 上次为「冻住」换票的时间
+        # 每个台上一次请求时刻。用来判断「真的有播放器在看」：两次请求间隔
+        # 落在 (_PLAYING_MIN_GAP, _PLAYING_WINDOW] 才算，扫台碰不到这个区间。
+        self._hits: dict[str, float] = {}
+        # 这个台被上游拒了（主备全 403）→ 冷却到此为止，期间一枪不打上游。
+        self._forbidden_by_slug: dict[str, float] = {}
+        # 这个台正「应版权方要求停播」→ 冷却到此为止，期间本地直接回同一句话。
+        self._blackout: dict[str, float] = {}
+        # 换票时刻（只留最近一分钟）：整台实例的取票预算，见 _take_ticket。
+        self._ticket_times: deque[float] = deque()
+        # 正在后台补货的台：同一个台不重复开线程
+        self._refreshing: set[str] = set()
         self._segments = _SegmentCache(cache_bytes, cache_ttl)
         self._notify = None                                   # 日志出口，由 service 接上
         self.failures = 0                                     # 累计失败次数
@@ -417,18 +475,69 @@ class Relay:
                 return False
             time.sleep(min(need, 0.25))
 
+    def _take_ticket(self) -> bool:
+        """取一张「换票」配额：整台实例每分钟 _TICKET_BUDGET 张。
+
+        ``_take_token`` 管的是「向上游要清单」的总速率，这个管的是更贵的那一步：
+        调央视频的取票接口。它按出口 IP 风控，被判定成异常流量之后换新票也全是
+        403，而且会连累正在看的人。播放器「刷新预览图 / 检测可用性 / 失败换台」
+        会把六十多个台挨个点一遍，正好是这个形态，所以必须有硬上限。
+
+        只拦冷启动：已经在播的台地址还在（``_addr_ttl`` 内）根本不走这里。
+        """
+        now = time.monotonic()
+        with self._bucket_lock:
+            while self._ticket_times and now - self._ticket_times[0] > _TICKET_WINDOW:
+                self._ticket_times.popleft()
+            if len(self._ticket_times) >= _TICKET_BUDGET:
+                return False
+            self._ticket_times.append(now)
+            return True
+
+    def _note_hit(self, slug: str) -> bool:
+        """记一次清单请求，返回「这个台是否真的有播放器在看」。
+
+        判定靠两次请求的间隔：播放器拿完清单要隔两三秒才会再来；扫台是每台
+        碰一次，或者毫秒级连打两次。只有落在这个区间才值得为它开后台刷新——
+
+        * 间隔太短（≤ _PLAYING_MIN_GAP）：同一批并发请求，不是「在播」的证据；
+        * 间隔太长（> _PLAYING_WINDOW）：播放器早走了，重新开始看时先按「不在播」
+          处理，这一次同步取清单，随后自然进入在播状态。
+        """
+        now = time.time()
+        with self._lock:
+            previous = self._hits.get(slug)
+            gap = now - previous if previous is not None else 0.0
+            self._hits[slug] = now
+            playing = _PLAYING_MIN_GAP < gap <= _PLAYING_WINDOW
+            if playing:
+                self._active[slug] = now
+            return playing
+
     # ---------------- 上游 ----------------
     def upstream(self, slug: str, *, fresh: bool = False) -> tuple[str, str]:
         """取该频道当前可用的上游地址与 UA。
 
         ``fresh=True`` 表示「刚被上游拒绝，想换一个」，受冷却时间约束：
         短时间内重复失败只试一次，避免把接口敲到限流。
+
+        三道闸，任何一道关着就**一枪不打上游**：
+
+        1. 这个台刚被拒（主备全 403）→ 冷却 30 秒；
+        2. 这个台正版权停播 → 冷却到点再问；
+        3. 换票预算用完 → 本地直接回错，别把出口 IP 打进限流。
         """
         now = time.time()
         with self._lock:
             hit = self._cache.get(slug)
             cooling = now - self._failed.get(slug, 0.0) < self._retry_gap
-            blocked = now < self._forbidden_until
+            slug_blocked = now < self._forbidden_by_slug.get(slug, 0.0)
+            blackout_until = self._blackout.get(slug, 0.0)
+
+        if blackout_until > now:
+            # 官方说这个台「应版权方要求暂停提供直播信号」。一档节目没版权时整档
+            # 都是这句话，播一次问一次没有任何意义，只会一次张票往外打。
+            raise RelayError(self._errors.get(slug, "该频道应版权方要求暂停直播"))
 
         if hit and not fresh:
             # 地址用久了要主动换票。CDN 对同一张票据上的重复请求会越来越容易
@@ -437,16 +546,29 @@ class Relay:
                 return hit[1], hit[2]
             fresh = True
 
+        if slug_blocked:
+            # 这个台的主备 CDN 刚刚全都 403：本机出口正在被它限流。播放器失败后
+            # 是毫秒级连环重试，每一次都换票 + 试主备，只会把限流越拖越久。
+            if hit:
+                return hit[1], hit[2]
+            raise RelayError("本台线路暂时受限，几秒后自动重试")
+
         if cooling:
             # 冷却期内不再敲门：有旧地址就继续用，没有就把上次的错抛出去
             if hit:
                 return hit[1], hit[2]
             raise RelayError(self._errors.get(slug, "上游暂时不可用，稍后自动重试"))
 
-        if blocked and not hit:
-            # 整条出口正被上游限流：这个台连地址都没有，硬敲只会让所有人更久播不了。
-            # 别让播放器当成「这个台坏了」直接跳走——报一个稍后能自愈的错。
-            raise RelayError("上游限流冷却中，几秒后自动重试")
+        # 出口级退避（``_forbidden_until``）**只停后台预取**，不挡这里的同步取：
+        # 一个台 403 就把所有台一起关掉，等于别人一个坏台害你看不了 CCTV-1。
+        # 真正防「批量扫台把出口敲爆」的是下面那张换票预算，按 IP 记账的口径更准。
+
+        if not hit or fresh:
+            # 只有真的要向接口要一张新票时才记预算。抱着旧地址续播不计。
+            if not self._take_ticket():
+                if hit:
+                    return hit[1], hit[2]
+                raise RelayError("正在批量请求频道，稍后自动恢复")
 
         try:
             url, ua = self._resolver(slug)
@@ -457,6 +579,9 @@ class Relay:
                 self._errors[slug] = message
                 self.failures += 1
                 stale = self._cache.get(slug)
+                if _BLACKOUT in message:
+                    # 版权停播要按节目冷却，而不是按「秒」重试。
+                    self._blackout[slug] = now + _BLACKOUT_COOLDOWN
             if stale:
                 return stale[1], stale[2]
             raise RelayError(message) from exc
@@ -482,6 +607,10 @@ class Relay:
             self._active.pop(slug, None)
             self._stuck_note.pop(slug, None)
             self._reticket_at.pop(slug, None)
+            self._hits.pop(slug, None)
+            self._forbidden_by_slug.pop(slug, None)
+            self._blackout.pop(slug, None)
+            self._refreshing.discard(slug)
             for key in [k for k in self._playlists if k.endswith(f"|{slug}")]:
                 self._playlists.pop(key, None)
 
@@ -499,6 +628,7 @@ class Relay:
         """
         if prefetch_every is not None:
             self._prefetch_every = max(0.5, float(prefetch_every))
+            self._fresh_age = max(_FRESH_AGE, self._prefetch_every + 2.0)
         if cache_bytes is not None:
             self._segments.resize(int(cache_bytes))
         if mode is not None and mode in ("direct", "proxy") and mode != self._mode:
@@ -518,19 +648,24 @@ class Relay:
         就会导致下一次清单请求无地址可用 → 解析又撞限流 → 返回 502 →
         播放器立刻跳到下一个频道。上游的 403 大多是 IP 级限流，换个地址也
         一样被拒，留着旧地址反而能继续用。
+
+        403 分两层：**按台**冷却 30 秒（这个台别再来敲门），同时**全局**指数退避
+        （整条出口可能都被限了，后台预取先停手）。只做全局会让一个坏台拖累所有台，
+        只做按台又挡不住出口级的限流。
         """
+        now = time.time()
         with self._lock:
-            self._failed[slug] = time.time()
+            self._failed[slug] = now
             self._errors[slug] = message
             self.failures += 1
             if "403" in message:
-                # 连续 403 基本是本机出口被限流，而不是某个台坏了。进入退避：
-                # 第 1 次 6 秒，之后每次翻倍（12 / 24 / 30 封顶）。退避期间后台
-                # 预取停手，让上游计数缓一缓；恢复后自动回落到正常节奏。
-                # 封顶从 60 秒降到 30 秒：停太久反而让播放器窗口吃空、画面卡住，
-                # 30 秒内窗口（90 秒）足够撑住，恢复更快、体感更顺。
+                # 主备 CDN 都拒了才走到这里：这个台先冷却，期间本地直接回错，
+                # 不再为它的每次重试换票 + 试主备（那正是把限流越拖越久的做法）。
+                self._forbidden_by_slug[slug] = now + _FORBIDDEN_COOLDOWN
+                # 全局退避：第 1 次 6 秒，之后翻倍（12 / 24 / 30 封顶）。只影响
+                # 后台预取，播放器同步取照旧，只是拿不到时软着陆用旧清单顶着。
                 self._forbidden_hits += 1
-                self._forbidden_until = time.time() + min(
+                self._forbidden_until = now + min(
                     self._backoff_base * (2 ** (self._forbidden_hits - 1)), 30.0
                 )
             else:
@@ -544,6 +679,9 @@ class Relay:
             playlists = {k: round(now - v.at, 1) for k, v in self._windows.items()}
             playlists.update({k: round(now - v[0], 1) for k, v in self._raw.items()})
             active = sorted(self._active)
+            cooling = {k: round(v - now) for k, v in self._forbidden_by_slug.items() if v > now}
+            blackout = {k: round(v - now) for k, v in self._blackout.items() if v > now}
+            tickets = len(self._ticket_times)
         seg = self._segments.stats()
         seg.update({"hits": self._segments.hits, "misses": self._segments.misses})
         return {
@@ -560,6 +698,13 @@ class Relay:
             "throttled": self.throttled,
             # 出口被限流时，没缓存的台会被直接挡回来，面板据此提示等一下
             "blocked_for": max(0, round(self._forbidden_until - now)),
+            # 按台冷却（秒）：主备 CDN 全 403 的台，期间一枪不打上游
+            "cooling": cooling,
+            # 版权停播冷却（秒）：官方明确回「暂停提供直播信号」
+            "blackout": blackout,
+            # 这一分钟已经用掉的换票额度（上限 _TICKET_BUDGET）
+            "tickets": tickets,
+            "ticket_budget": _TICKET_BUDGET,
         }
 
     def _fetch(self, url: str, ua: str, *, timeout: float | None = None) -> tuple[int, dict, bytes]:
@@ -620,42 +765,69 @@ class Relay:
     def playlist_info(self, slug: str, prefix: str = "") -> tuple[str, bool, int]:
         """返回 ``(清单正文, 是不是旧的那份, 首个分片序号)``。
 
-        播放器每 2~5 秒就要一次清单，这个请求必须立刻有响应。以前每次请求都
-        同步去上游取，赶上上游慢、或者出口配额排队，播放器就在这儿干等，画面
-        自然一顿一顿。现在改成「读内存 + 后台预取」：
+        播放器每 2~5 秒就要一次清单，这个请求**必须立刻有响应**，绝不能陪着等
+        上游——等的那几秒正好是画面断粮的几秒。所以这里的原则是：
 
-        - 有窗口就直接拿，完全不碰网络（正常播放走的就是这条）；
-        - 只有冷启动、隔很久再点，才同步去取一次；
-        - 只要还有人在要清单，后台线程每 2.5 秒替它去上游刷新，顺手把新分片
-          并进窗口。
+        **永远先把手里最新的那份发出去，刷新交给后台。**
 
-        窗口把上游那 3 片拼成最多 8 片，播放器落后几秒也有片可播，这是「不卡」
-        的主要来源。上游真的冻住（10 秒没新分片）时后台会换一张票再取。
+        - 窗口是「预取间隔 + 2 秒」（默认 7 秒）内的 → 直接发，等于贴着直播边缘；
+          上游 5 秒滚一片，这个新鲜度刚好，不会把已经滚过去的片发给播放器；
+        - 略旧但在 ``_STALE_MAX``（30 秒）内 → 也发，标记成「旧的那份」，
+          **同时开一个后台线程去补一份新的**。上游一时抽风时这是唯一能让画面
+          继续的手段：官方 CDN 留 11 片约 55 秒，30 秒内的片播放器还取得到；
+        - 只有冷启动（手上什么都没有）才同步去取。
+
+        **绝不把清单正文按取票有效期缓存**：官方媒体清单只有 3 片、约 16 秒，
+        缓存正文等于让播放器在整个缓存期内反复拿到同一批分片——播完这十几秒就
+        没有下一片，画面定住；而且那批分片早已被 CDN 回收，重取只会 403。
+
+        另外「在播」是判断出来的（见 ``_note_hit``）：只有真有播放器在轮询的台
+        才值得为它开后台刷新。扫台式的每台碰一次不算。
         """
         now = time.time()
+        self._note_hit(slug)
         with self._lock:
-            self._active[slug] = now
             window = self._windows.get(slug)
             raw = self._raw.get(slug)
             backing_off = now < self._forbidden_until
         self._ensure_ticker()
 
-        if window is not None and window.segs and now - window.at <= _WINDOW_MAX_AGE:
+        # 新鲜的：直接发。
+        if window is not None and window.segs and now - window.at <= self._fresh_age:
             return self._rewrite(window.text(), "", slug, prefix), False, window.seq0
-        if raw is not None and now - raw[0] <= _WINDOW_MAX_AGE:
+        if raw is not None and now - raw[0] <= self._fresh_age:
             return self._rewrite(raw[1], raw[2], slug, prefix), False, raw[3]
 
+        # 略旧的：还发得出去就先发，别让播放器等。上游留 11 片（约 55 秒），
+        # 30 秒内的地址播放器取得到；再旧就得同步换一次了，否则发出去也是死链。
+        if window is not None and window.segs:
+            age = now - window.at
+        elif raw is not None:
+            age = now - raw[0]
+        else:
+            age = float("inf")
+        #
+        # **发的同时必须在后台补一份新的**。只发不取是个很隐蔽的坑：窗口一旦
+        # 过了「新鲜」线而预取又没跟上（后台预取判定这个台没人在看、或者配额
+        # 正被批量扫台吃掉），这里就会一直把同一份 3 片清单发给播放器——播完
+        # 这十几秒画面定住，下一次请求拿到的还是同一份，序号一动不动。
+        if age <= _STALE_MAX:
+            cached = self._cached(slug, prefix, stale=True)
+            if cached:
+                self.stale_served += 1
+                self._refresh_async(slug)
+                return cached
+
         # 退避期间：上游正被限流，同步去取基本会被 403，反而让播放器卡在等
-        # 上游的几秒上。窗口里的分片地址通常还没过期（token 时效比窗口长得多），
-        # 先把手里的继续发给播放器，让画面接着播；后台预取恢复后再补新分片。
-        if backing_off and (window is not None or raw is not None):
+        # 上游的几秒上。先把手里的继续发给播放器，让画面接着播。
+        if backing_off:
             cached = self._cached(slug, prefix, stale=True)
             if cached:
                 self.stale_served += 1
                 return cached
 
-        # 手上没得读：同步取一次。从没成功过的台多等一会儿，让它排上队；
-        # 有旧数据的台别等——播放器最怕的就是卡在这儿。
+        # 手上没得读、或者旧到没意义：同步取一次。
+        # 从没成功过的台多等一会儿，让它排上队；有旧数据的台别等太久。
         wait = 4.0 if (window or raw) else 15.0
         if not self._take_token(wait):
             self.throttled += 1
@@ -680,16 +852,49 @@ class Relay:
             raise RelayError("清单里没有分片")
         return ready
 
+    def _refresh_async(self, slug: str) -> None:
+        """后台补一份新清单，调用方立刻返回。
+
+        播放器正在等这一份清单，绝不能陪它一起等上游。同一个台同一时刻只允许
+        一个补货线程在跑（``_refreshing`` 占位），否则播放器的重试加上并发请求
+        会同时开好几个线程去打同一个接口。
+        """
+        with self._lock:
+            if slug in self._refreshing:
+                return
+            self._refreshing.add(slug)
+
+        def run() -> None:
+            try:
+                self._prefetch(slug)
+            except Exception:  # noqa: BLE001 - 后台补货失败不能影响播放
+                pass
+            finally:
+                with self._lock:
+                    self._refreshing.discard(slug)
+
+        threading.Thread(target=run, name=f"hd-iptv-refresh-{slug}", daemon=True).start()
+
     def _cached(
         self, slug: str, prefix: str, *, stale: bool = True
     ) -> tuple[str, bool, int] | None:
-        """把缓存里的那一份改写出来；什么都没有就返回 None。"""
+        """把缓存里的那一份改写出来；什么都没有、或者旧到没意义就返回 None。
+
+        ``_STALE_MAX`` 是硬上限：再旧的清单一来播放器取不到片（官方 CDN 只留
+        11 片约 55 秒），二来内容早就不是现在播的了，发出去只会让人以为还在播。
+        到点就老实报错，让播放器自己重试或者换台。
+        """
+        now = time.time()
         with self._lock:
             window = self._windows.get(slug)
             raw = self._raw.get(slug)
         if window is not None and window.segs:
+            if now - window.at > _STALE_MAX:
+                return None
             return self._rewrite(window.text(), "", slug, prefix), stale, window.seq0
         if raw is not None:
+            if now - raw[0] > _STALE_MAX:
+                return None
             return self._rewrite(raw[1], raw[2], slug, prefix), stale, raw[3]
         return None
 
@@ -824,6 +1029,14 @@ class Relay:
         为什么不在这里顺手改写：同一个台可能同时被内网和外网访问，改写结果
         依赖对外地址；存原文、发的时候再改写，一份缓存就够所有人用。
         """
+        # 这个台刚被主备 CDN 全 403：冷却期内一枪不打上游。``upstream()`` 在有旧
+        # 地址时会「照旧返回」，光靠它挡不住——请求照样会打到上游再被拒一次，
+        # 播放器的毫秒级重试叠上来就是一片 403。这里必须直接拦在取清单之前。
+        with self._lock:
+            cooling_channel = time.time() < self._forbidden_by_slug.get(slug, 0.0)
+        if cooling_channel:
+            raise RelayError("本台线路暂时受限，几秒后自动重试")
+
         url, ua = self.upstream(slug, fresh=fresh)
         status, _, body = self._fetch(url, ua)
         if status in _GONE:

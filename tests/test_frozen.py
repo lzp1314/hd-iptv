@@ -137,6 +137,10 @@ class TestPrefetch(unittest.TestCase):
     def test_sweep_prefetches_channel_being_watched(self):
         relay, fetch = _relay([_playlist(100), _playlist(103)])
         relay.playlist_info("cctv1")
+        # 「在播」是靠两次请求的间隔判出来的：播放器拿完清单隔几秒会再来一次。
+        # 扫台每台只碰一次，进不了这个区间，也就不会牵动后台刷新。
+        relay._hits["cctv1"] = time.time() - 3
+        relay.playlist_info("cctv1")
         _age_window(relay, fetched=5)   # 超过预取间隔
 
         relay._sweep()

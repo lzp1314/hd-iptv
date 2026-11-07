@@ -48,13 +48,16 @@ def _play_url(stream: Stream, relay_base: str) -> str:
     地址也不会过期。没有对外地址时给相对路径——播放器按 m3u 所在地址解析，
     少数不解析相对路径的播放器由服务端现拼时补全（``/playlist.m3u`` 走的就是
     这条路径）。只有完全没有 slug 的流才退回它自己的地址。
+
+    **有 slug 的流绝不退回 ``stream.url``**：央视频那些台的 url 是「抽测轮」
+    临时换来的票，寿命只有几小时。写进列表就是一条死链——播放器打开只看到
+    黑屏，而且卡片上还显示着画质和码率，很容易以为是源不好。
     """
     if stream.slug:
         base = relay_base.rstrip("/") if relay_base else ""
         if base:
             return f"{base}/live/{stream.slug}.m3u8"
-        # 没有对外地址：能直连就直连（离线导出时有用），否则给相对路径
-        return stream.url or f"/live/{stream.slug}.m3u8"
+        return f"/live/{stream.slug}.m3u8"
     return stream.url
 
 

@@ -10,7 +10,14 @@ from pathlib import Path
 from iptvhd import epg, logos, writers
 from iptvhd.models import Channel, Stream
 from iptvhd.service import _channels_from_result, _visible
-from iptvhd.settings import clean_names, coerce_panel, load_settings, read_panel, write_panel
+from iptvhd.settings import (
+    clean_names,
+    coerce_panel,
+    load_settings,
+    read_panel,
+    upgrade_config,
+    write_panel,
+)
 
 XMLTV = """<?xml version="1.0" encoding="UTF-8"?>
 <tv>
@@ -51,7 +58,7 @@ class TestPanelSettings(unittest.TestCase):
     def test_bounds_and_types(self):
         clean = coerce_panel({"interval_hours": 999, "playlist_ttl": 0, "cache_mb": -5, "没用": 1})
         self.assertEqual(clean["interval_hours"], 168.0)   # 夹到上限
-        self.assertEqual(clean["playlist_ttl"], 0.5)       # 夹到下限
+        self.assertEqual(clean["playlist_ttl"], 1.0)       # 夹到下限（低于 1 秒纯属烧配额）
         self.assertEqual(clean["cache_mb"], 0)
         self.assertNotIn("没用", clean)
 
@@ -71,7 +78,7 @@ class TestPanelSettings(unittest.TestCase):
     def test_defaults_when_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = load_settings(Path(tmp))
-            self.assertEqual(settings.playlist_ttl, 2.5)
+            self.assertEqual(settings.playlist_ttl, 5.0)
             self.assertEqual(settings.relay_cache_mb, 96.0)
             self.assertEqual(settings.public_url, "")
 
@@ -150,10 +157,64 @@ class TestRenderM3u(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(text.count("#EXTINF"), 1)
 
-    def test_direct_url_without_relay(self):
+    def test_no_relay_base_falls_back_to_relative_path(self):
+        """没有对外地址时给相对路径，**绝不退回流自己的地址**。
+
+        央视频那些台的 url 是抽测轮临时换来的票，写进列表就是一条几小时后
+        必死的链接——播放器打开只看到黑屏，卡片上却还显示着画质和码率。
+        相对路径由播放器按 m3u 所在地址解析，永远不会过期。
+        """
         text, _ = writers.render_m3u([_channel("CCTV-1", "央视", "cctv1")])
-        self.assertIn("http://up/cctv1.m3u8", text)
-        self.assertNotIn("/live/", text)
+        self.assertIn("/live/cctv1.m3u8", text)
+        self.assertNotIn("http://up/cctv1.m3u8", text)
+
+
+class TestConfigUpgrade(unittest.TestCase):
+    """宿主机挂着旧 config.toml 时，镜像里的新默认值得能就地把旧值换掉。
+
+    Docker 用户把 config/ 挂出来之后，这份文件就再也不随镜像更新了：代码改好、
+    容器重建，起来的还是旧配置——「重建了但没变化」十次有九次是这个原因。
+    """
+
+    OLD = (
+        "[probe]\n"
+        "max_height = 1080\n"
+        "\n"
+        "[relay]\n"
+        "# 上游清单只有 3 个分片，服务端会把它们攒成 8 片的窗口再发出去。\n"
+        "playlist_ttl = 2.5\n"
+        "cache_mb = 96\n"
+    )
+
+    def _write(self, tmp: str, text: str) -> Path:
+        path = Path(tmp) / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_old_defaults_are_bumped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self.OLD)
+            self.assertTrue(upgrade_config(path))
+            text = path.read_text(encoding="utf-8")
+        self.assertIn("max_height = 2160", text)
+        self.assertNotIn("max_height = 1080", text)
+        self.assertIn("playlist_ttl = 5.0", text)
+        self.assertNotIn("playlist_ttl = 2.5", text)
+        self.assertIn("cache_mb = 96", text, "用户自己的设置不能动")
+
+    def test_already_new_is_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "max_height = 2160\nplaylist_ttl = 5.0\n")
+            before = path.read_text(encoding="utf-8")
+            self.assertFalse(upgrade_config(path), "已经是新值就不该再写一次盘")
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_user_value_is_respected(self):
+        """用户自己调过的预取间隔不该被覆盖成默认值。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, "[relay]\nplaylist_ttl = 8.0\n")
+            self.assertFalse(upgrade_config(path))
+            self.assertIn("playlist_ttl = 8.0", path.read_text(encoding="utf-8"))
 
 
 class TestEpgCrop(unittest.TestCase):

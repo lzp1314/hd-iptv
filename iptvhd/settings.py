@@ -22,7 +22,7 @@ PANEL_FILE = "panel.json"
 # 允许面板修改的数值项及其取值范围，越界一律夹回区间内
 PANEL_BOUNDS = {
     "interval_hours": (0.0, 168.0),
-    "playlist_ttl": (0.5, 5.0),
+    "playlist_ttl": (1.0, 15.0),
     "cache_mb": (0.0, 4096.0),
 }
 
@@ -60,7 +60,7 @@ allow_unknown_resolution = false
 probe_playlist_children = true
 
 [relay]
-playlist_ttl = 2.5
+playlist_ttl = 5.0
 cache_mb = 96
 mode = "direct"
 
@@ -278,11 +278,13 @@ class Settings:
         不用改；它早就不表示「清单缓存多久」了。
         """
         panel = self.panel_get("playlist_ttl")
-        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 2.5)
+        raw = panel if panel is not None else self.get("relay", "playlist_ttl", 5.0)
         try:
-            return max(0.5, float(raw))
+            # 下限 1 秒：比上游滚片（5 秒一片）还勤的请求有一半是重复拿到同一份
+            # 清单，纯烧出口配额，反而是把自己打进限流的动作。
+            return max(1.0, float(raw))
         except (TypeError, ValueError):
-            return 2.5
+            return 5.0
 
     @property
     def relay_cache_mb(self) -> float:
@@ -387,9 +389,14 @@ def upgrade_config(path: Path) -> bool:
 
     整份替换会把用户的自定义（并发数、UA、分组）一起冲掉，所以只动具体的键。
 
-    目前只有一个键：``max_height = 1080``。很多官方源只提供 4K 一路（芒果、
-    浙江广电都是），上限卡在 1080 会把唯一可用的那条地址整条丢掉，然后退到
-    公开列表里 1 Mbps 的中转空壳上——湖南卫视卡顿的根源就是这里。
+    目前两处：
+
+    * ``max_height = 1080`` → 2160。很多官方源只提供 4K 一路（芒果、浙江广电
+      都是），上限卡在 1080 会把唯一可用的那条地址整条丢掉，然后退到公开列表里
+      1 Mbps 的中转空壳上——湖南卫视卡顿的根源就是这里。
+    * ``playlist_ttl = 2.5`` → 5.0。2.5 秒比上游滚片（5 秒一片）还勤，一半请求
+      拿到的是同一份清单，纯烧出口配额；出口被按 IP 记账打到限流之后，换新票也
+      全是 403。这条只在文件里还是旧默认值时改，面板上的值优先。
     """
     if not path.exists():
         return False
@@ -397,14 +404,35 @@ def upgrade_config(path: Path) -> bool:
         current = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
-    if "max_height = 1080" not in current:
+
+    original = current
+    if "max_height = 1080" in current:
+        current = current.replace(
+            "max_height = 1080",
+            "max_height = 2160            # 画质上限：放开到 4K。官方源常常只有 4K 一路，\n"
+            "                             # 卡在 1080 会把唯一可用的地址整条丢掉",
+            1,
+        )
+    if "playlist_ttl = 2.5" in current:
+        current = current.replace(
+            "# 上游清单只有 3 个分片，服务端会把它们攒成 8 片的窗口再发出去。\n",
+            "",
+            1,
+        )
+        current = current.replace(
+            "playlist_ttl = 2.5",
+            "# 上游 5 秒滚一片，5 秒取一次刚好贴着直播边缘；取更勤有一半是重复拿到\n"
+            "# 同一份清单，白烧出口配额，反而把自己打成限流（平台按出口 IP 记账）。\n"
+            "# 上游清单只列 3 片（约 16 秒），服务端会把它们攒成 6 片的窗口再发出去——\n"
+            "# 上限卡在 CDN 留存（实测 11 片）的一半，再攒就会把已被回收的分片写进清单。\n"
+            "playlist_ttl = 5.0",
+            1,
+        )
+
+    if current == original:
         return False
-    new = (
-        "max_height = 2160            # 画质上限：放开到 4K。官方源常常只有 4K 一路，\n"
-        "                             # 卡在 1080 会把唯一可用的地址整条丢掉"
-    )
     try:
-        path.write_text(current.replace("max_height = 1080", new, 1), encoding="utf-8")
+        path.write_text(current, encoding="utf-8")
     except OSError:
         return False
     return True

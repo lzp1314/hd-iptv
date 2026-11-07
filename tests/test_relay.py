@@ -201,7 +201,11 @@ class WriterRelayTest(unittest.TestCase):
         self.assertNotIn("EXTVLCOPT", text)  # 走中转就不需要指定 UA 了
         self.assertNotIn("ysp.cctv.cn", text)
 
-    def test_without_relay_base_keeps_direct_url(self):
+    def test_without_relay_base_gives_relative_path(self):
+        """没有对外地址时给相对路径，而不是把抽测轮换来的票写死进列表。
+
+        写死的票据几小时后就失效，播放器那边表现为「能选中、打开黑屏」。
+        """
         stream = Stream(url="https://hlsliveali-cdn.ysp.cctv.cn/A/1.m3u8", slug="cctv1",
                         user_agent="qqlive", height=1080)
         ch = Channel(name="CCTV-1", group="央视", streams=[stream])
@@ -209,8 +213,8 @@ class WriterRelayTest(unittest.TestCase):
             path = Path(tmp) / "r.m3u"
             write_m3u([ch], path)
             text = path.read_text(encoding="utf-8")
-        self.assertIn("ysp.cctv.cn", text)
-        self.assertIn("EXTVLCOPT:http-user-agent=qqlive", text)
+        self.assertIn("/live/cctv1.m3u8", text)
+        self.assertNotIn("ysp.cctv.cn", text)
 
 
 class RelayPolicyTest(unittest.TestCase):
@@ -252,21 +256,23 @@ class RelayPolicyTest(unittest.TestCase):
         self.assertEqual(relay.attempts, 2)
 
     def test_budget_serves_stale_instead_of_hitting_upstream(self):
-        """播放器批量扫台时，配额用完就交旧清单，不能每个台都去撞上游。
+        """播放器批量扫台时，配额用完就绝不再撞上游。
 
-        这是「一被限流连正在看的台也一起 403」的防线：请求量由本机控制，
-        不由播放器的扫台节奏决定。
+        「一被限流连正在看的台也一起 403」的防线：请求量由本机控制，不由播放器
+        的扫台节奏决定。数据还在 _STALE_MAX（30 秒）内时根本走不到配额这一步
+        ——直接发手里的（见 test_stale_within_grace_keeps_serving）；这里测的是
+        已经旧到没法再用、又没有配额的情况：如实报错，但一枪不打上游。
         """
         relay = CountingRelay()
-        first = relay.playlist("cctv1")
+        relay.playlist("cctv1")
         before = relay.calls
-        _expire(relay)                               # 缓存过期，本来该去上游
+        # 拨过 _STALE_MAX（30 秒）：再旧的清单发出去也没用，官方 CDN 只留 11 片
+        _expire(relay, seconds=40)                   # 缓存旧到不能再用，本来该去上游
         relay._take_token = lambda wait=0.0: False   # 配额用完
-        again = relay.playlist("cctv1")
-        self.assertEqual(again, first)               # 返回上一份清单
+        with self.assertRaises(RelayError):
+            relay.playlist("cctv1")
         self.assertEqual(relay.calls, before)        # 没有额外解析
         self.assertEqual(relay.throttled, 1)
-        self.assertEqual(relay.stale_served, 1)
 
     def test_stats_shape(self):
         relay = CountingRelay()
@@ -325,13 +331,32 @@ class RelayStabilityTest(unittest.TestCase):
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
 
-    def test_playlist_refreshed_but_failure_keeps_serving(self):
+    def test_stale_within_grace_keeps_serving(self):
+        """30 秒内上游取不到，继续发手里的清单，播放器看不到失败。
+
+        官方 CDN 留 11 片（约 55 秒），30 秒内的分片地址播放器还取得到。所以
+        这一段是可以硬顶的，顶住比让播放器跳台强得多。
+        """
         relay = ToggleRelay()
-        for _ in range(5):
+        first = relay.playlist("cctv1")
+        relay.down = True
+        _expire(relay, seconds=20)     # 旧，但还在 _STALE_MAX 之内
+        second = relay.playlist("cctv1")
+        self.assertEqual(first, second)
+        self.assertGreaterEqual(relay.stale_served, 1)
+
+    def test_stale_beyond_grace_reports_failure(self):
+        """超过 30 秒就老实报错。
+
+        再旧的清单发出去也是死链：分片早被 CDN 回收，而且内容已经不是现在播的
+        了，继续回旧清单只会让人以为还在播。到点报错，播放器自己重试或换台。
+        """
+        relay = ToggleRelay()
+        relay.playlist("cctv1")
+        relay.down = True
+        _expire(relay, seconds=40)
+        with self.assertRaises(RelayError):
             relay.playlist("cctv1")
-            relay.down = not relay.down
-            _expire(relay)
-        self.assertGreaterEqual(relay.fetches, 2)
 
     def test_segment_cached_between_requests(self):
         relay = SegRelay()
