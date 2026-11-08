@@ -45,6 +45,8 @@ import urllib.parse
 import urllib.request
 from collections import OrderedDict, deque
 
+from .net import dns_stats
+
 # 允许中转的域名后缀。只放行上游自己的 CDN，不做通用代理。
 ALLOW_SUFFIX = (".cctv.cn", ".cctv.com", ".ysp.cctv.cn", ".cztv.com", ".cztvcloud.com")
 
@@ -575,7 +577,12 @@ class Relay:
         except Exception as exc:  # noqa: BLE001 - 解析失败要能兜住
             message = str(exc) or type(exc).__name__
             with self._lock:
-                self._failed[slug] = now
+                # 域名解析失败是**本机**的事，一个字节都没发到上游去：不该按
+                # 「上游失败」冷却 20 秒。否则用户点一次黑屏，20 秒内再点还是
+                # 同一句错误，看起来像永久坏了。解析闸门自己有 4 秒时限和 5 秒
+                # 失败缓存，重试不会失控。
+                if "DNS" not in message and "解析" not in message:
+                    self._failed[slug] = now
                 self._errors[slug] = message
                 self.failures += 1
                 stale = self._cache.get(slug)
@@ -705,6 +712,9 @@ class Relay:
             # 这一分钟已经用掉的换票额度（上限 _TICKET_BUDGET）
             "tickets": tickets,
             "ticket_budget": _TICKET_BUDGET,
+            # 域名解析闸门的计数。取票全挂时先看这里：timeouts 一直涨就是解析
+            # 卡住（不是上游 403），这时改 DNS 或重启服务才有意义。
+            "dns": dns_stats(),
         }
 
     def _fetch(self, url: str, ua: str, *, timeout: float | None = None) -> tuple[int, dict, bytes]:

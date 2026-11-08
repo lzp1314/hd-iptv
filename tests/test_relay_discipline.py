@@ -264,5 +264,42 @@ class StaleRefreshTest(unittest.TestCase):
         self.assertEqual(fetch.calls, 1, "五个并发请求应该合并成一次上游取清单")
 
 
+class DnsErrorTest(unittest.TestCase):
+    """解析失败不是上游失败，不该按 20 秒冷却。
+
+    这是 0.9.10 在 NAS 上的实际事故：解析闸门被占满后所有台报「DNS 解析超时」，
+    而这条错误又进了上游失败冷却——用户点一次黑屏，20 秒内再点还是同一句，
+    看起来像永久坏了，实际上只要重新解析就能好。
+    """
+
+    def test_dns_error_is_retried_immediately(self):
+        calls = []
+
+        def broken(slug):
+            calls.append(1)
+            raise RuntimeError("接口无响应（DNS 解析超时）")
+
+        relay = Relay(broken, warm=False)
+        relay._fetch = _Fetch(_playlist(100))
+        for _ in range(3):
+            with self.assertRaises(RelayError):
+                relay.playlist("dnsflap")
+        self.assertEqual(len(calls), 3, "解析失败要能立刻重试，不能被冷却挡住")
+
+    def test_upstream_error_still_cools_down(self):
+        calls = []
+
+        def broken(slug):
+            calls.append(1)
+            raise RuntimeError("上游 502")
+
+        relay = Relay(broken, warm=False)
+        relay._fetch = _Fetch(_playlist(100))
+        for _ in range(3):
+            with self.assertRaises(RelayError):
+                relay.playlist("upsflap")
+        self.assertEqual(len(calls), 1, "上游真报错时要冷却，别把接口敲穿")
+
+
 if __name__ == "__main__":
     unittest.main()

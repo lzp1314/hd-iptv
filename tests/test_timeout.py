@@ -10,6 +10,7 @@ socket 超时（多久没数据）永远不会触发，整轮更新会无限期�
 
 from __future__ import annotations
 
+import threading
 import time
 import unittest
 from unittest import mock
@@ -195,6 +196,59 @@ class ResolveTest(unittest.TestCase):
             resp = client.get("http://dns-timeout-test.example/a.m3u8", limit=1024, deadline=started + 0.3)
         self.assertTrue(resp.truncated)
         self.assertIn("DNS", resp.error)
+
+
+class DnsGateTest(unittest.TestCase):
+    """解析闸门不能被几个卡死的查询堵死。
+
+    这是实测事故（2026-11-08）：NAS 上 ``nslookup`` 0.1 秒就有结果，服务却
+    对**所有**台报「DNS 解析超时」，央视和大部分卫视全黑。原因是解析走一个
+    固定 8 线程的池，凑够 8 个卡死的 ``getaddrinfo`` 就把池占满，之后连正常
+    域名也只能排队到超时，且进程不重启永远好不了。
+    """
+
+    def test_stuck_lookups_do_not_starve_others(self):
+        import iptvhd.net as net
+
+        entered = threading.Semaphore(0)
+        release = threading.Event()
+
+        def fake(host, port, *_a, **_k):
+            if host.startswith("stuck"):
+                entered.release()
+                release.wait(5)          # 一直不返回，模拟 DROP 掉的 DNS
+            return [(2, 1, 6, "", ("127.0.0.1", port))]
+
+        old_timeout = net._DNS_TIMEOUT
+        net._DNS_TIMEOUT = 0.3
+        try:
+            with mock.patch("iptvhd.net.socket.getaddrinfo", fake):
+                # 比旧实现的 8 个槽位还多两条
+                for i in range(10):
+                    threading.Thread(target=resolve, args=(f"stuck{i}.example", 80), daemon=True).start()
+                for _ in range(10):
+                    self.assertTrue(entered.acquire(timeout=3.0), "卡死查询没进到解析里")
+                started = time.monotonic()
+                self.assertTrue(
+                    resolve("healthy-starvation.example", 80),
+                    "别的解析卡死，正常域名也必须能解析出来",
+                )
+                self.assertLess(time.monotonic() - started, 1.0)
+        finally:
+            release.set()
+            net._DNS_TIMEOUT = old_timeout
+
+    def test_timeout_is_not_retried_in_a_tight_loop(self):
+        """播放器失败后是毫秒级重试：超时过的域名短暂别再开线程。"""
+        import iptvhd.net as net
+
+        before = net.dns_stats()["timeouts"]
+        started = time.monotonic()
+        with mock.patch("iptvhd.net.socket.getaddrinfo", _Hang(3.0)):
+            self.assertIsNone(resolve("miss-window.example", 80, started + 0.2))
+            self.assertFalse(resolve("miss-window.example", 80))
+            self.assertFalse(resolve("miss-window.example", 80))
+        self.assertEqual(net.dns_stats()["timeouts"] - before, 1, "只有第一次真的去解析了")
 
 
 class DeadlinePruneTest(unittest.TestCase):

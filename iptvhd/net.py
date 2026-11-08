@@ -11,8 +11,6 @@ import socket
 import ssl
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -32,29 +30,36 @@ _MAX_REDIRECTS = 5
 _DNS_TTL = 600.0        # 解析成功的缓存时长
 _DNS_FAIL_TTL = 120.0   # 解析失败的缓存时长（别反复撞同一个死域名）
 _DNS_TIMEOUT = 4.0      # 单次解析的兜底时限
+_DNS_MISS_TTL = 5.0     # 超时后的短暂「别再问了」窗口
+_DNS_INFLIGHT = 32      # 同时最多挂多少个解析线程，超过就快速判超时
 
 _dns_cache: dict[tuple[str, int], tuple[bool, float]] = {}
 _dns_lock = threading.Lock()
-_dns_pool: ThreadPoolExecutor | None = None
+_dns_inflight = 0
+_dns_stats = {"timeouts": 0, "failures": 0, "ok": 0, "busy": 0}
 
 
-def _dns_executor() -> ThreadPoolExecutor:
-    """解析专用线程池。
-
-    解析卡死时线程会一直挂着，这类线程回收不了；限定成小池子，卡住的
-    那几条最多占住自己的槽位，不会把探测线程一起拖死。
-    """
-    global _dns_pool
-    if _dns_pool is None:
-        _dns_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dns")
-    return _dns_pool
+def dns_stats() -> dict:
+    """解析闸门的计数，给诊断接口用（超时/失败/成功/被并发上限挡掉）。"""
+    with _dns_lock:
+        return dict(_dns_stats, inflight=_dns_inflight)
 
 
 def resolve(host: str, port: int, deadline: float | None = None) -> bool | None:
     """带时限的域名解析。
 
     返回 ``True`` 能解析、``False`` 解析失败、``None`` 超时（本次不等了）。
+
+    **为什么每个解析单独开一个 daemon 线程，而不是共用一个线程池**：
+    ``getaddrinfo`` 没有超时参数，遇到不回应的 DNS 就会一直挂着，而线程
+    杀不掉。以前用固定 8 线程的池，只要凑够 8 个这样的解析，池就被占满，
+    之后**所有**解析（包括央视频取票）都只能排队，4 秒到点报超时——现象
+    是「系统里 nslookup 0.1 秒就出来，服务却一直说 DNS 解析超时」，而且
+    进程不重启永远好不了。
+    现在改成一条解析一个线程：卡住的那条只拖住它自己，别人照常解析。
+    用 ``_DNS_INFLIGHT`` 兜住线程数，超了就按超时处理（不再堆线程）。
     """
+    global _dns_inflight
     if not host:
         return True
     key = (host.lower(), int(port))
@@ -63,23 +68,47 @@ def resolve(host: str, port: int, deadline: float | None = None) -> bool | None:
         hit = _dns_cache.get(key)
         if hit and hit[1] > now:
             return hit[0]
+        if _dns_inflight >= _DNS_INFLIGHT:
+            _dns_stats["busy"] += 1
+            return None
+        _dns_inflight += 1
 
     budget = _DNS_TIMEOUT
     if deadline is not None:
         budget = max(0.2, min(_DNS_TIMEOUT, deadline - now))
-    try:
-        future = _dns_executor().submit(socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM)
-        future.result(timeout=budget)
-    except FuturesTimeout:
-        return None
-    except OSError:
-        with _dns_lock:
-            _dns_cache[key] = (False, time.monotonic() + _DNS_FAIL_TTL)
-        return False
 
+    outcome: list[bool] = []
+    done = threading.Event()
+
+    def worker() -> None:
+        global _dns_inflight
+        try:
+            socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+            outcome.append(True)
+        except OSError:
+            outcome.append(False)
+        except BaseException:  # noqa: BLE001 - 解析线程不许把异常漏出去
+            outcome.append(False)
+        finally:
+            done.set()
+            with _dns_lock:
+                _dns_inflight -= 1
+
+    threading.Thread(target=worker, name=f"dns-{host}"[:40], daemon=True).start()
+
+    if not done.wait(budget):
+        # 线程继续挂着（daemon，不挡进程退出），但我们不再等它。短暂记住
+        # 这次失败，免得播放器的毫秒级重试把线程一条条堆起来。
+        with _dns_lock:
+            _dns_cache[key] = (False, time.monotonic() + _DNS_MISS_TTL)
+            _dns_stats["timeouts"] += 1
+        return None
+
+    ok = outcome[0] if outcome else False
     with _dns_lock:
-        _dns_cache[key] = (True, time.monotonic() + _DNS_TTL)
-    return True
+        _dns_cache[key] = (ok, time.monotonic() + (_DNS_TTL if ok else _DNS_FAIL_TTL))
+        _dns_stats["ok" if ok else "failures"] += 1
+    return ok
 
 
 @dataclass(slots=True)
