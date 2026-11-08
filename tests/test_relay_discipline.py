@@ -21,7 +21,7 @@ from iptvhd.relay import (
     Relay,
     RelayError,
     _BLACKOUT_COOLDOWN,
-    _FORBIDDEN_COOLDOWN,
+    _RETRY_DELAYS,
     _TICKET_BUDGET,
     _WINDOW_SEGMENTS,
 )
@@ -161,20 +161,44 @@ class TicketBudgetTest(unittest.TestCase):
 
 
 class CooldownTest(unittest.TestCase):
-    """主备全 403 的台先冷却，别让播放器的毫秒级重试把限流拖长。"""
+    """403 后只安静几秒，不能整台冷却半分钟。
 
-    def test_forbidden_cools_down_per_channel(self):
+    实测央视频的清单地址连取 2~5 次就开始 403、换张新票立刻恢复。旧实现
+    一拒就冷却 30 秒，而窗口里只有约 30 秒的分片——冷却期刚好把画面耗干，
+    这才是「播十几秒定住」的根因。这里锁住「退避必须短于窗口时长」。
+    """
+
+    def test_forbidden_backs_off_briefly(self):
         relay, fetch = _relay(403)
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
-        self.assertIn("cctv1", relay._forbidden_by_slug)
-        remaining = relay._forbidden_by_slug["cctv1"] - time.time()
-        self.assertGreater(remaining, _FORBIDDEN_COOLDOWN - 5)
+        self.assertIn("cctv1", relay._next_try)
+        remaining = relay._next_try["cctv1"] - time.time()
+        self.assertLessEqual(remaining, _RETRY_DELAYS[0] + 1.0)
+        self.assertLess(
+            _RETRY_DELAYS[0] * _WINDOW_SEGMENTS,
+            _WINDOW_SEGMENTS * 5.0,
+            "退避首档要明显短于窗口里那几片能撑的时间",
+        )
 
         calls = fetch.calls
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
-        self.assertEqual(fetch.calls, calls, "冷却期内一次都不该再打上游")
+        self.assertEqual(fetch.calls, calls, "退避期内一次都不该再打上游")
+
+    def test_backoff_grows_with_consecutive_failures(self):
+        """连着被拒时逐次拉长，但封顶 20 秒左右——再长就超过画面能撑的时间。"""
+        relay, _ = _relay(403)
+        delays = []
+        for _ in range(len(_RETRY_DELAYS) + 2):
+            with relay._lock:
+                relay._next_try.pop("cctv1", None)
+            with self.assertRaises(RelayError):
+                relay.playlist("cctv1")
+            delays.append(round(relay._next_try["cctv1"] - time.time()))
+        self.assertLessEqual(delays[0], 3)
+        self.assertGreaterEqual(max(delays), 15)
+        self.assertLessEqual(max(delays), 20)
 
     def test_cooling_one_channel_does_not_block_others(self):
         relay, fetch = _relay(403)
@@ -299,6 +323,36 @@ class DnsErrorTest(unittest.TestCase):
             with self.assertRaises(RelayError):
                 relay.playlist("upsflap")
         self.assertEqual(len(calls), 1, "上游真报错时要冷却，别把接口敲穿")
+
+
+class PlaylistContractTest(unittest.TestCase):
+    """发给播放器的清单要自己说清「从哪儿开始播」。
+
+    外挂播放器（VLC / 观屿）默认从清单第一片开始，窗口是 6 片就等于凭空
+    多落后 30 秒。EXT-X-START 是 HLS 标准标签，ExoPlayer、VLC 都认。
+    """
+
+    def test_playlist_tells_player_to_start_near_live(self):
+        relay, _ = _relay(_playlist(100))
+        relay.playlist("cctv1")
+        base = "https://cdn.example.com/live/index.m3u8"
+        for seq in (101, 102, 103):
+            relay._absorb("cctv1", _playlist(seq).decode(), base)
+        text = relay.playlist("cctv1")
+        self.assertIn("#EXT-X-START:TIME-OFFSET=-", text)
+        offset = float(text.split("#EXT-X-START:TIME-OFFSET=")[1].split("\n")[0])
+        self.assertLess(offset, 0, "TIME-OFFSET 必须是负的（从末尾往前数）")
+        self.assertLessEqual(
+            len([ln for ln in text.splitlines() if ln.startswith("http")]),
+            _WINDOW_SEGMENTS,
+            "窗口不能超出片数上限，否则首片会被 CDN 回收",
+        )
+
+    def test_short_window_has_no_start_tag(self):
+        """只有 3 片时别写这个标签：那等于让播放器从第一片开始，多此一举。"""
+        relay, _ = _relay(_playlist(100))
+        text = relay.playlist("cctv1")
+        self.assertNotIn("#EXT-X-START", text)
 
 
 if __name__ == "__main__":

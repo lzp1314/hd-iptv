@@ -401,8 +401,8 @@ class RelayStabilityTest(unittest.TestCase):
         relay = ToggleRelay()
         first = relay.playlist("cctv1")
         self.assertEqual(relay.fetches, 1)
-        # 进入退避：把 _forbidden_until 拨到未来
-        relay._forbidden_until = time.time() + 60.0
+        # 进入退避：把这个台的下次可试时刻拨到未来
+        relay._next_try["cctv1"] = time.time() + 60.0
         # 窗口过期（超过 _WINDOW_MAX_AGE）
         _expire(relay, seconds=20.0)
         fetches_before = relay.fetches

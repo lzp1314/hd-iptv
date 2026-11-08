@@ -483,9 +483,11 @@ async function checkUpdate() {
 }
 
 /* ---------------- 面板内播放 ---------------- */
-// HLS 直播天生滞后：服务端把上游那 3 片拼成 8 片窗口（约 40 秒），播放器落后
-// 3 片起步，所以「进度条从 0:18 走到 0:35」是窗口在往前滚，不是延迟越滚越大。
-// 这里显示真实的「距直播最新位置还差几秒」，并且落后太多时自动加速追回去。
+// HLS 直播天生滞后：服务端把上游那 3 片拼成 6 片窗口（约 30 秒），播放器从
+// 末尾往前 3 片起步（约 15 秒），所以进度条上的 0:17 是「窗口里的位置」，
+// 不是延迟在变大。这里显示真实的「距直播最新位置还差几秒」，落后太多会自动
+// 加速追回去。**liveSyncDurationCount 必须小于窗口片数**，否则播放器退回窗口
+// 开头、缓冲只剩零点几秒，播到尾巴必停。
 
 let hls = null;
 let playerSlug = "";
@@ -498,6 +500,8 @@ let lastTime = 0;
 let lastProgressAt = 0;
 let restartTimer = null;
 let restarts = 0;
+// 卡住时先原地重载清单（保住缓冲）的次数，画面一往前走就清零
+let softReloads = 0;
 
 function playerLatency() {
   const v = $("playerVideo");
@@ -538,6 +542,7 @@ function playerStats() {
   if (!v.paused && !v.seeking && v.currentTime > lastTime + 0.05) {
     lastTime = v.currentTime;
     lastProgressAt = now;
+    softReloads = 0;
   }
   const stuckMs = lastProgressAt ? now - lastProgressAt : 0;
   if (!v.paused && stuckMs > 3000) {
@@ -550,7 +555,17 @@ function playerStats() {
       ? "上游一直没给新分片，正在换票重连…"
       : "等上游给下一段——上游清单 5 秒才滚一片，稍等一下。";
   }
-  if (!v.paused && stuckMs > 12000 && restarts < 8) restartPlayer("画面停住了");
+  // 卡住先「原地重载清单」，别急着销毁播放器：服务端刚换完票的几秒里，
+  // 手里那几秒缓冲是唯一的救命稻草，一销毁就全丢了。连续多次救不回来才重开。
+  if (!v.paused && stuckMs > 24000 && restarts < 8) {
+    softReloads = 0;
+    restartPlayer("画面停住了");
+  } else if (!v.paused && stuckMs > 9000 && softReloads < 2) {
+    softReloads += 1;
+    if (hls) {
+      try { hls.startLoad(); } catch (_) { /* ignore */ }
+    }
+  }
 
   const badge = $("playerBadge");
   if (badge) {
@@ -573,6 +588,7 @@ function closePlayer() {
   }
   lastTime = 0;
   lastProgressAt = 0;
+  softReloads = 0;
   const v = $("playerVideo");
   try { v.pause(); } catch (_) { /* ignore */ }
   if (hls) {
@@ -624,7 +640,7 @@ function openPlayer(slug, name, keepRestarts) {
   $("playerBadge").hidden = true;
   if (!keepRestarts) {
     $("playerTip").textContent =
-      "直播流本身就比电视台晚 2~3 个分片（这台约 15 秒）。进度条上的 0:18 是「当前可播窗口里的位置」，不是延迟在变大。";
+      "直播流本身就比电视台晚 2~3 个分片（这台约 15 秒）。进度条上的 0:17 是「当前可播窗口里的位置」，不是延迟在变大。";
   }
   stopStats();
   statsTimer = setInterval(playerStats, 1000);
@@ -647,14 +663,17 @@ function openPlayer(slug, name, keepRestarts) {
     // 播放器会当成「返回得太快=没新东西」立刻再问一次，几十秒就把本机的
     // 上游配额抽干，接着清单拿不到、画面停在播完的那十几秒上。
     lowLatencyMode: false,
-    // 服务端把上游那 3 片拼成了 18 片（约 90 秒）的窗口。目标落后 8 片
-    // （约 40 秒），手里攥着 50 秒余量——上游限流断个几十秒也不怕。
-    // 落后超过 12 片（60 秒）才加速追，别让延迟一路滚下去。
-    liveSyncDurationCount: 8,
-    liveMaxLatencyDurationCount: 12,
-    maxLiveSyncPlaybackRate: 1.5,
-    backBufferLength: 30,
-    maxBufferLength: 90,
+    // 服务端的窗口是 6 片（约 30 秒），播放器从这里往后数 3 片起步，等于落后
+    // 直播约 15 秒、手里还攥着 15 秒余量。**这个数必须小于窗口片数**：以前写的
+    // 是 8，而窗口只有 6 片，hls.js 找不到「倒数第 8 片」，只好退回窗口开头，
+    // 于是进度条一直停在 0:17 的窗口里、缓冲只有零点几秒，播到尾巴必停。
+    liveSyncDurationCount: 3,
+    // 落后超过 6 片（30 秒）就硬跳回直播边缘，别让延迟一路滚下去
+    liveMaxLatencyDurationCount: 6,
+    maxLiveSyncPlaybackRate: 1.1,
+    backBufferLength: 20,
+    // 窗口只有 30 秒，要 90 秒的缓冲等于永远填不满，只会让播放器贴着边缘追
+    maxBufferLength: 24,
     manifestLoadingTimeOut: 15000,
     fragLoadingTimeOut: 20000,
     // 上游时不时回一两次 403/超时，重试要够多，别一次就判死

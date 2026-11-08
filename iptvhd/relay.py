@@ -211,19 +211,26 @@ _FROZEN_AFTER = 10.0       # 分片序号这么久没往前滚，判定上游冻
 _PLAYING_MIN_GAP = 1.0
 _PLAYING_WINDOW = 15.0
 
-# 上游主备 CDN 全 403 = 本机出口正被限流。这个台冷却 30 秒、一枪不打上游：
-# 播放器失败后是毫秒级连环重试，每次重试都换票 + 试主备，只会把限流越拖越久。
-_FORBIDDEN_COOLDOWN = 30.0
+# 403 之后的重试节奏（秒）：先静默一下、换张新票再取，逐次拉长。
+#
+# **这是「播十几秒就定住」的直接原因，改这里要小心。** 实测（NAS 上连看 6 分钟）：
+# 央视频的媒体清单 URL 只能用几次，同一个地址连取 2~5 次就开始回 403；换一张新票
+# 立刻又正常。这本来是几秒钟就能自愈的小抖动，但旧代码按「冷却 30 秒、期间一枪
+# 不打上游」处理——窗口里 5 片分片只有约 30 秒，冷却期刚好把画面耗干，于是
+# 「播十几秒停住、再等十几秒、跳一下」。30 秒的冷却比 403 本身伤害大得多。
+#
+# 现在第一轮只安静 2 秒，窗口里的分片足够撑过去，播放器基本感觉不到。
+_RETRY_DELAYS = (2.0, 5.0, 10.0, 18.0)
 
 # 官方回「应版权方要求，暂停提供直播信号」后，这个台冷却一会儿再问。
 # 版权按节目走，一档节目没版权时整档都是这句话，换节目才可能恢复。
 _BLACKOUT_COOLDOWN = 180.0
 _BLACKOUT = "版权"
 
-# 换票预算：整台实例每分钟最多换这么多张票（只管「冷启动」，续播不受限）。
-# 一个人换台怎么也到不了一分钟 20 个新台，而把六十多个公开频道扫一遍会在第
-# 21 个被拦住——那正是把出口打进限流的典型动作。桶空时本地直接回错，不打上游。
-_TICKET_BUDGET = 20
+# 换票预算：整台实例每分钟最多换这么多张票（只管「冷启动」和「403 换票重取」，
+# 抱着旧地址续播不计）。一个台正常播放每分钟只换 1~2 张；被拒时重取一次算一张。
+# 把六十多个公开频道扫一遍会在第 31 个被拦住——那正是把出口打进限流的典型动作。
+_TICKET_BUDGET = 30
 _TICKET_WINDOW = 60.0
 
 
@@ -357,6 +364,12 @@ class _Window:
         if longest > 0:
             out.append(f"#EXT-X-TARGETDURATION:{math.ceil(longest)}")
         out.append(f"#EXT-X-MEDIA-SEQUENCE:{max(0, self.seq0)}")
+        # 告诉播放器「从末尾往前数 3 片开始播」。窗口是 6 片，不写这一行的话
+        # VLC / 观屿这类外挂播放器会从窗口最前面开始，等于凭空多落后 15 秒；
+        # hls.js 自己有 liveSyncDurationCount，会忽略这行。
+        tail = sum(seg[0] for seg in self.segs[-3:])
+        if len(self.segs) > 3 and tail > 0:
+            out.append(f"#EXT-X-START:TIME-OFFSET={-round(tail, 1)}")
         for duration, uri, stamp, discontinuity in self.segs:
             if discontinuity:
                 out.append("#EXT-X-DISCONTINUITY")
@@ -411,7 +424,9 @@ class Relay:
         self._stale_max = stale_max
         self._lock = threading.Lock()
         self._cache: dict[str, tuple[float, str, str]] = {}   # slug -> (时间, 地址, UA)
-        self._failed: dict[str, float] = {}                   # slug -> 上次换地址失败的时间
+        # 最近一次失败的时刻。**只做诊断**，调度看的是下面的 _next_try：
+        # 「失败过」不代表「现在不能试」，这行区别是这一版的核心。
+        self._failed: dict[str, float] = {}
         self._errors: dict[str, str] = {}                     # slug -> 最近一次错误
         self._playlists: dict[str, tuple[float, str, int]] = {}  # 旧版缓存，保留给 stats 兼容
         self._flights: dict[str, threading.Lock] = {}         # slug -> 拉清单的去重锁
@@ -429,8 +444,11 @@ class Relay:
         # 每个台上一次请求时刻。用来判断「真的有播放器在看」：两次请求间隔
         # 落在 (_PLAYING_MIN_GAP, _PLAYING_WINDOW] 才算，扫台碰不到这个区间。
         self._hits: dict[str, float] = {}
-        # 这个台被上游拒了（主备全 403）→ 冷却到此为止，期间一枪不打上游。
-        self._forbidden_by_slug: dict[str, float] = {}
+        # 这个台下次可以再敲上游的时刻。403 后按 ``_RETRY_DELAYS`` 逐次拉长，
+        # 但只算「几秒级」——以前是 30 秒，窗口里的分片刚好被耗干。
+        self._next_try: dict[str, float] = {}
+        # 这个台连续 403 了几次。成功取到清单就清零，决定下一次退避多久。
+        self._retry_hits: dict[str, int] = {}
         # 这个台正「应版权方要求停播」→ 冷却到此为止，期间本地直接回同一句话。
         self._blackout: dict[str, float] = {}
         # 换票时刻（只留最近一分钟）：整台实例的取票预算，见 _take_ticket。
@@ -441,13 +459,10 @@ class Relay:
         self._notify = None                                   # 日志出口，由 service 接上
         self.failures = 0                                     # 累计失败次数
         self.stale_served = 0                                 # 用旧清单兜住的次数
-        # 出口级限流：上游按 IP 限流，一旦被限，所有频道会一起 403。
-        # 这时继续换票只会把限流拖得更长，所以进入「退避」：后台预取先停手，
-        # 让上游的计数缓一缓；退避时间随连续 403 指数拉长（上限 60 秒），
-        # 恢复后自动回落到正常节奏。播放器同步取仍允许，只是拿不到时软着陆重试。
-        self._forbidden_hits = 0
+        # 面板上「出口退避」那一格的数字，跟着按台的退避一起动。
+        # **只给面板看，不再参与调度**：以前它会让一个台被拒就停掉所有台的
+        # 后台刷新，等于别人一个坏台害你看不了 CCTV-1。
         self._forbidden_until = 0.0
-        self._backoff_base = 6.0    # 首次退避时长，之后翻倍
         # 出口预算（令牌桶）：正常播放每个台 5 秒才要一次清单，很闲；但播放器
         # 刷新订阅、检测可用性时会几十秒内把每个台的 /live/xxx.m3u8 全 GET 一遍，
         # 一次几十个请求打上去，正好撞上游的按 IP 限频——被限之后连正在看的人
@@ -532,8 +547,9 @@ class Relay:
         now = time.time()
         with self._lock:
             hit = self._cache.get(slug)
-            cooling = now - self._failed.get(slug, 0.0) < self._retry_gap
-            slug_blocked = now < self._forbidden_by_slug.get(slug, 0.0)
+            # 「这个台下次可以再敲」的时刻。注意它只有几秒（见 _RETRY_DELAYS），
+            # 不再是 30 秒——那 30 秒恰好是画面被耗干的时间。
+            retry_at = self._next_try.get(slug, 0.0)
             blackout_until = self._blackout.get(slug, 0.0)
 
         if blackout_until > now:
@@ -548,15 +564,9 @@ class Relay:
                 return hit[1], hit[2]
             fresh = True
 
-        if slug_blocked:
-            # 这个台的主备 CDN 刚刚全都 403：本机出口正在被它限流。播放器失败后
-            # 是毫秒级连环重试，每一次都换票 + 试主备，只会把限流越拖越久。
-            if hit:
-                return hit[1], hit[2]
-            raise RelayError("本台线路暂时受限，几秒后自动重试")
-
-        if cooling:
-            # 冷却期内不再敲门：有旧地址就继续用，没有就把上次的错抛出去
+        if retry_at > now and not fresh:
+            # 刚被上游拒过，退避期还没到点：手里有旧地址就继续用（播放器那边
+            # 的窗口还在放），没有就把上次的错抛出去。
             if hit:
                 return hit[1], hit[2]
             raise RelayError(self._errors.get(slug, "上游暂时不可用，稍后自动重试"))
@@ -583,6 +593,12 @@ class Relay:
                 # 失败缓存，重试不会失控。
                 if "DNS" not in message and "解析" not in message:
                     self._failed[slug] = now
+                    # 取票接口本身失败（不是分发到 CDN 之后 403）：4 秒内别反复敲。
+                    # 比原来的 20 秒短得多。**DNS 解析失败不设退避**——那一个字节
+                    # 都没发到上游，挡它只会让用户点一次黑屏、再点还是同一句错。
+                    self._next_try[slug] = max(
+                        self._next_try.get(slug, 0.0), now + min(self._retry_gap, 4.0)
+                    )
                 self._errors[slug] = message
                 self.failures += 1
                 stale = self._cache.get(slug)
@@ -615,7 +631,8 @@ class Relay:
             self._stuck_note.pop(slug, None)
             self._reticket_at.pop(slug, None)
             self._hits.pop(slug, None)
-            self._forbidden_by_slug.pop(slug, None)
+            self._next_try.pop(slug, None)
+            self._retry_hits.pop(slug, None)
             self._blackout.pop(slug, None)
             self._refreshing.discard(slug)
             for key in [k for k in self._playlists if k.endswith(f"|{slug}")]:
@@ -656,9 +673,8 @@ class Relay:
         播放器立刻跳到下一个频道。上游的 403 大多是 IP 级限流，换个地址也
         一样被拒，留着旧地址反而能继续用。
 
-        403 分两层：**按台**冷却 30 秒（这个台别再来敲门），同时**全局**指数退避
-        （整条出口可能都被限了，后台预取先停手）。只做全局会让一个坏台拖累所有台，
-        只做按台又挡不住出口级的限流。
+        403 只做「几秒级」的退避，不再整台冷却 30 秒。原因见 ``_RETRY_DELAYS``：
+        画面能撑住的时间就是窗口里那几片，冷却得比它久，一定会定住。
         """
         now = time.time()
         with self._lock:
@@ -666,17 +682,15 @@ class Relay:
             self._errors[slug] = message
             self.failures += 1
             if "403" in message:
-                # 主备 CDN 都拒了才走到这里：这个台先冷却，期间本地直接回错，
-                # 不再为它的每次重试换票 + 试主备（那正是把限流越拖越久的做法）。
-                self._forbidden_by_slug[slug] = now + _FORBIDDEN_COOLDOWN
-                # 全局退避：第 1 次 6 秒，之后翻倍（12 / 24 / 30 封顶）。只影响
-                # 后台预取，播放器同步取照旧，只是拿不到时软着陆用旧清单顶着。
-                self._forbidden_hits += 1
-                self._forbidden_until = now + min(
-                    self._backoff_base * (2 ** (self._forbidden_hits - 1)), 30.0
-                )
+                hits = self._retry_hits.get(slug, 0)
+                self._retry_hits[slug] = hits + 1
+                delay = _RETRY_DELAYS[min(hits, len(_RETRY_DELAYS) - 1)]
+                self._next_try[slug] = now + delay
+                # 面板上那一格「出口退避」只用来告诉人「现在在等」，跟着按台
+                # 的退避走；不再让它去挡别的台的同步取（那只伤及无辜）。
+                self._forbidden_until = max(self._forbidden_until, now + delay)
             else:
-                self._forbidden_hits = 0
+                self._retry_hits.pop(slug, None)
 
     def stats(self) -> dict:
         """给面板看的简况。"""
@@ -686,7 +700,7 @@ class Relay:
             playlists = {k: round(now - v.at, 1) for k, v in self._windows.items()}
             playlists.update({k: round(now - v[0], 1) for k, v in self._raw.items()})
             active = sorted(self._active)
-            cooling = {k: round(v - now) for k, v in self._forbidden_by_slug.items() if v > now}
+            cooling = {k: round(v - now, 1) for k, v in self._next_try.items() if v > now}
             blackout = {k: round(v - now) for k, v in self._blackout.items() if v > now}
             tickets = len(self._ticket_times)
         seg = self._segments.stats()
@@ -705,7 +719,7 @@ class Relay:
             "throttled": self.throttled,
             # 出口被限流时，没缓存的台会被直接挡回来，面板据此提示等一下
             "blocked_for": max(0, round(self._forbidden_until - now)),
-            # 按台冷却（秒）：主备 CDN 全 403 的台，期间一枪不打上游
+            # 按台退避（秒）：这个台刚 403，过几秒再敲。数字很小是正常的
             "cooling": cooling,
             # 版权停播冷却（秒）：官方明确回「暂停提供直播信号」
             "blackout": blackout,
@@ -799,7 +813,7 @@ class Relay:
         with self._lock:
             window = self._windows.get(slug)
             raw = self._raw.get(slug)
-            backing_off = now < self._forbidden_until
+            backing_off = now < self._next_try.get(slug, 0.0)
         self._ensure_ticker()
 
         # 新鲜的：直接发。
@@ -924,6 +938,9 @@ class Relay:
                 window = _Window()
                 self._windows[slug] = window
             moved = window.feed(head, seq, segs, now)
+            # 取到了就清零：退避次数只统计「连续」失败，恢复后立刻回到 2 秒起。
+            self._retry_hits.pop(slug, None)
+            self._next_try.pop(slug, None)
         if not moved:
             self._note_frozen(slug, window, now)
 
@@ -988,9 +1005,11 @@ class Relay:
 
     def _prefetch(self, slug: str) -> None:
         """替正在观看的播放器去上游要一份新清单。所有调用方都不用等它。"""
-        # 退避期间停手：再敲只会把限流拖得更长。播放器手上的窗口够它再撑几十秒。
+        # 退避只挡这个台，而且只有几秒（见 _RETRY_DELAYS）。以前这里用的是
+        # 「整条出口退避」，一个台被拒就把所有台的后台刷新一起停掉——那正是
+        # 一个人换台失败、全家跟着卡的原因。
         with self._lock:
-            backing_off = time.time() < self._forbidden_until
+            backing_off = time.time() < self._next_try.get(slug, 0.0)
         if backing_off:
             return
         if not self._take_token(0):
@@ -1039,20 +1058,21 @@ class Relay:
         为什么不在这里顺手改写：同一个台可能同时被内网和外网访问，改写结果
         依赖对外地址；存原文、发的时候再改写，一份缓存就够所有人用。
         """
-        # 这个台刚被主备 CDN 全 403：冷却期内一枪不打上游。``upstream()`` 在有旧
-        # 地址时会「照旧返回」，光靠它挡不住——请求照样会打到上游再被拒一次，
-        # 播放器的毫秒级重试叠上来就是一片 403。这里必须直接拦在取清单之前。
+        # 这个台刚被拒：退避期内一枪不打上游。``upstream()`` 在有旧地址时会
+        # 「照旧返回」，光靠它挡不住——请求照样会打到上游再被拒一次，播放器的
+        # 毫秒级重试叠上来就是一片 403。这里必须直接拦在取清单之前。
         with self._lock:
-            cooling_channel = time.time() < self._forbidden_by_slug.get(slug, 0.0)
-        if cooling_channel:
+            cooling_channel = time.time() < self._next_try.get(slug, 0.0)
+        if cooling_channel and not fresh:
             raise RelayError("本台线路暂时受限，几秒后自动重试")
 
         url, ua = self.upstream(slug, fresh=fresh)
         status, _, body = self._fetch(url, ua)
         if status in _GONE:
-            # 地址失效或被限流：换一个新地址再试一次。中间停半秒——
-            # 403 多半是出口级限频，连着两次贴脸请求只会被拒得更狠。
-            time.sleep(0.4)
+            # 同一个清单地址连取几次就会被 CDN 拒（实测 2~5 次后开始 403，
+            # 换张新票立刻恢复）。这里先安静 1 秒再换票重取——1 秒是实测能
+            # 把「刚被拒」的窗口熬过去的最短时间，再短只会被拒得一样干脆。
+            time.sleep(1.0)
             url, ua = self.upstream(slug, fresh=True)
             status, _, body = self._fetch(url, ua)
         if status != 200 or not body:
