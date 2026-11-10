@@ -117,8 +117,10 @@ class Collector:
         raise NotImplementedError
 
     def _tag(self, streams: list[Stream]) -> list[Stream]:
+        trusted = bool(self.config.get("trust"))
         for s in streams:
             s.source = self.name
+            s.trusted = trusted
         return streams
 
 
@@ -173,9 +175,16 @@ class LocalCollector(Collector):
     kind = "local"
 
     def collect(self, client: HttpClient) -> list[Stream]:
-        path = Path(self.config.get("path", ""))
+        raw = str(self.config.get("path", "") or "")
+        if not raw:
+            return []
+        path = Path(raw)
         if not path.is_absolute():
-            path = Path.cwd() / path
+            # 相对路径先按当前工作目录找，找不到再按项目根目录找：从宿主机
+            # 跑（cwd=项目根）和从容器里跑（cwd=/app）都要能对上同一份文件
+            here = Path(__file__).resolve().parent.parent
+            path = next((p for p in (Path.cwd() / raw, here / raw) if p.exists()),
+                        Path.cwd() / raw)
         files: list[Path] = []
         if path.is_dir():
             files = sorted(p for p in path.iterdir() if p.suffix.lower() in {".m3u", ".m3u8", ".txt"})

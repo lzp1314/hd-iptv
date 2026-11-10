@@ -47,8 +47,8 @@ class _Fetch:
         self.calls += 1
         body = self.bodies[min(self.calls - 1, len(self.bodies) - 1)]
         if isinstance(body, int):
-            return body, {}, b""
-        return 200, {}, body
+            return body, {}, b"", url
+        return 200, {}, body, url
 
 
 def _relay(bodies, resolver=None):

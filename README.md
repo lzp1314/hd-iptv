@@ -2,7 +2,7 @@
 
 **自部署的 IPTV 播放列表管理工具：整理、测速、聚合与分发节目清单，供个人与家庭内网使用。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![Version](https://img.shields.io/badge/version-0.8.1-blue.svg)](https://github.com/lzp1314/hd-iptv)
+[![Version](https://img.shields.io/badge/version-0.9.13-blue.svg)](https://github.com/lzp1314/hd-iptv)
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -32,12 +32,45 @@ docker compose up -d --build
 | `OUTPUT_DIR` | `./output` | 结果目录，建议写绝对路径 |
 | `PUBLIC_URL` | 空 | 对外地址。留空则按访问时的域名端口自动判断，套反代不用填 |
 | `HDIPTV_INTERVAL_HOURS` | `24` | 自动刷新间隔（小时），0 关闭 |
-| `HDIPTV_MIN_HEIGHT` / `HDIPTV_MAX_HEIGHT` | `720` / `1080` | 画质区间 |
+| `HDIPTV_MIN_HEIGHT` / `HDIPTV_MAX_HEIGHT` | `720` / `2160` | 画质区间 |
 | `HDIPTV_PLAY_MODE` | `direct` | `direct` 分片直连 CDN；`proxy` 分片经本机转发 |
 | `HDIPTV_RELAY_CACHE_MB` | `96` | 分片缓存（MB），仅 `proxy` 模式 |
 
 端口、刷新间隔、播放方式、对外地址都可以直接在面板上改，改完立刻生效，
 不用重启容器。
+
+## 运营商官方源（本省宽带的 IPTV 边缘）
+
+公开聚合源的通病是「能用但随时会坏」：转发站会夹广告、会限速、会突然改成购物
+频道。真正稳的是自家宽带的 IPTV 直播边缘——不换票、不夹广告、1080P 七兆多、
+余量三四倍。
+
+项目自带一份湖北移动（武汉）的央视 + 卫视清单，**默认启用**，排在所有公开源
+前面：
+
+```
+config/sources.toml -> [[source]] name = "运营商官方源"  type = "local"
+                       path = "iptvhd/defaults/hubei-mobile.m3u"  trust = true
+```
+
+用别的省份 / 别的运营商：把 `path` 换成自己的 m3u 就行，`trust = true` 保留。
+
+有三件事必须知道：
+
+1. **它会只下发 IPv6 边缘。** 实测（2026-11，武汉移动）：清单地址在
+   `ztecdn.hb.chinamobile.com:6060`，302 之后落到 `[2409:8087:...]:6610`；就算
+   强制 IPv4 取，302 还是往 IPv6 跳。所以这类源**一律由本机中转**（清单和分片
+   都过 NAS），播放器有没有 IPv6 都无所谓——这条是自动的，`mode = "direct"`
+   也不用改。
+2. **不能并发探测。** 一口气几十条清单请求，CDN 不回 403，而是把本机打进
+   「302 无限循环」，之后连单条都取不到。所以带 `trust` 的源走独立的串行慢探
+   （`probe.official_gap`，默认 1.2 秒一条），失败率过半就整批旁路，等下一轮。
+3. **账号是共享的。** 清单里的 `170000001115` 来自公开列表，别人也在用；对方
+   跑批量任务时这路会一起抖。真要紧的话换成自己机顶盒里的账号串。
+
+另外 0.9.13 起会自动剔除「一址多台」的广告源：探测时记录每条流**跟随跳转后的
+最终地址**，凡是三个以上的不同频道落到同一个地址（央视那批 720P 全都 302 到
+`/applive/mkt.m3u8`，同一路购物直播），整批丢弃。
 
 ## 飞牛 fnOS
 

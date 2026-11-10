@@ -48,7 +48,12 @@ from collections import OrderedDict, deque
 from .net import dns_stats
 
 # 允许中转的域名后缀。只放行上游自己的 CDN，不做通用代理。
-ALLOW_SUFFIX = (".cctv.cn", ".cctv.com", ".ysp.cctv.cn", ".cztv.com", ".cztvcloud.com")
+ALLOW_SUFFIX = (".cctv.cn", ".cctv.com", ".ysp.cctv.cn", ".cztv.com", ".cztvcloud.com",
+                ".chinamobile.com")
+
+# 运营商 IPTV 直播边缘的 IPv6 段（移动 2409 / 联通 2408 / 电信 240e）。这类地址
+# 只能按 IP 放行：302 之后上游给的就是裸 IPv6，没有任何域名可以拿去比后缀。
+_CARRIER_V6 = ("2409", "2408", "240e")
 
 # m3u8 里的 URI 属性（#EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等）
 _URI_ATTR = re.compile(r'URI="([^"]+)"')
@@ -66,8 +71,28 @@ _RETRY_PAUSE = 0.25
 _REFERER = "https://live.cctv.cn/"
 
 
+def _ipv6_host(url: str) -> str:
+    """地址里的主机是 IPv6 字面量就返回它，否则返回空串。"""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").strip("[]").lower()
+    return host if ":" in host else ""
+
+
+def _carrier_v6(url: str) -> bool:
+    """是不是运营商的 IPv6 直播边缘。"""
+    host = _ipv6_host(url)
+    return bool(host) and host.split(":", 1)[0] in _CARRIER_V6
+
+
 def allowed(url: str) -> bool:
     """目标地址是否在放行名单内。"""
+    if _carrier_v6(url):
+        # 运营商 IPTV 边缘只有 IP、没有域名，只能按段放行：限死在 2409/2408/240e，
+        # 不然 /relay/<slug>/p/<token> 就成了任意地址都能借道的中转口。
+        return True
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
@@ -97,6 +122,40 @@ def decode(token: str) -> str:
         return base64.urlsafe_b64decode(token + pad).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return ""
+
+
+# 静态源的 slug 前缀：``o:`` + base64url(上游地址)。
+#
+# 为什么把地址编进 slug 而不是维护一张「slug → 地址」的注册表：中转层的一切
+# （分片窗口、预取节奏、失效清退）都按 slug 记账，注册表就得跟着结果文件一起
+# 重建，进程重启或换一份结果就可能对不上。编进 slug 之后，一个 slug 自带全部
+# 信息，重启、重跑、多进程都一致。地址本身是固定的（运营商源不换票），所以
+# slug 也固定，窗口能跨更新复用。
+#
+# 需要这层的只有「上游落在 IPv6 上」的源：官方 IPTV 边缘只发 IPv6 单播，而
+# 播放器多半没有 IPv6；让清单和分片都从本机过一手，播放端就与 IPv6 无关了。
+STATIC_PREFIX = "o:"
+
+# 这类源要的 UA（实测移动的 IPTV 边缘认 okhttp，浏览器 UA 也放行，但用
+# 机顶盒同款更稳）
+_STATIC_UA = "okhttp/3.12.0"
+
+
+def needs_relay(url: str) -> bool:
+    """这个上游地址是否必须由本机转发（落在 IPv6 上）。"""
+    return bool(_ipv6_host(url))
+
+
+def static_slug(url: str) -> str:
+    """为静态源生成 slug。"""
+    return STATIC_PREFIX + encode(url)
+
+
+def static_url(slug: str) -> str:
+    """从静态 slug 还原上游地址；不是静态 slug 返回空串。"""
+    if not slug.startswith(STATIC_PREFIX):
+        return ""
+    return decode(slug[len(STATIC_PREFIX):])
 
 
 def parse_range(spec: str, size: int) -> tuple[int, int] | None:
@@ -337,9 +396,17 @@ class _Window:
 
         added = False
         for index, seg in enumerate(segs):
-            if seq + index >= have:
+            pos = seq + index - self.seq0
+            if pos >= len(self.segs):
                 self.segs.append(seg)
                 added = True
+            elif pos >= 0:
+                old = self.segs[pos]
+                if seg[1] != old[1]:
+                    # 同一片、新地址。运营商 IPTV 的每份清单都带一个新的
+                    # ``IASHttpSessionId``，会话过期后旧地址就 403。窗口里留旧
+                    # 地址，播放器补缓冲时正好撞上失效的那份，看着像「随机卡住」。
+                    self.segs[pos] = (old[0], seg[1], seg[2] or old[2], old[3])
         if added:
             self.moved_at = now
         while len(self.segs) > _WINDOW_SEGMENTS:
@@ -545,6 +612,14 @@ class Relay:
         3. 换票预算用完 → 本地直接回错，别把出口 IP 打进限流。
         """
         now = time.time()
+
+        # 静态源（地址直接编在 slug 里）：没有票要换、没有版权停播要判，也不该
+        # 占「换票预算」——直接返回，一个接口请求都不打。放在最前面，是为了让它
+        # 完全不碰下面那套给央视频设计的退避 / 预算逻辑。
+        static = static_url(slug)
+        if static:
+            return static, _STATIC_UA
+
         with self._lock:
             hit = self._cache.get(slug)
             # 「这个台下次可以再敲」的时刻。注意它只有几秒（见 _RETRY_DELAYS），
@@ -731,15 +806,25 @@ class Relay:
             "dns": dns_stats(),
         }
 
-    def _fetch(self, url: str, ua: str, *, timeout: float | None = None) -> tuple[int, dict, bytes]:
+    def _fetch(
+        self, url: str, ua: str, *, timeout: float | None = None
+    ) -> tuple[int, dict, bytes, str]:
+        """取一个上游地址，返回 ``(状态码, 响应头, 正文, 跟随跳转后的最终地址)``。
+
+        最终地址是必须的，不是顺手带的：运营商 IPTV 的清单本身在
+        ``ztecdn.hb.chinamobile.com:6060``，302 之后才落到真正的边缘
+        （``[2409:8087:...]:6610``），而清单里的分片是**相对路径**。拿原始地址
+        当基准拼出来的分片地址还挂在原域名上，播放器再跟一次 302 才到 IPv6——
+        没有 IPv6 的盒子在这一步就直接失败。基准必须是最终地址。
+        """
         # Referer 不能省：官方 CDN 对缺 Referer 的请求更容易回 403
         headers = {"User-Agent": ua or "qqlive", "Referer": _REFERER}
         request = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=timeout or self._timeout) as resp:
-                return resp.status, dict(resp.headers), resp.read()
+                return resp.status, dict(resp.headers), resp.read(), resp.geturl()
         except urllib.error.HTTPError as exc:
-            return exc.code, dict(exc.headers or {}), exc.read() or b""
+            return exc.code, dict(exc.headers or {}), exc.read() or b"", exc.geturl() or url
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RelayError(f"上游不可达：{exc}") from exc
 
@@ -758,8 +843,14 @@ class Relay:
 
         direct 模式直接给上游绝对地址（分片由播放器直连 CDN，最流畅）；
         proxy 模式换成 ``/relay/...``，由本机转手。
+
+        例外：**上游落在 IPv6 上的，direct 模式也要转手**。运营商 IPTV 的直播
+        边缘只下发 IPv6 单播地址（实测移动湖北：强制 IPv4 取清单，302 还是往
+        ``[2409:8087:...]`` 跳），而电视盒子、老播放器一大半没有 IPv6——把这种
+        地址原样写进清单，播放器连不上就报「格式不支持」。本机有这么一路 IPv6
+        出口就够了，让分片从本机过一手，播放端有没有 IPv6 都无所谓。
         """
-        if self._mode == "direct":
+        if self._mode == "direct" and not _ipv6_host(url):
             return url
         return self.wrap(slug, url, prefix)
 
@@ -1067,14 +1158,14 @@ class Relay:
             raise RelayError("本台线路暂时受限，几秒后自动重试")
 
         url, ua = self.upstream(slug, fresh=fresh)
-        status, _, body = self._fetch(url, ua)
+        status, _, body, final = self._fetch(url, ua)
         if status in _GONE:
             # 同一个清单地址连取几次就会被 CDN 拒（实测 2~5 次后开始 403，
             # 换张新票立刻恢复）。这里先安静 1 秒再换票重取——1 秒是实测能
             # 把「刚被拒」的窗口熬过去的最短时间，再短只会被拒得一样干脆。
             time.sleep(1.0)
             url, ua = self.upstream(slug, fresh=True)
-            status, _, body = self._fetch(url, ua)
+            status, _, body, final = self._fetch(url, ua)
         if status != 200 or not body:
             self._mark_failed(slug, f"上游返回 {status}")
             raise RelayError(f"上游返回 {status}，取不到播放清单")
@@ -1083,7 +1174,9 @@ class Relay:
         if "#EXTM3U" not in text:
             self._mark_failed(slug, "上游返回的不是 m3u8 清单")
             raise RelayError("上游返回的不是 m3u8 清单")
-        return text, url
+        # 基准用**跳转之后**的地址：清单里的分片多是相对路径，拿原始地址拼会把
+        # 播放器又指回那个还在下发 302 的域名（运营商 IPTV 就是这样）。
+        return text, final or url
 
     def _fetch_playlist(self, slug: str, prefix: str = "", *, fresh: bool = False) -> str:
         """取一份并改写，不经过窗口缓存。给测试和单次诊断用。"""
@@ -1118,11 +1211,11 @@ class Relay:
         except RelayError:
             ua = "qqlive"
 
-        status, headers, body = self._fetch(url, ua, timeout=self._seg_timeout)
+        status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
         if status in _GONE:
             # 上游偶发拒绝很常见，稍等一下再试一次，通常就过了
             time.sleep(_RETRY_PAUSE)
-            status, headers, body = self._fetch(url, ua, timeout=self._seg_timeout)
+            status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
         if status in _GONE:
             self._mark_failed(slug, f"分片被拒（{status}）")
             raise RelayError(f"上游返回 {status}")
@@ -1133,7 +1226,7 @@ class Relay:
         # 拿着上游地址直连，又回到被 UA 拒绝的老问题
         if _is_playlist(url, headers, body):
             text = body.decode("utf-8", "replace")
-            rewritten = self._rewrite(text, url, slug, prefix).encode("utf-8")
+            rewritten = self._rewrite(text, final or url, slug, prefix).encode("utf-8")
             return 200, "application/vnd.apple.mpegurl; charset=utf-8", rewritten, {}
 
         ctype = headers.get("Content-Type") or _guess_type(url)

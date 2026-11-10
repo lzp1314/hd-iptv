@@ -6,6 +6,7 @@ import json
 import os
 import time
 import tomllib
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -15,7 +16,8 @@ from .collectors import Collector, SubscriptionCollector, build_collectors, pars
 from .models import Channel, RunReport, Stream, need_mbps
 from .net import build_client
 from .normalize import ChannelMatcher, load_channels
-from .probe import probe_many
+from .probe import probe_gentle, probe_many
+from .relay import needs_relay, static_slug
 from .settings import Settings, upgrade_channels, upgrade_sources
 
 Logger = Callable[[str], None]
@@ -269,6 +271,144 @@ def _filter(streams: list[Stream], settings: Settings) -> list[Stream]:
     return kept
 
 
+# 同一个最终地址上出现几个不同的台，就判定为广告农场 / 占位源。
+# 取 3 而不是 2：两个台偶尔撞一次可能是源作者写错，三个以上只能是故意的。
+_SHARED_ENDPOINT_CHANNELS = 3
+
+
+def _endpoint(url: str) -> str:
+    """把地址削成 ``scheme://host/path``，丢掉 query。
+
+    必须丢 query：广告农场给每个频道发的签到参数都不一样（``?app=cdnhk08``、
+    ``?app=cdnhk09``），比整条 URL 一条都比不中。
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    return f"{parts.scheme}://{parts.netloc}{parts.path}".lower()
+
+
+def _drop_shared_endpoints(streams: list[Stream], log: Logger) -> int:
+    """把「好几个不同的台落到同一个最终地址」的源整批剔除。
+
+    央视那批 720P 广告源就是这么漏进来的：原始地址各不相同
+    （``/cdnlive/cctv4.m3u8``、``/cdnlive/cctv5.m3u8`` …），按 URL 去重一条都抓
+    不到，但它们 302 之后全落到同一个 ``/applive/mkt.m3u8``——同一路购物直播。
+    一个真实频道不可能跟别的台共用一路流，所以「一址多台」就是广告/占位的指纹。
+
+    只比对 302 之后的**最终**地址，不认任何写死的域名关键字：换个广告农场、
+    换套参数也照样能抓出来。
+    """
+    endpoints: dict[str, set[str]] = {}
+    for s in streams:
+        if s.final_url:
+            endpoints.setdefault(_endpoint(s.final_url), set()).add(s.channel)
+
+    bad = {ep for ep, names in endpoints.items() if len(names) >= _SHARED_ENDPOINT_CHANNELS}
+    if not bad:
+        return 0
+
+    dropped = 0
+    for s in streams:
+        if s.final_url and _endpoint(s.final_url) in bad:
+            s.ok = False
+            s.error = "同一个地址被多个台共用（广告/占位源）"
+            dropped += 1
+    if dropped:
+        log(f"[剔除] {dropped} 条源落在同一个购物/占位地址上，已整批丢弃（{len(bad)} 个落点）")
+    return dropped
+
+
+def _probe_candidates(
+    candidates: list[Stream], client, settings: Settings, log: Logger
+) -> None:
+    """探测候选，分两拨打：聚合源并发，运营商官方源串行。
+
+    官方源（移动/电信 IPTV 的 ``1700xxxxxx`` 账号）按出口 IP 记账，并发几十条
+    清单请求就会被限成「302 无限循环」，之后连单条都取不到。所以两拨必须分开，
+    不能让 200 多条聚合源把它一起冲掉。
+    """
+    official = [s for s in candidates if s.trusted]
+    others = [s for s in candidates if not s.trusted]
+
+    if others:
+        log(
+            f"[探测] 开始并发探测 {len(others)} 条（并发 {settings.concurrency}，"
+            f"单条上限 {settings.probe_timeout:.0f}s，整批预算 {settings.probe_budget:.0f}s）"
+        )
+
+        def on_progress(done: int, total: int) -> None:
+            if done == total or done % max(1, total // 10) == 0:
+                log(f"[探测] {done}/{total}")
+
+        def on_stall(pending: int, seconds: float) -> None:
+            # 长尾阻塞的实时提示：以前面板停在「297/332」就再没动静，只能干等
+            log(f"! [探测] {pending} 条已 {seconds:.0f}s 没有返回（慢源，到点会丢弃）")
+
+        probe_many(
+            others,
+            client,
+            concurrency=settings.concurrency,
+            sample_bytes=settings.sample_bytes,
+            per_stream_timeout=settings.probe_timeout,
+            budget=settings.probe_budget,
+            on_progress=on_progress,
+            on_stall=on_stall,
+        )
+
+    if official:
+        try:
+            gap = float(settings.get("probe", "official_gap", 1.2))
+        except (TypeError, ValueError):
+            gap = 1.2
+        log(
+            f"[探测·官方源] {len(official)} 条串行慢探（每条间隔 {gap:.1f}s）"
+            "——这路一并发就会被 CDN 限成 302 死循环"
+        )
+
+        def on_official(done: int, total: int) -> None:
+            if done == total or done % 8 == 0:
+                log(f"[探测·官方源] {done}/{total}")
+
+        aborted = probe_gentle(
+            official,
+            client,
+            sample_bytes=settings.sample_bytes,
+            # 官方源是本省边缘，正常几毫秒就回；单条上限压到 10 秒，
+            # 免得 50 多个台里混进几条卡住的，把整轮拖成十几分钟
+            per_stream_timeout=min(settings.probe_timeout or 10.0, 10.0),
+            gap=gap,
+            on_progress=on_official,
+        )
+        if aborted:
+            log("! [探测·官方源] 失败率过半，判定账号已被限流，本轮整批旁路（下一轮再试）")
+
+
+def _route_official_through_relay(streams: list[Stream]) -> int:
+    """把「上游在 IPv6 上」的静态源改成走本机转发，返回改了几条。
+
+    运营商 IPTV 的边缘只下发 IPv6 单播地址。播放器（电视盒子、老版本 VLC）
+    一大半没有 IPv6，直连必报「格式不支持」——而 302 前的原始地址看着完全正常，
+    排查时最容易误判成播放器的问题。这类源一律由本机中转：清单和分片都过 NAS，
+    播放端有没有 IPv6 就无所谓了。
+
+    做法是把地址编进 slug（见 relay.static_slug），输出列表里就成了
+    ``/live/<slug>.m3u8``，中转层拿 slug 里的地址去取，不用注册表。
+
+    ``trusted`` 的源无条件走这条路，不等探测记下最终地址：探测被跳过、或者这
+    一轮只拿到 302 头没跟到底，都会漏掉，而漏掉的后果就是「这个台放不出来」。
+    """
+    routed = 0
+    for s in streams:
+        if s.slug or not s.url:
+            continue
+        if s.trusted or needs_relay(s.final_url or s.url):
+            s.slug = static_slug(s.url)
+            routed += 1
+    return routed
+
+
 def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     log = log or _noop
     report = RunReport(started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -322,39 +462,18 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     candidates = [s for group in by_channel.values() for s in group]
     report.probed = len(candidates)
     if candidates and bool(settings.get("probe", "enabled", True)):
-        log(
-            f"[探测] 开始并发探测 {len(candidates)} 条（并发 {settings.concurrency}，"
-            f"单条上限 {settings.probe_timeout:.0f}s，整批预算 {settings.probe_budget:.0f}s）"
-        )
-
-        def on_progress(done: int, total: int) -> None:
-            if done == total or done % max(1, total // 10) == 0:
-                log(f"[探测] {done}/{total}")
-
-        def on_stall(pending: int, seconds: float) -> None:
-            # 长尾阻塞的实时提示：以前面板停在「297/332」就再没动静，只能干等
-            log(f"! [探测] {pending} 条已 {seconds:.0f}s 没有返回（慢源，到点会丢弃）")
-
         client = build_client(
             user_agent=settings.user_agent,
             timeout=settings.timeout,
             retries=1,  # 探测阶段不做重试，靠并发量换速度
             proxy=settings.proxy,
         )
-        probe_many(
-            candidates,
-            client,
-            concurrency=settings.concurrency,
-            sample_bytes=settings.sample_bytes,
-            per_stream_timeout=settings.probe_timeout,
-            budget=settings.probe_budget,
-            on_progress=on_progress,
-            on_stall=on_stall,
-        )
+        _probe_candidates(candidates, client, settings, log)
     else:
         for s in candidates:
             s.ok = True
 
+    _drop_shared_endpoints(candidates, log)
     alive = _filter([s for s in candidates], settings)
     report.alive = len(alive)
 
@@ -371,6 +490,7 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     )
 
     kept_by_channel: dict[str, list[Stream]] = {}
+    _route_official_through_relay(alive)
     for s in alive:
         kept_by_channel.setdefault(s.channel, []).append(s)
 

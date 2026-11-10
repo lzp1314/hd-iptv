@@ -207,6 +207,10 @@ def _probe_one(
                 break
     stream.status = resp.status
     stream.delay_ms = resp.ttfb_ms
+    # 跟随跳转后的最终地址：几百条源里，广告农场和「一址多台」的占位源只有
+    # 比对最终落点才抓得出来（原始地址各不相同，按 URL 去重完全看不见）。
+    if resp.url:
+        stream.final_url = resp.url
 
     if resp.status not in _OK_STATUS:
         stream.ok = False
@@ -544,3 +548,55 @@ def probe_many(
 
     _verify_roll(items, client, concurrency)
     return items
+
+
+def probe_gentle(
+    streams: Iterable[Stream],
+    client: HttpClient,
+    *,
+    sample_bytes: int = 262144,
+    per_stream_timeout: float = 8.0,
+    gap: float = 1.2,
+    abort_ratio: float = 0.6,
+    min_tries: int = 8,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> bool:
+    """串行、留间隔地探测运营商官方源，返回是否因失败率过高提前收手。
+
+    这类源（移动/电信 IPTV 的 ``1700xxxxxx`` 账号）按出口 IP 记账：一口气并发
+    几十条清单请求，CDN 不会回 403，而是把本机打进「302 无限循环」——之后连单
+    条也取不到，只能等限频自然过期。所以这里一条一条来，中间留 ``gap`` 秒。
+
+    失败率超过 ``abort_ratio``（且已试够 ``min_tries`` 条）就整体收手：那基本
+    上就是整个账号被限了，继续打只会让限频窗口拖得更长。
+
+    也不做「清单是否在滚」的二次复核：那要为每条再等一轮分片时长，等于翻倍敲
+    上游；真冻住了，中转层自己会发现并换下一路。
+    """
+    items = list(streams)
+    total = len(items)
+    if not total:
+        return False
+
+    tried = failed = 0
+    for idx, stream in enumerate(items, 1):
+        deadline = time.monotonic() + per_stream_timeout if per_stream_timeout > 0 else None
+        try:
+            probe_one(stream, client, sample_bytes, deadline)
+        except Exception as exc:  # 单条探测出意外，不该把整批带下水
+            stream.ok = False
+            stream.error = str(exc) or "探测失败"
+        tried += 1
+        if not stream.ok:
+            failed += 1
+        if on_progress:
+            on_progress(idx, total)
+
+        if tried >= min_tries and failed / tried > abort_ratio:
+            for rest in items[idx:]:
+                rest.ok = False
+                rest.error = rest.error or "官方源疑似被限流，本轮跳过"
+            return True
+        if idx < total:
+            time.sleep(gap)
+    return False

@@ -56,7 +56,7 @@ class FakeRelay(Relay):
     def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001 - 测试替身
         self.asked.append(url)
         status, text = self.pages.get(url.rsplit("/", 1)[-1], (404, ""))
-        return status, {"Content-Type": "application/vnd.apple.mpegurl"}, text.encode()
+        return status, {"Content-Type": "application/vnd.apple.mpegurl"}, text.encode(), url
 
 
 class CountingRelay(Relay):
@@ -71,7 +71,7 @@ class CountingRelay(Relay):
         return "https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/index.m3u8", "qqlive"
 
     def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001
-        return 200, {"Content-Type": "application/vnd.apple.mpegurl"}, MASTER.encode()
+        return 200, {"Content-Type": "application/vnd.apple.mpegurl"}, MASTER.encode(), url
 
 
 class FlakyResolver(Relay):
@@ -96,8 +96,8 @@ class RescuingRelay(Relay):
     def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001
         self.attempts += 1
         if self.attempts == 1:
-            return 403, {}, b""
-        return 200, {"Content-Type": "video/mp2t"}, b"TS-DATA"
+            return 403, {}, b"", url
+        return 200, {"Content-Type": "video/mp2t"}, b"TS-DATA", url
 
 
 class RelayTest(unittest.TestCase):
@@ -299,7 +299,7 @@ class ToggleRelay(Relay):
         self.fetches += 1
         if self.down:
             raise RelayError("上游不可达：模拟断线")
-        return 200, {"Content-Type": "application/vnd.apple.mpegurl"}, MEDIA.encode()
+        return 200, {"Content-Type": "application/vnd.apple.mpegurl"}, MEDIA.encode(), url
 
 
 class SegRelay(Relay):
@@ -311,7 +311,7 @@ class SegRelay(Relay):
 
     def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001
         self.fetches += 1
-        return 200, {"Content-Type": "video/mp2t"}, b"0123456789"
+        return 200, {"Content-Type": "video/mp2t"}, b"0123456789", url
 
 
 class RelayStabilityTest(unittest.TestCase):

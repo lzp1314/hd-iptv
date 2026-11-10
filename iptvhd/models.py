@@ -69,6 +69,8 @@ class Stream:
     verified_at: float = 0.0    # 采集端确认「清单 + 分片」可用的时刻（time.time()）
     stale: bool = False         # 本轮没取到，沿用上一轮的地址
     note: str = ""              # 补充说明，不参与过滤
+    trusted: bool = False       # 运营商官方源：串行慢探，别跟聚合源一起并发打
+    final_url: str = ""         # 探测时跟随跳转后的最终地址，用来抓「多个台同流」的广告农场
 
     # ---- 探测结果 ----
     ok: bool = False
@@ -103,6 +105,8 @@ class Stream:
         第二项是这次补的：**只看画质不看速度会选出必卡的源**。湖南卫视的
         1080P 源实测 1.33 Mbps，1080P 直播至少要 4 Mbps，播起来只能一直等分片；
         而它一直排第一，仅仅因为分辨率标签比 720P 那条高。
+
+        第三项区分「官方的还是拼来的」：速率同样够用时，运营商官方源优先。
         """
         direct = 0 if self.url else 1
         need = need_mbps(self.height)
@@ -112,7 +116,10 @@ class Stream:
             fit = 0          # 撑得住这一档画质
         else:
             fit = 2          # 标着高画质却跑不动，宁可用低一档的
-        return (direct, fit, _prefer_rank(self.height), -self.speed_mbps, self.delay_ms)
+        # 第三项：同样「撑得住」时，运营商自己的源排前面。它不换票、不限额、
+        # 不夹广告，比任何公开聚合源都稳；只有它跑不动了才轮到聚合源。
+        official = 0 if self.trusted else 1
+        return (direct, fit, official, _prefer_rank(self.height), -self.speed_mbps, self.delay_ms)
 
 
 @dataclass(slots=True)
