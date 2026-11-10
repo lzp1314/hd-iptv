@@ -10,11 +10,27 @@ let settingsDirty = false;
 //      域名，所以即便你是用内网 IP 打开面板、外面套了反代，它也能给对外网地址；
 //   3. location.origin —— 什么都没配时的兜底（就是你现在打开面板用的这个地址）。
 let serverBase = "";
+
+// 设了访问密码时，每条地址都必须带那一段路径（/密码/playlist.m3u）。
+// serverBase 是服务端算好的、本身就带密码；需要补的只有手填地址和 location.origin。
+function withSecret(url) {
+  const secret = String(settings.secret || "").replace(/^\/+|\/+$/g, "");
+  if (!url || !secret) return url;
+  const tail = "/" + encodeURIComponent(secret);
+  return url.endsWith(tail) || url.endsWith("/" + secret) ? url : url + tail;
+}
+
+// 面板可能挂在 /密码/ 这种子路径下，写死 /live/xxx 会掉到根目录被密码拦住，
+// 所以一律按当前文档地址解析成绝对地址。
+function absUrl(path) {
+  return new URL(path, document.baseURI).href;
+}
+
 function base() {
-  const manual = String(settings.public_url || "").replace(/\/+$/, "");
+  const manual = withSecret(String(settings.public_url || "").replace(/\/+$/, ""));
   if (manual) return manual;
   if (serverBase) return serverBase.replace(/\/+$/, "");
-  return location.origin.replace(/\/+$/, "");
+  return withSecret(location.origin.replace(/\/+$/, ""));
 }
 
 function esc(text) {
@@ -82,7 +98,7 @@ function renderMissing(rows) {
 
 async function loadStatus() {
   try {
-    const r = await fetch("/api/status", { cache: "no-store" });
+    const r = await fetch("api/status", { cache: "no-store" });
     const d = await r.json();
     $("version").textContent = "v" + (d.version || "-");
     const rep = d.report || {};
@@ -173,7 +189,7 @@ async function saveSettings() {
   };
   btn.disabled = true;
   try {
-    const r = await fetch("/api/settings", {
+    const r = await fetch("api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -404,7 +420,7 @@ function renderChannels(channels) {
 
 async function loadChannels() {
   try {
-    const r = await fetch("/api/channels", { cache: "no-store" });
+    const r = await fetch("api/channels", { cache: "no-store" });
     const d = await r.json();
     const rows = d.channels || [];
     // 5 秒轮询一次，数据没变就别重建 DOM——重建会把列表滚动位置顶回顶部
@@ -422,7 +438,7 @@ async function setHidden(names, hidden) {
   const list = (Array.isArray(names) ? names : [names]).filter(Boolean);
   if (!list.length) return;
   try {
-    const r = await fetch("/api/hidden", {
+    const r = await fetch("api/hidden", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ names: list, hidden }),
@@ -456,7 +472,7 @@ function unhideGroup(group) {
 async function triggerUpdate() {
   $("btnUpdate").disabled = true;
   try {
-    const r = await fetch("/api/update", { method: "POST" });
+    const r = await fetch("api/update", { method: "POST" });
     const d = await r.json();
     $("log").textContent = d.message || "";
   } catch (e) {
@@ -472,7 +488,7 @@ async function checkUpdate() {
   out.className = "update-result";
   out.textContent = "检查中…";
   try {
-    const r = await fetch("/api/version?check=1", { cache: "no-store" });
+    const r = await fetch("api/version?check=1", { cache: "no-store" });
     const d = await r.json();
     if (d.error) {
       out.className = "update-result err";
@@ -659,7 +675,7 @@ function openPlayer(slug, name, keepRestarts) {
   stopStats();
   statsTimer = setInterval(playerStats, 1000);
 
-  const url = `/live/${encodeURIComponent(slug)}.m3u8`;
+  const url = absUrl(`live/${encodeURIComponent(slug)}.m3u8`);
 
   // Safari / iOS 原生就能播 HLS，不需要也不该用 hls.js
   if (v.canPlayType("application/vnd.apple.mpegurl")) {
@@ -824,7 +840,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btnGoLive").addEventListener("click", goLive);
   $("btnCopyLive").addEventListener("click", async () => {
     if (!playerSlug) return;
-    const url = `${location.origin}/live/${encodeURIComponent(playerSlug)}.m3u8`;
+    const url = absUrl(`live/${encodeURIComponent(playerSlug)}.m3u8`);
     const btn = $("btnCopyLive");
     try {
       await navigator.clipboard.writeText(url);

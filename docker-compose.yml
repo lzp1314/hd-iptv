@@ -44,6 +44,12 @@ services:
       # 对外地址。留空即可：列表按请求的域名端口现拼，套了反代也自动用外网地址；
       # 只有反代不透传 Host 头时才需要填，例如 https://tv.example.com:8443
       PUBLIC_URL: ${PUBLIC_URL:-}
+      # 访问密码（URL 路径段）。设了之后**所有**地址都要带它：
+      #   面板   https://域名:9797/mypass/
+      #   订阅   https://域名:9797/mypass/playlist.m3u
+      # 不带就回「身份认证失败」；清单里的分片、台标会自动带上这段，播放器不用改。
+      # 只用字母数字和 - _ . ；留空 = 不设密码。改完 docker compose up -d 生效。
+      HDIPTV_SECRET: ${HDIPTV_SECRET:-}
 
     # Dockerfile 里已有同样的 HEALTHCHECK，这里显式写一份方便肉眼确认
     healthcheck:

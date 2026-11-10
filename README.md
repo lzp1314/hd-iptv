@@ -36,9 +36,40 @@ docker compose up -d --build
 | `HDIPTV_PLAY_MODE` | `direct` | `direct` 分片直连 CDN；`proxy` 分片经本机转发 |
 | `HDIPTV_RELAY_CACHE_MB` | `96` | 分片缓存（MB），仅 `proxy` 模式 |
 | `HDIPTV_LINES_PER_CHANNEL` | `1` | 订阅里每个台写几行。1 不会出现「重复台」；想手动切备用线路调 2~4 |
+| `HDIPTV_SECRET` | 空 | 访问密码（URL 路径段）。设了之后所有地址都要带 `/<密码>/`，见下 |
 
 端口、刷新间隔、播放方式、对外地址都可以直接在面板上改，改完立刻生效，
 不用重启容器。
+
+### 访问密码
+
+给「反代到公网」的场景准备的：设一个密码，所有地址都要带它，不带就只显示
+「身份认证失败」——局域网也一样。
+
+```yaml
+environment:
+  HDIPTV_SECRET: "tv7Kd2x"
+```
+
+设完之后地址变成：
+
+| 用途 | 地址 |
+|---|---|
+| 面板 | `http://NAS:9797/tv7Kd2x/` |
+| 订阅 | `http://NAS:9797/tv7Kd2x/playlist.m3u` |
+| 单台 | `http://NAS:9797/tv7Kd2x/live/<slug>.m3u8` |
+| 台标 | `http://NAS:9797/tv7Kd2x/logo/CCTV1.png` |
+
+几点要知道：
+
+- **清单里的地址会自动带上密码段**，播放器拿到订阅就能直接播，不用二次配置。
+  台标、节目单同理——它们都从同一个对外地址派生。
+- **`PUBLIC_URL` 不用自己加密码段**，程序会接上；已经写了也不会重复接。
+- **只能用字母、数字和 `- _ .`**，别带斜杠和空格。
+- **改完要 `docker compose up -d`**（环境变量在启动时读入）。
+- **它不是加密**：密码在 URL 里，会进浏览器历史、反代日志。走 HTTPS，
+  并且别把订阅链接发给不相干的人。
+- 忘了密码就进 NAS 改 `.env` 再 `up -d`；也可以删掉这一行彻底关掉。
 
 ## 运营商官方源（本省宽带的 IPTV 边缘）
 
@@ -160,6 +191,10 @@ python -m iptvhd --version
 | `/api/relay` | 中转缓存与最近错误，排查播放问题用 |
 | `POST /api/update` | 手动触发一次更新 |
 | `/health` | 健康检查（给 Docker HEALTHCHECK 用） |
+
+设了 `HDIPTV_SECRET` 之后，除 `/health` 外的每条路径前面都要加 `/<密码>`，
+例如 `/tv7Kd2x/playlist.m3u`。`/health` 保持公开，否则容器的健康检查会把自己
+判成不健康。
 
 ## 免责声明
 

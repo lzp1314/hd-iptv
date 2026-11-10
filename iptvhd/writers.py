@@ -28,17 +28,29 @@ def _atomic_write(path: Path, text: str) -> None:
 def _logo(channel: Channel, logo_base: str) -> str:
     """台标地址。
 
-    优先用来源自带的 ``tvg-logo``，没有就指向本机的 ``/logo/<频道名>.png``：
-    由服务端去台标库里取一次、存本地，播放器永远只跟本机要图，
-    不会因为图床被墙或防盗链而丢台标。
+    配了 ``logo_base``（服务端渲染订阅时就是本机 ``/logo``）就**一律指向本机**，
+    不再把来源的 ``tvg-logo`` 原样写出去。原因有三个，都是实测踩过的：
+
+    - 上游图床认 UA，不带 UA 的请求直接 403，而电视盒子、部分播放器加载
+      图标时根本不带 UA；
+    - 上游地址里是**没编码的中文**（``/湖北公共.png``），播放器不保证会替
+      我们做 percent-encoding，请求就废了；
+    - 一次要拉八九十个图标，直连图床容易被限流，失败的那批不会自己重试。
+
+    改走本机以后，播放器看到的是 ``/logo/%E6%B9%96...png`` 这种规规矩矩的
+    编码地址，图由服务端取一次存本地，第二次就是本地文件。走反向代理到外网
+    也不会因为图床被墙而丢台标。
+
+    没有 ``logo_base`` 时（离线生成静态 m3u）才退回来源自带的地址——那种
+    场合没有服务端可以代取，直链是唯一选择。
     """
+    base = (logo_base or "").rstrip("/")
+    if base and channel.name:
+        return f"{base}/{quote(channel.name)}.png"
     for s in channel.streams:
         if s.logo:
             return s.logo
-    base = (logo_base or "").rstrip("/")
-    if not base:
-        return ""
-    return f"{base}/{quote(channel.name)}.png"
+    return ""
 
 
 def _play_url(stream: Stream, relay_base: str) -> str:

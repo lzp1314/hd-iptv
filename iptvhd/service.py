@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from . import __version__, writers
 from .epg import Epg
@@ -99,6 +99,27 @@ def _public_base(headers, public_url: str = "") -> str:
     if via_proxy:
         return _seen_public() or here
     return here
+
+
+def secret_prefix(secret: str) -> str:
+    """密码段的 URL 形式：``/abc``；没设密码就是空串。"""
+    return f"/{quote(secret, safe='')}" if secret else ""
+
+
+def with_secret(base: str, secret: str) -> str:
+    """把密码段接到对外地址后面。
+
+    订阅、台标、节目单、转发地址全都从这一个 base 派生，所以只要这里带上密码，
+    整条链路（清单 → 分片 → 台标）就都带着，不用逐处改。
+    用户如果自己把密码写进 ``PUBLIC_URL`` 了，就别重复接一次。
+    """
+    if not base or not secret:
+        return base
+    base = base.rstrip("/")
+    for tail in (secret_prefix(secret), "/" + secret):
+        if base.endswith(tail):
+            return base
+    return base + secret_prefix(secret)
 
 
 def _channels_from_result(result: dict) -> list[Channel]:
@@ -219,6 +240,8 @@ class State:
             "cache_mb": int(s.relay_cache_mb),
             "play_mode": s.play_mode,
             "public_url": s.public_url,
+            # 只读：面板据此在每个地址后面带上密码段，前端不允许写回
+            "secret": s.secret,
             "epg_url": s.epg_url,
             "epg_source": s.epg_source,
             "hidden": s.hidden,
@@ -373,7 +396,58 @@ def make_handler(state: State):
 
         def _base(self) -> str:
             """这次请求该用哪个对外地址。具体规则见模块里的 _public_base。"""
-            return _public_base(self.headers, settings.public_url)
+            return with_secret(_public_base(self.headers, settings.public_url), settings.secret)
+
+        def _deny(self) -> None:
+            """没带密码段时的回应。
+
+            浏览器看到一页「身份认证失败」，播放器 / 脚本看到一段 JSON——两者都
+            不透露密码本身，也不回 302 到别处（那等于告诉扫描器「这里有东西」）。
+            """
+            accept = (self.headers.get("Accept") or "").lower()
+            if "text/html" in accept:
+                page = (
+                    "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
+                    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                    "<title>身份认证失败</title>"
+                    "<style>body{margin:0;min-height:100vh;display:flex;align-items:center;"
+                    "justify-content:center;background:#fff;color:#1a1a1a;"
+                    "font:16px/1.8 -apple-system,'Segoe UI',sans-serif}"
+                    "div{text-align:center;padding:24px}h1{font-size:20px;font-weight:500;margin:0 0 12px}"
+                    "p{margin:4px 0;color:#666;font-size:14px}"
+                    "code{background:#f3f4f6;padding:2px 6px;border-radius:4px;color:#333}</style>"
+                    "<div><h1>身份认证失败</h1>"
+                    "<p>这个服务设了访问密码，地址里必须带密码段。</p>"
+                    "<p>正确格式：<code>http://主机:端口/密码/</code></p></div></html>"
+                )
+                self._send(401, page.encode("utf-8"), "text/html; charset=utf-8")
+                return
+            self._json(
+                {"error": "身份认证失败", "hint": "地址里需要带密码段：/<密码>/playlist.m3u"},
+                401,
+            )
+
+        def _require(self) -> str | None:
+            """校验访问密码，返回剥掉密码段之后的路由；不通过返回 None。
+
+            设了密码就**全站**要求带：面板、订阅、清单、分片、台标、接口一个不漏。
+            只保护订阅列表而不保护面板是没意义的——面板能改配置、能触发更新。
+            """
+            raw = urlsplit(self.path).path
+            secret = settings.secret
+            if not secret or raw == "/health":
+                # /health 留给容器健康检查：它只回一句 ok，不含任何数据
+                return raw
+            for form in {secret, quote(secret, safe="")}:
+                prefix = "/" + form
+                if raw == prefix:
+                    # 少了结尾的斜杠，页面里的相对路径会指到上一级去
+                    self._redirect(prefix + "/")
+                    return None
+                if raw.startswith(prefix + "/"):
+                    return raw[len(prefix) :] or "/"
+            self._deny()
+            return None
 
         # ---------------- 播放 ----------------
         def _live(self, slug: str) -> None:
@@ -539,7 +613,9 @@ def make_handler(state: State):
 
         # ---------------- 路由 ----------------
         def do_GET(self) -> None:  # noqa: N802
-            path = urlsplit(self.path).path
+            path = self._require()
+            if path is None:
+                return
 
             if path in ("/", "/index.html"):
                 self._file(WEB_DIR / "index.html", "text/html; charset=utf-8")
@@ -549,7 +625,9 @@ def make_handler(state: State):
                 # .m3u8 是 HLS 媒体清单的扩展名，播放器会当成「单个直播流」解析，
                 # 然后报「播放格式不受支持」——所以这个入口改成跳转到 .m3u
                 if path == "/m3u8":
-                    self._redirect("/playlist.m3u")
+                    # 跳转目标要自己带上密码段：_redirect 给的是绝对路径，
+                    # 不补的话浏览器会被送到 /playlist.m3u，当场被密码拦住。
+                    self._redirect(f"{secret_prefix(settings.secret)}/playlist.m3u")
                 else:
                     self._playlist()
             elif path in ("/txt", "/playlist.txt", "/result.txt"):
@@ -578,6 +656,7 @@ def make_handler(state: State):
             elif path == "/api/status":
                 result = load_result(settings) or {}
                 relay_stats = state.relay.stats()
+                pre = secret_prefix(settings.secret)
                 self._json(
                     {
                         "version": __version__,
@@ -604,17 +683,17 @@ def make_handler(state: State):
                             "segments": relay_stats["segments"],
                         },
                         "endpoints": {
-                            "m3u": "/playlist.m3u",
-                            "txt": "/txt",
-                            "json": "/json",
-                            "epg": "/epg.xml",
-                            "logo": "/logo/<频道名>.png",
-                            "live": "/live/<slug>.m3u8",
-                            "live_list": "/api/live",
-                            "relay": "/relay/<slug>/p/<token>",
-                            "settings": "/api/settings",
-                            "hidden": "/api/hidden",
-                            "version": "/api/version?check=1",
+                            "m3u": f"{pre}/playlist.m3u",
+                            "txt": f"{pre}/txt",
+                            "json": f"{pre}/json",
+                            "epg": f"{pre}/epg.xml",
+                            "logo": f"{pre}/logo/<频道名>.png",
+                            "live": f"{pre}/live/<slug>.m3u8",
+                            "live_list": f"{pre}/api/live",
+                            "relay": f"{pre}/relay/<slug>/p/<token>",
+                            "settings": f"{pre}/api/settings",
+                            "hidden": f"{pre}/api/hidden",
+                            "version": f"{pre}/api/version?check=1",
                         },
                     }
                 )
@@ -698,7 +777,9 @@ def make_handler(state: State):
             return values
 
         def do_POST(self) -> None:  # noqa: N802
-            path = urlsplit(self.path).path
+            path = self._require()
+            if path is None:
+                return
             if path == "/api/update":
                 started = state.trigger()
                 self._json({"started": started, "message": "已开始更新" if started else "已有任务在执行"})
@@ -774,7 +855,12 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
     )
 
     httpd = Server((host, port), make_handler(state))
-    state.log(f"服务已启动：http://{host}:{port}  （订阅地址 /playlist.m3u）")
+    state.log(
+        f"服务已启动：http://{host}:{port}{secret_prefix(settings.secret) or '/'}"
+        f"  （订阅地址 {secret_prefix(settings.secret)}/playlist.m3u）"
+    )
+    if settings.secret:
+        state.log("已开启访问密码：所有地址都要带 /<密码>/ 这一段，不带会回「身份认证失败」")
     state.log(
         f"分片缓存上限 {int(settings.relay_cache_mb)} MB，清单预取 {settings.playlist_ttl:g} 秒一次，"
         "多客户端共用一个上游连接池"

@@ -262,6 +262,20 @@ class Settings:
         return (os.environ.get("PUBLIC_URL") or self.get("output", "public_url", "")).strip().rstrip("/")
 
     @property
+    def secret(self) -> str:
+        """访问密码：URL 里的一段必填路径。
+
+        设了之后所有地址都得带它（``/密码/playlist.m3u``、``/密码/live/x.m3u8``），
+        不带或带错一律回「身份认证失败」，连面板首页都进不去。留空 = 不设密码，
+        行为和以前完全一样。
+
+        优先级：环境变量 ``HDIPTV_SECRET`` > config.toml ``[output] secret``。
+        刻意不支持在面板里改——改错一个字符就把自己锁在外面，还得进容器删文件。
+        """
+        raw = (os.environ.get("HDIPTV_SECRET") or self.get("output", "secret", "") or "").strip()
+        return raw.strip("/")
+
+    @property
     def epg_url(self) -> str:
         panel = self.panel_get("epg_url")
         if panel is not None:
