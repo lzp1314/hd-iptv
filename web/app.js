@@ -174,6 +174,7 @@ function fillSettings(s) {
   if ($("setTtl")) $("setTtl").value = s.playlist_ttl != null ? s.playlist_ttl : "";
   if ($("setCache")) $("setCache").value = s.cache_mb != null ? s.cache_mb : "";
   if ($("setEpgSource")) $("setEpgSource").value = s.epg_source || "";
+  if ($("setSecret")) $("setSecret").value = s.secret || "";
 }
 
 async function saveSettings() {
@@ -186,6 +187,8 @@ async function saveSettings() {
     playlist_ttl: Number($("setTtl").value || 1),
     cache_mb: Number($("setCache").value || 96),
     epg_source: $("setEpgSource").value.trim(),
+    // 空字符串是有意义的：表示把密码关掉
+    secret: $("setSecret") ? $("setSecret").value.trim() : "",
   };
   btn.disabled = true;
   try {
@@ -197,6 +200,18 @@ async function saveSettings() {
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     settingsDirty = false;
+    // 密码一变，当前这个地址就失效了：要么跳到新地址，要么回首页。
+    // 不跳的话，接下来的轮询全部 401，页面会显示「无法连接服务」。
+    const before = String(settings.secret || "");
+    const after = String((d.settings && d.settings.secret) || "");
+    if (before !== after) {
+      const home = after ? `${location.origin}/${encodeURIComponent(after)}/` : `${location.origin}/`;
+      note.textContent = after
+        ? "密码已改，正在跳到新地址…"
+        : "已关闭访问密码，正在返回首页…";
+      setTimeout(() => { location.href = home; }, 500);
+      return;
+    }
     note.textContent = `已保存：更新间隔 ${d.settings.interval_hours} 小时、`
       + `清单刷新 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB。`
       + "播放器里的地址如果变了，重新拉一次列表即可。";
@@ -858,7 +873,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPlayMode", "setPublicUrl", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
+  ["setPlayMode", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });

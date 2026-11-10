@@ -92,8 +92,9 @@ class _ServerCase(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode("utf-8", "replace"), exc.headers
 
-    def post(self, path: str):
-        req = urllib.request.Request(self.url(path), data=b"{}", method="POST")
+    def post(self, path: str, payload: dict | None = None):
+        data = json.dumps(payload if payload is not None else {}).encode("utf-8")
+        req = urllib.request.Request(self.url(path), data=data, method="POST")
         req.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
@@ -167,6 +168,39 @@ class TestWithSecret(_ServerCase):
         code, _, headers = self.get(f"/{SECRET}/m3u8", follow=False)
         self.assertIn(code, (301, 302))
         self.assertEqual(headers.get("Location"), f"/{SECRET}/playlist.m3u")
+
+
+class TestPanelSecret(_ServerCase):
+    def test_panel_can_change_secret(self):
+        code, body = self.post(f"/{SECRET}/api/settings", {"secret": "newPass1"})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["settings"]["secret"], "newPass1")
+        # 旧地址当场失效，新地址立刻可用
+        self.assertEqual(self.get(f"/{SECRET}/api/status")[0], 401)
+        self.assertEqual(self.get("/newPass1/api/status")[0], 200)
+        # 落盘到 panel.json（在 .gitignore 里，不会跟着仓库走）
+        saved = json.loads((self.settings.panel_path).read_text(encoding="utf-8"))
+        self.assertEqual(saved["secret"], "newPass1")
+
+    def test_bad_secret_rejected(self):
+        code, body = self.post(f"/{SECRET}/api/settings", {"secret": "带空格 的"})
+        self.assertEqual(code, 400)
+        self.assertIn("密码", json.loads(body)["error"])
+        # 被拒绝之后密码保持原样，不会变成半截
+        self.assertEqual(self.get(f"/{SECRET}/api/status")[0], 200)
+
+    def test_empty_secret_turns_it_off(self):
+        code, body = self.post(f"/{SECRET}/api/settings", {"secret": ""})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["settings"]["secret"], "")
+        self.assertEqual(self.get("/api/status")[0], 200)
+
+    def test_other_settings_still_work(self):
+        code, body = self.post(f"/{SECRET}/api/settings", {"interval_hours": 6})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["settings"]["interval_hours"], 6)
+        # 没提交 secret 就不该动它
+        self.assertEqual(json.loads(body)["settings"]["secret"], SECRET)
 
 
 class TestWithoutSecret(_ServerCase):

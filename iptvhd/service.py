@@ -17,7 +17,7 @@ from .logos import Logos
 from .models import Channel, Stream
 from .pipeline import load_result, run_update
 from .relay import Relay, RelayError
-from .settings import Settings, coerce_panel, write_panel
+from .settings import Settings, clean_secret, coerce_panel, write_panel
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -267,8 +267,14 @@ class State:
         return value
 
     def apply_settings(self, values: dict) -> dict:
-        """面板提交的设置：落盘 + 当场生效，不用重启容器。"""
+        """面板提交的设置：落盘 + 当场生效，不用重启容器。
+
+        密码是唯一会「当场把自己关在门外」的一项：改完之后旧地址立刻失效，
+        所以校验放在这里，不合法就抛 ValueError（接口回 400），不做静默修正。
+        """
         clean = coerce_panel(values)
+        if "secret" in clean:
+            clean["secret"] = clean_secret(clean["secret"])
         if clean:
             write_panel(self.settings.panel_path, clean)
             self.settings.panel.update(clean)
@@ -787,8 +793,16 @@ def make_handler(state: State):
                 values = self._body()
                 if values is None:
                     return
-                updated = state.apply_settings(values)
-                state.log(f"[设置] 已更新 {', '.join(f'{k}={v}' for k, v in updated.items())}")
+                try:
+                    updated = state.apply_settings(values)
+                except ValueError as exc:
+                    # 典型就是密码带了空格、斜杠、中文——回 400 说清楚，
+                    # 别静默改成别的字符串让人下次进不去
+                    self._json({"error": str(exc)}, 400)
+                    return
+                # 密码不进日志：面板日志会显示在页面上，也可能被人截图发出去
+                shown = {k: ("***" if k == "secret" and v else v) for k, v in updated.items()}
+                state.log(f"[设置] 已更新 {', '.join(f'{k}={v}' for k, v in shown.items())}")
                 self._json({"ok": True, "settings": updated})
             elif path == "/api/hidden":
                 values = self._body()

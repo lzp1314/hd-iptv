@@ -104,12 +104,42 @@ def clean_names(value) -> list[str]:
     return out
 
 
+_SECRET_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "-_.~"
+)
+
+
+def clean_secret(value) -> str:
+    """校验访问密码：留空 = 关掉密码，否则只能是 URL 安全字符。
+
+    非法字符直接报错而不是悄悄删掉——用户会以为自己设的是原来那个密码，
+    下次就进不去了。URL 里带中文、空格、斜杠在各个播放器上的编码方式不一致，
+    与其猜，不如一开始就不要。
+    """
+    text = str(value or "").strip().strip("/")
+    if not text:
+        return ""
+    bad = sorted({c for c in text if c not in _SECRET_CHARS})
+    if bad:
+        shown = " ".join("空格" if c.isspace() else c for c in bad[:5])
+        raise ValueError(f"密码只能用字母、数字和 - _ . ~，这几个字符不行：{shown}")
+    if len(text) > 64:
+        raise ValueError("密码最多 64 个字符")
+    return text
+
+
 def coerce_panel(raw: dict) -> dict:
     """把面板提交的内容收敛成合法值，非法项直接丢掉。"""
     out: dict = {}
     for key, value in (raw or {}).items():
         if key == "hidden":
             out[key] = clean_names(value)
+        elif key == "secret":
+            # 只去掉两头的空白和斜杠，字符是否合法由 apply_settings 判定（那边能回 400）
+            out[key] = str(value or "").strip().strip("/")
         elif key in ("public_url", "epg_url", "epg_source"):
             text = str(value or "").strip()
             out[key] = text.rstrip("/") if key == "public_url" else text
@@ -269,9 +299,13 @@ class Settings:
         不带或带错一律回「身份认证失败」，连面板首页都进不去。留空 = 不设密码，
         行为和以前完全一样。
 
-        优先级：环境变量 ``HDIPTV_SECRET`` > config.toml ``[output] secret``。
-        刻意不支持在面板里改——改错一个字符就把自己锁在外面，还得进容器删文件。
+        优先级：面板 > 环境变量 ``HDIPTV_SECRET`` > config.toml ``[output] secret``。
+        面板改的落在 ``config/panel.json``（已在 .gitignore 里），刷新镜像不会丢，
+        也不会跟着仓库走；忘了密码就删掉这一行，或把 panel.json 里的 secret 删掉。
         """
+        panel = self.panel_get("secret")
+        if panel is not None:
+            return str(panel).strip().strip("/")
         raw = (os.environ.get("HDIPTV_SECRET") or self.get("output", "secret", "") or "").strip()
         return raw.strip("/")
 
