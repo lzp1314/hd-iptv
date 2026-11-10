@@ -122,6 +122,8 @@ def _channels_from_result(result: dict) -> list[Channel]:
                     slug=slug,
                     height=int(item.get("height") or 0),
                     width=int(item.get("width") or 0),
+                    # 编码要带上：面板据此避开 H.265（浏览器解不了）
+                    codec=str(item.get("codec") or ""),
                 )
             )
         name = str(row.get("name") or "")
@@ -439,6 +441,7 @@ def make_handler(state: State):
                 logo_base=logo_base,
                 relay_base=base,
                 tvg_ids=state.epg.mapping(),
+                lines_per_channel=settings.lines_per_channel,
             )
             self._send(
                 200,
@@ -555,7 +558,8 @@ def make_handler(state: State):
                 if not channels:
                     self._json({"error": "结果尚未生成，请先更新一次"}, 404)
                     return
-                text, _ = writers.render_txt(channels, relay_base=self._base())
+                text, _ = writers.render_txt(channels, relay_base=self._base(),
+                                             lines_per_channel=settings.lines_per_channel)
                 self._send(200, text.encode("utf-8"), "text/plain; charset=utf-8")
             elif path in ("/json", "/result.json"):
                 result = load_result(settings)

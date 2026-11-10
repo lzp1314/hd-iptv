@@ -234,6 +234,19 @@ class Settings:
         return int(os.environ.get("HDIPTV_MAX_PER_CHANNEL") or self.get("probe", "max_per_channel", 4))
 
     @property
+    def lines_per_channel(self) -> int:
+        """订阅列表里每个台写几行。
+
+        默认 1：VLC 这类播放器不会按台名归并，写几条就列几行，看上去就是一排
+        重复台。备用线路仍然保留在 result.json 里，想手动切线路的调大这个值。
+        """
+        raw = os.environ.get("HDIPTV_LINES_PER_CHANNEL") or self.get("output", "lines_per_channel", 1)
+        try:
+            return max(1, min(8, int(raw)))
+        except (TypeError, ValueError):
+            return 1
+
+    @property
     def allow_unknown(self) -> bool:
         return bool(self.get("probe", "allow_unknown_resolution", False))
 

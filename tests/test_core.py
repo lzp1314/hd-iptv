@@ -153,7 +153,9 @@ class TestWriters(unittest.TestCase):
     def test_m3u(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "r.m3u"
-            count = write_m3u(self._channels(), path, epg_url="http://e/epg.xml")
+            # 默认每台只写一行；这里显式要 2 行，才好验线路排序与画质后缀
+            count = write_m3u(self._channels(), path, epg_url="http://e/epg.xml",
+                              lines_per_channel=2)
             self.assertEqual(count, 2)
             text = path.read_text(encoding="utf-8")
             self.assertTrue(text.startswith('#EXTM3U x-tvg-url="http://e/epg.xml"'))
@@ -180,7 +182,7 @@ class TestWriters(unittest.TestCase):
     def test_txt(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "r.txt"
-            count = write_txt(self._channels(), path)
+            count = write_txt(self._channels(), path, lines_per_channel=2)
             self.assertEqual(count, 2)
             text = path.read_text(encoding="utf-8")
             self.assertIn("央视,#genre#", text)
@@ -253,6 +255,33 @@ class BitrateTest(unittest.TestCase):
         stream = Stream(url="x", segment_duration=5.0, bandwidth=6_000_000)
         _estimate_bitrate(stream, self._resp(1_000_000))
         self.assertEqual(stream.bandwidth, 6_000_000)
+
+    def test_partial_sample_is_not_used_as_bitrate(self):
+        """只取 256KB 采样时，Content-Length 就是 256KB，拿它算码率是假的。
+
+        真实翻车：官方源 1080P 在面板上显示 210kbps（= 256KB÷10 秒），
+        顺着这个数会以为源很轻，其实人家 7.8Mbps。
+        """
+        from iptvhd.net import Response
+        from iptvhd.probe import _estimate_bitrate
+
+        stream = Stream(url="x", segment_duration=10.0)
+        resp = Response(headers={"content-length": "262144"}, body=b"x" * 262144)
+        _estimate_bitrate(stream, resp, sample_limit=262144)
+        self.assertEqual(stream.bandwidth, 0)
+
+    def test_content_range_gives_real_size(self):
+        from iptvhd.net import Response
+        from iptvhd.probe import _estimate_bitrate
+
+        stream = Stream(url="x", segment_duration=10.0)
+        resp = Response(
+            headers={"content-range": "bytes 0-262143/7834900",
+                     "content-length": "262144"},
+            body=b"x" * 262144,
+        )
+        _estimate_bitrate(stream, resp)
+        self.assertEqual(stream.bandwidth, int(7834900 * 8 / 10))
 
     def test_reads_segment_seconds_from_playlist(self):
         from iptvhd.ysp import _segment_seconds

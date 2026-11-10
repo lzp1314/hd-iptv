@@ -69,6 +69,7 @@ def render_m3u(
     multi_source_mark: bool = True,
     relay_base: str = "",
     tvg_ids: dict | None = None,
+    lines_per_channel: int = 1,
 ) -> tuple[str, int]:
     """生成 m3u 文本，返回 ``(内容, 条数)``。
 
@@ -76,6 +77,11 @@ def render_m3u(
     不用等下一轮更新把 result.m3u 重写一遍。
 
     ``tvg_ids`` 是「频道名 → 节目单里的频道 id」，拿到了才写得对得上节目单。
+
+    ``lines_per_channel`` 是每个台在列表里写几行，默认 **1**。以前把保留的
+    几条备用线路全写出去，VLC 这类播放器会老老实实列成好几行，看着就是一排
+    重复台（观屿会按台名归并，所以那边看不出来）。备用线路仍然留在内部，
+    要手动切线路的把这里调到 2~4。
     """
     lines = []
     head = "#EXTM3U"
@@ -91,7 +97,8 @@ def render_m3u(
             continue
         logo = _logo(ch, logo_base)
         seen: set[str] = set()
-        for stream in ch.streams:
+        picked = ch.streams[: max(1, lines_per_channel)]
+        for stream in picked:
             # 走转发时，同一个台的多个源会塌缩成同一个地址；重复条目会让
             # 播放器在两条一模一样的记录之间来回跳，先去掉
             target = _play_url(stream, relay_base)
@@ -100,7 +107,7 @@ def render_m3u(
             seen.add(target)
             # 一个频道多个源时，在名字后面标注画质，方便播放器里区分
             suffix = ""
-            if multi_source_mark and len(ch.streams) > 1 and stream.height:
+            if multi_source_mark and len(picked) > 1 and stream.height:
                 suffix = f"·{stream.grade}"
             tvg_id = ids.get(ch.name) or ch.streams[0].tvg_id or ch.name
             attrs = [
@@ -128,6 +135,7 @@ def write_m3u(
     multi_source_mark: bool = True,
     relay_base: str = "",
     tvg_ids: dict | None = None,
+    lines_per_channel: int = 1,
 ) -> int:
     """生成 m3u 文件。返回写入的流条数。"""
     text, count = render_m3u(
@@ -137,12 +145,14 @@ def write_m3u(
         multi_source_mark=multi_source_mark,
         relay_base=relay_base,
         tvg_ids=tvg_ids,
+        lines_per_channel=lines_per_channel,
     )
     _atomic_write(path, text)
     return count
 
 
-def render_txt(channels: list[Channel], *, relay_base: str = "") -> tuple[str, int]:
+def render_txt(channels: list[Channel], *, relay_base: str = "",
+               lines_per_channel: int = 1) -> tuple[str, int]:
     """生成 txt 列表（按分组分段），返回 ``(内容, 条数)``。"""
     lines: list[str] = []
     count = 0
@@ -153,15 +163,17 @@ def render_txt(channels: list[Channel], *, relay_base: str = "") -> tuple[str, i
         if ch.group != current_group:
             current_group = ch.group
             lines.append(f"{ch.group},#genre#")
-        for stream in ch.streams:
+        for stream in ch.streams[: max(1, lines_per_channel)]:
             lines.append(f"{ch.name},{_play_url(stream, relay_base)}")
             count += 1
     return "\n".join(lines) + "\n", count
 
 
-def write_txt(channels: list[Channel], path: Path, *, relay_base: str = "") -> int:
+def write_txt(channels: list[Channel], path: Path, *, relay_base: str = "",
+              lines_per_channel: int = 1) -> int:
     """生成 txt 列表文件。"""
-    text, count = render_txt(channels, relay_base=relay_base)
+    text, count = render_txt(channels, relay_base=relay_base,
+                             lines_per_channel=lines_per_channel)
     _atomic_write(path, text)
     return count
 

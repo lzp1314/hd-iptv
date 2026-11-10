@@ -138,7 +138,7 @@ def _probe_prefetched(stream: Stream, client: HttpClient, sample_bytes: int,
         stream.speed_mbps = seg.speed_mbps
         stream.delay_ms = max(stream.delay_ms, seg.ttfb_ms)
         _read_resolution(stream, seg.body)
-        _estimate_bitrate(stream, seg)
+        _estimate_bitrate(stream, seg, sample_bytes)
     elif seg.status in (403, 429):
         # 限流：播放列表在采集阶段已确认可用，播放器按正常节奏取片不会触发
         stream.ok = True
@@ -318,7 +318,7 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
         if seg.ttfb_ms:
             stream.delay_ms = max(stream.delay_ms, seg.ttfb_ms)
         _read_resolution(stream, seg.body)
-        _estimate_bitrate(stream, seg)
+        _estimate_bitrate(stream, seg, sample_bytes)
 
     if not stream.height:
         # 媒体清单本身不带分辨率（单码率直播常见），优先用采集端已知的档位
@@ -337,7 +337,7 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
     stream.ok = True
 
 
-def _estimate_bitrate(stream: Stream, resp) -> None:
+def _estimate_bitrate(stream: Stream, resp, sample_limit: int = 0) -> None:
     """用「分片大小 ÷ 分片时长」估算真实码率。
 
     这个数字比下载测速更有意义：测速反映 NAS 能不能拉得动，码率反映这条流
@@ -346,11 +346,26 @@ def _estimate_bitrate(stream: Stream, resp) -> None:
     """
     if stream.bandwidth:
         return
-    try:
-        size = int((resp.headers or {}).get("content-length") or 0)
-    except (TypeError, ValueError):
-        return
+    headers = resp.headers or {}
+    size = 0
+    # 206 的 Content-Range 写着真分片总长度（bytes 0-262143/7834900），
+    # 这是最准的一个数，优先用它
+    rng = str(headers.get("content-range") or "")
+    if "/" in rng:
+        total = rng.rsplit("/", 1)[-1].strip()
+        if total.isdigit():
+            size = int(total)
+    if not size:
+        try:
+            size = int(headers.get("content-length") or 0)
+        except (TypeError, ValueError):
+            return
     if size <= 0 or stream.segment_duration <= 0:
+        return
+    # 长度恰好等于我们要的采样量，说明上游认了 Range，给的只是那一段：
+    # 拿它算出来的码率是假的（实测 256KB÷10 秒 = 210kbps，而真值是 7.8Mbps）。
+    # 这种响应上面已经从 Content-Range 取过真长度了，取不到就宁可不显示。
+    if sample_limit and size == sample_limit:
         return
     stream.bandwidth = int(size * 8 / stream.segment_duration)
 

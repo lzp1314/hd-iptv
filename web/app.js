@@ -268,14 +268,28 @@ function cardMeta(stream) {
     + `<span class="rate ${cls}" title="${esc(rateTitle(stream))}">${esc(rate)}</span>`;
 }
 
+// 浏览器（Chrome/Edge 的 MSE）解不了 H.265，官方源的 1080P 恰恰多是
+// H.265——直接播就是 "分片解不出来"。这里优先挑 H.264 那条给面板用，
+// 只有整台都是 H.265 时才退回第一条（Safari 之类能解，其余会给出提示）。
+function pickPlayable(streams) {
+  const usable = streams.filter((s) => s.slug);
+  const h264 = usable.find((s) => {
+    const c = String(s.codec || "").toLowerCase();
+    return c && !c.includes("hvc") && !c.includes("265") && !c.includes("hev");
+  });
+  return h264 || usable[0] || null;
+}
+
 function chanCard(ch) {
   const visible = !ch.hidden;
   const streams = ch.streams || [];
-  const slug = (streams.find((s) => s.slug) || {}).slug || "";
+  const pick = pickPlayable(streams);
+  const slug = (pick && pick.slug) || "";
+  const onlyHevc = Boolean(pick && /hvc|265|hev/i.test(String(pick.codec || "")));
   const more = streams.length > 1 ? `<span class="idx">${streams.length} 路</span>` : "";
   const play = visible
     ? (slug
-        ? `<button class="btn mini" data-play="${esc(slug)}" data-name="${esc(ch.name)}">播放</button>`
+        ? `<button class="btn mini" data-play="${esc(slug)}" data-name="${esc(ch.name)}"${onlyHevc ? ' title="这台只有 H.265，浏览器多半解不了，建议用外部播放器"' : ""}>播放</button>`
         : `<button class="btn mini" disabled title="这条流来自外部订阅，面板播放需要本机 /live/ 地址">播放</button>`)
     : `<button class="btn mini" data-unhide="${esc(ch.name)}">恢复</button>`;
   const hide = visible
@@ -755,7 +769,8 @@ function playerErrorText(data) {
     return "缓冲停住了——点右下角「回到直播」追上去。";
   }
   if (detail === "fragParsingError") {
-    return "分片解不出来，这个台的编码浏览器啃不动，换个台或者用外部播放器。";
+    return "分片解不出来：这台是 H.265，浏览器解不了（VLC、观屿这类播放器可以）。"
+      + "点「关闭」换一个台，或者用「复制地址」丢给外部播放器。";
   }
   return detail || data.type || "未知错误";
 }

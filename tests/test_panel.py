@@ -157,6 +157,40 @@ class TestRenderM3u(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(text.count("#EXTINF"), 1)
 
+    def test_one_line_per_channel_by_default(self):
+        """VLC 不按台名归并：一个台写几行就列几行，看着就是一排重复台。
+
+        所以默认只写第一行（最好那条），备用线路留在 result.json 里不动。
+        """
+        channel = Channel(
+            name="CCTV-1",
+            group="央视",
+            streams=[
+                Stream(url="http://up/a.m3u8", slug="o:aaa", height=1080),
+                Stream(url="http://up/b.m3u8", slug="o:bbb", height=720),
+                Stream(url="http://up/c.m3u8", slug="o:ccc", height=720),
+            ],
+        )
+        text, count = writers.render_m3u([channel], relay_base="http://h")
+        self.assertEqual(count, 1)
+        self.assertEqual(text.count("#EXTINF"), 1)
+        self.assertIn("/live/o:aaa.m3u8", text)
+        # 只剩一行时不该再带「·1080P」这种区分后缀
+        self.assertNotIn("·1080P", text)
+
+    def test_lines_per_channel_can_be_raised(self):
+        channel = Channel(
+            name="CCTV-1",
+            group="央视",
+            streams=[
+                Stream(url="http://up/a.m3u8", slug="o:aaa", height=1080),
+                Stream(url="http://up/b.m3u8", slug="o:bbb", height=720),
+            ],
+        )
+        text, count = writers.render_m3u([channel], relay_base="http://h", lines_per_channel=2)
+        self.assertEqual(count, 2)
+        self.assertEqual(text.count("#EXTINF"), 2)
+
     def test_no_relay_base_falls_back_to_relative_path(self):
         """没有对外地址时给相对路径，**绝不退回流自己的地址**。
 

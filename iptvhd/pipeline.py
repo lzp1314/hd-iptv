@@ -535,8 +535,10 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
         epg_url=settings.epg_url,
         logo_base=settings.logo_base,
         relay_base=settings.public_url,
+        lines_per_channel=settings.lines_per_channel,
     )
-    writers.write_txt(channels, txt_path, relay_base=settings.public_url)
+    writers.write_txt(channels, txt_path, relay_base=settings.public_url,
+                      lines_per_channel=settings.lines_per_channel)
     writers.write_json(channels, json_path, report)
     writers.write_json(channels, out_dir / "latest.json", report)
     log(
