@@ -19,7 +19,7 @@ from iptvhd.collectors import parse_m3u
 from iptvhd.models import Stream
 from iptvhd.normalize import ChannelMatcher, load_channels
 from iptvhd.probe import probe_gentle
-from iptvhd.relay import Relay, _parse_media, _Window, allowed, static_url
+from iptvhd.relay import Relay, _parse_media, _Window, allowed, static_slug, static_url
 
 V6_BASE = "http://[2409:8087:4c00:22:6::9]:6610/170000001115/UmaiCHAN1/index.m3u8"
 
@@ -235,3 +235,44 @@ class ShippedListTest(unittest.TestCase):
         self.assertGreaterEqual(len(hit), 45)          # 央视 17 + 卫视主力
         self.assertLessEqual(len(unmatched), 3)        # 三沙/兵团/厦门不在模板里，允许
         self.assertTrue(all(n == 1 for n in hit.values()))  # 不许一个台占两条
+
+
+class LiveRouteTest(unittest.TestCase):
+    """``/live/<slug>.m3u8`` 的路由判定。
+
+    0.9.13 的翻车点：官方源接进来之后，列表里写的是 ``/live/o:<base64>``，
+    而路由只认央视频那张频道表，于是整批回 404，播放器只看得到「源服务器
+    返回错误」。这个测试守住「两套 slug 都得认」。
+    """
+
+    def test_static_slug_is_accepted(self):
+        from iptvhd.service import live_target
+
+        slug = static_slug(V6_BASE)
+        hit = live_target(slug)
+        self.assertIsNotNone(hit)
+        key, name = hit
+        self.assertEqual(static_url(key), V6_BASE)
+        self.assertEqual(name, "运营商源")
+
+    def test_percent_encoded_slug_is_decoded(self):
+        """播放器会把 o: 编码成 o%3A，还原之后才认得出来。"""
+        from urllib.parse import quote
+
+        from iptvhd.service import live_target
+
+        hit = live_target(quote(static_slug(V6_BASE), safe=""))
+        self.assertIsNotNone(hit)
+        self.assertEqual(static_url(hit[0]), V6_BASE)
+
+    def test_ysp_slug_still_works(self):
+        from iptvhd.service import live_target
+
+        hit = live_target("cctv1")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[0], "cctv1")
+
+    def test_unknown_slug_is_rejected(self):
+        from iptvhd.service import live_target
+
+        self.assertIsNone(live_target("这不是任何台"))

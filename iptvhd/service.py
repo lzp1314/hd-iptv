@@ -153,6 +153,30 @@ def _ysp_resolver(slug: str) -> tuple[str, str]:
     return url, ysp.UA
 
 
+def live_target(raw_slug: str) -> tuple[str, str] | None:
+    """判断 ``/live/<slug>.m3u8`` 里的 slug 该交给谁，返回 ``(key, 展示名)``。
+
+    两套 slug 并存：
+
+    - ``cctv1`` 这类：央视频的台，要现换票，地址不在 URL 里；
+    - ``o:<base64>`` 这类：官方源（运营商 IPTV 等），上游地址整条编在 slug 里。
+
+    只认前者的话，官方源接进来之后所有台都会回 404「未知频道」，播放器那边
+    看到的就是「源服务器返回错误」——0.9.13 就是这么翻车的。播放器还会把
+    ``o:`` 编码成 ``o%3A``，所以进来先还原。
+    """
+    from . import ysp
+    from .relay import static_url
+
+    key = unquote(raw_slug)
+    row = ysp.CHANNEL_BY_SLUG.get(key.lower())
+    if row is not None:
+        return key.lower(), row[1]
+    if static_url(key):
+        return key, "运营商源"
+    return None
+
+
 class State:
     """进程内共享状态。"""
 
@@ -359,20 +383,18 @@ def make_handler(state: State):
             CDN**；经本机转发分片反而会被平台判成异常流量回 403（见 relay 模块
             开头的说明），所以这里不再代劳。
             """
-            from . import ysp
-
-            key = slug.lower()
-            row = ysp.CHANNEL_BY_SLUG.get(key)
-            if row is None:
+            hit = live_target(slug)
+            if hit is None:
                 self._json({"error": f"未知频道: {slug}", "hint": "/api/live 可列出全部"}, 404)
                 return
+            key, name = hit
             try:
                 text, stale, seq = state.relay.playlist_info(key, self._base())
             except RelayError as exc:
-                self._json({"error": str(exc), "channel": row[1]}, 502)
+                self._json({"error": str(exc), "channel": name}, 502)
                 return
             except Exception as exc:  # noqa: BLE001 - 失败要给出可读原因
-                self._json({"error": f"{type(exc).__name__}: {exc}", "channel": row[1]}, 502)
+                self._json({"error": f"{type(exc).__name__}: {exc}", "channel": name}, 502)
                 return
             # 这几个头是给人排查用的：F12 里看 /live/xxx.m3u8 的响应，
             # Seq 一直不动就是上游卡住了，Stale=1 表示这次给的是旧的那份，
@@ -431,9 +453,11 @@ def make_handler(state: State):
             if len(parts) != 4 or parts[0] != "relay" or parts[2] != "p":
                 self._json({"error": "地址格式应为 /relay/<slug>/p/<token>"}, 400)
                 return
+            # slug 里的 o: 会被播放器/浏览器编码成 o%3A，还原后再交出去，
+            # 否则中转层认不出这是官方源的静态 slug
             try:
                 code, ctype, body, extra = state.relay.resource(
-                    parts[1], parts[3], self.headers.get("Range", ""), self._base()
+                    unquote(parts[1]), parts[3], self.headers.get("Range", ""), self._base()
                 )
             except RelayError as exc:
                 self._json({"error": str(exc)}, 502)
@@ -621,10 +645,33 @@ def make_handler(state: State):
                 self._live(slug)
             elif path == "/api/live":
                 from . import ysp
+
+                # 先列「当前这份结果里真在用的地址」——官方源接进来之后，央视
+                # 走的是 /live/o:... 这类静态 slug，只列央视频那张表等于给了
+                # 一堆已经不是首选的地址，复制过去当然对不上号。
+                rows: list[dict] = []
+                names: set[str] = set()
+                result = load_result(settings) or {}
+                for row in result.get("channels", []) or []:
+                    name = str(row.get("name") or "")
+                    best = next((s for s in (row.get("streams") or []) if s.get("slug")), None)
+                    if not name or not best:
+                        continue
+                    slug = str(best["slug"])
+                    rows.append({
+                        "slug": slug, "name": name, "source": "当前列表",
+                        "url": f"/live/{slug}.m3u8",
+                    })
+                    names.add(name)
+                for row in ysp.CHANNELS:
+                    slug, name = row[0], row[1]
+                    if name in names:
+                        continue
+                    rows.append({"slug": slug, "name": name, "source": "央视频",
+                                 "url": f"/live/{slug}.m3u8"})
                 self._json({
                     "hint": "把 /live/<slug>.m3u8 填进播放器，由本机转发，任何播放器都能放",
-                    "channels": [{"slug": r[0], "name": r[1], "url": f"/live/{r[0]}.m3u8"}
-                                 for r in ysp.CHANNELS],
+                    "channels": rows,
                 })
             else:
                 self._json({"error": "not found", "path": path}, 404)
