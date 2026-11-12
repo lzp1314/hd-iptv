@@ -27,7 +27,7 @@ def _noop(_: str) -> None:
     return None
 
 
-def load_sources(settings: Settings) -> list[dict]:
+def load_sources(settings: Settings, log: Logger | None = None) -> list[dict]:
     sources: list[dict] = []
     path = settings.sources_file
     if path.exists():
@@ -44,6 +44,21 @@ def load_sources(settings: Settings) -> list[dict]:
             url = line.strip()
             if url:
                 sources.append({"name": f"env-{len(sources)}", "type": "subscription", "url": url})
+
+    # 按名字整条跳过。给的是「不在本省宽带上」的人用：运营商官方源是按省隔离的，
+    # 外省的出口 IP 一律 403/302 循环，开着只会白跑一趟并在面板上留一片灰。
+    # 写名字而不是类型，是因为同名源可能换 type，但「运营商官方源」这个名字稳定。
+    skip = {
+        x.strip().lower()
+        for x in os.environ.get("HDIPTV_SKIP_SOURCES", "").replace("，", ",").split(",")
+        if x.strip()
+    }
+    if skip:
+        kept = [x for x in sources if str(x.get("name", "")).strip().lower() not in skip]
+        dropped = len(sources) - len(kept)
+        if dropped and log:
+            log(f"[源] 按 HDIPTV_SKIP_SOURCES 跳过 {dropped} 个源")
+        sources = kept
 
     # 本地源的相对路径统一按项目根目录解析，避免受工作目录影响
     for item in sources:
@@ -432,7 +447,7 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
         return report
     log(f"[模板] 载入 {len(channels)} 个频道")
 
-    sources = load_sources(settings)
+    sources = load_sources(settings, log)
     measure_round = _is_measure_round(settings)
     if measure_round:
         # 抽测轮：主源临时打开 resolve + verify_segment，去取真实地址并测速。

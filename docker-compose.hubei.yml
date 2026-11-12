@@ -1,0 +1,51 @@
+# hd-iptv —— 湖北省内移动宽带部署文件
+#
+# 家里是湖北省内的移动宽带（武汉、宜昌、襄阳、荆州……全省都算）用这一份。
+#
+# 和 docker-compose.yml 的唯一差别：这一份**不跳过**「运营商官方源」。
+# 不是湖北省内移动宽带的，请改用 docker-compose.yml。
+#
+#   docker compose -f docker-compose.hubei.yml up -d --build
+
+services:
+  hd-iptv:
+    build: .
+    image: hd-iptv:local
+    container_name: ${CONTAINER_NAME:-hd-iptv}
+    restart: unless-stopped
+
+    ports:
+      # 左边是 NAS 上的端口，冲突了改左边（比如 9798:9797）
+      - "${HOST_PORT:-9797}:9797"
+
+    volumes:
+      - ${CONFIG_DIR:-./config}:/app/config
+      - ${OUTPUT_DIR:-./output}:/app/output
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 刻意写死空字符串，**不读 .env 里的 HDIPTV_SKIP_SOURCES**：
+      # 那份 .env 是给通用版用的，默认值就是「运营商官方源」，读过来会把这一份
+      # 想启用的源正好跳过，两个文件互相打架。
+      # 哪天真要临时关掉官方源，把下面的 "" 改成 "运营商官方源" 即可。
+      HDIPTV_SKIP_SOURCES: ""
+      HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-24}
+      HDIPTV_MIN_HEIGHT: ${HDIPTV_MIN_HEIGHT:-720}
+      HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-2160}
+      HDIPTV_PLAY_MODE: ${HDIPTV_PLAY_MODE:-direct}
+      HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      HDIPTV_SECRET: ${HDIPTV_SECRET:-}
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

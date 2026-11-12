@@ -1,9 +1,9 @@
-# hd-iptv —— 一条命令起服务
+# hd-iptv —— 通用部署文件
+#
+# 非湖北省内用户用这一份。默认跳过「运营商官方源」，只启用全国都能用的源。
+# 湖北省内移动宽带请改用 docker-compose.hubei.yml。
 #
 #   docker compose up -d --build      本地构建（clone 源码后用这个）
-#
-# 想改用预构建镜像（不本地构建）：把下面 build 那行删掉，换成
-#   image: ghcr.io/<你的GitHub用户名>/hd-iptv:latest
 #
 # 端口、目录、刷新间隔都可以写进同目录的 .env 文件，见 .env.example。
 
@@ -27,6 +27,10 @@ services:
 
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      # 按名字跳过源，逗号分隔。默认跳过运营商官方源（仅湖北省内移动宽带可用）。
+      # 用 `-` 而不是 `:-`：这样在 .env 里写 `HDIPTV_SKIP_SOURCES=`（留空）
+      # 就能真的关掉跳过，而不会被默认值顶回去——`:-` 遇到空值会退回默认。
+      HDIPTV_SKIP_SOURCES: ${HDIPTV_SKIP_SOURCES-运营商官方源}
       # 定时刷新间隔（小时）。每轮要把每个台各取一次清单，上游按 IP 限频，
       # 别调太勤；播放地址是按需换票的，列表过期不影响观看。
       HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-24}
