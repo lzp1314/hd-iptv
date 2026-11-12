@@ -2,7 +2,7 @@
 
 **自部署的 IPTV 播放列表管理工具：整理、测速、聚合与分发节目清单，供个人与家庭内网使用。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![Version](https://img.shields.io/badge/version-0.9.15-blue.svg)](https://github.com/lzp1314/hd-iptv)
+[![Version](https://img.shields.io/badge/version-0.9.16-blue.svg)](https://github.com/lzp1314/hd-iptv)
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -12,7 +12,138 @@
 
 ## 部署
 
-### Docker Compose
+### 方式一：预构建镜像（推荐，不用 clone 源码）
+
+任何能跑 Docker 的机器都适用：群晖、威联通、飞牛、极空间、绿联、Unraid、
+树莓派 / Armbian、普通 Linux 服务器，以及装了 Docker Desktop 的 Windows / macOS。
+不需要 Python 环境，依赖全在镜像里，多架构（`amd64` / `arm64` / `armv7`）自动匹配。
+
+三步：建一个空目录进去 → 把下面的内容存成 `docker-compose.yml` → `docker compose up -d`。
+`config/`、`output/` 会自动创建，不用手工建。
+
+```bash
+mkdir -p ~/hd-iptv && cd ~/hd-iptv
+# 把下面这段存成这个目录里的 docker-compose.yml
+```
+
+```yaml
+# hd-iptv —— 完整部署文件
+# 存成 docker-compose.yml，与 config/、output/ 同级
+
+services:
+  hd-iptv:
+    # 预构建多架构镜像（amd64 / arm64 / armv7），自动匹配你的机器
+    # 想锁死版本写 :0.9.16；想跟着修 bug 写 :latest
+    image: ghcr.io/lzp1314/hd-iptv:latest
+    container_name: hd-iptv
+    restart: unless-stopped
+
+    ports:
+      # 左边是宿主机端口（冲突了改左边），右边固定 9797 不要动
+      - "9797:9797"
+
+    volumes:
+      # 配置：频道模板 channels.txt、采集源 sources.toml、config.toml、
+      # 面板设置 panel.json。建议换成自己盘上的绝对路径，例如
+      #   /vol2/1000/docker/hd-iptv/config:/app/config
+      - ./config:/app/config
+      # 结果：playlist.m3u、txt、json、台标缓存 logos/
+      - ./output:/app/output
+
+    environment:
+      TZ: Asia/Shanghai
+
+      # 自动刷新间隔（小时）。上游按 IP 限频，别调太勤；0 = 关掉定时刷新。
+      # 播放地址是按需换票的，列表过期不影响正在看的人。
+      HDIPTV_INTERVAL_HOURS: "24"
+
+      # 画质区间。**别把 MAX_HEIGHT 写成 1080**：有些源只给 2160 一路，
+      # 卡住上限就把唯一能用的地址整条丢掉，退回 1Mbps 的中转空壳。
+      HDIPTV_MIN_HEIGHT: "720"
+      HDIPTV_MAX_HEIGHT: "2160"
+
+      # direct = 清单本机下发、分片由播放器直连 CDN（最流畅，默认）
+      # proxy  = 分片也经本机转发（只有直连放不出来时才用，吃本机带宽）
+      HDIPTV_PLAY_MODE: "direct"
+
+      # 分片缓存上限（MB），只对 proxy 模式生效
+      HDIPTV_RELAY_CACHE_MB: "96"
+
+      # 订阅里每个台写几行。1 = 不会出现「重复台」；
+      # 想手动切备用线路再调 2~4（VLC 会把每行都显示成一个台）
+      HDIPTV_LINES_PER_CHANNEL: "1"
+
+      # 对外地址。留空 = 按访问时的域名端口自动判断，套了反代也不用填。
+      # 只有「反代挂在子路径下、又没透传 X-Forwarded-Host」时才需要写死，
+      # 例如 https://tv.example.com:8443 。**不要自己加密码段**，程序会接。
+      PUBLIC_URL: ""
+
+      # 访问密码（URL 里的一段路径）。设了之后所有地址都要带 /<密码>/，
+      # 不带就回「身份认证失败」，局域网也一样。
+      # 只能用字母、数字和 - _ . ~ ；留空 = 不设密码。
+      # 也可以在面板「运行设置」里改，改完立刻生效、不用重启。
+      HDIPTV_SECRET: ""
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      # 不限制的话，长期运行的日志会把盘吃满
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+```
+
+存好之后启动：
+
+```bash
+docker compose up -d
+```
+
+浏览器打开 `http://你的IP:9797` 就是面板。第一次进去列表是空的，点「立即更新」，
+等一两分钟出结果。`config/`、`output/` 空着没关系，容器会自己建并补一份默认配置。
+
+确认真的起来了：
+
+```bash
+docker compose ps          # STATUS 显示 Up (healthy) 即正常
+docker compose logs -f     # 看采集日志，Ctrl+C 退出
+```
+
+#### 拉不动镜像怎么办
+
+`ghcr.io` 在国内部分网络下会超时，表现为 `pull access denied` 或卡在
+`Waiting`。三个办法，按省事程度排：
+
+1. **换个网络重试**：手机热点、给路由器换 DNS，往往一次就过；
+2. **给 Docker 配代理**：设置 `HTTP_PROXY` / `HTTPS_PROXY` 后重新 `pull`；
+3. **改用源码构建**：见下面「方式二」，完全不依赖镜像仓库，代价是多花几分钟。
+
+方式二同样要拉 Python 基础镜像（走 Docker Hub），若 Docker Hub 也慢，先配镜像加速器。
+
+#### 需要运营商官方源（本省宽带 IPTV）时，改用 host 网络
+
+默认的桥接网络在部分 NAS 上拿不到 IPv6 路由，而运营商官方源只下发 IPv6 边缘，
+这时容器内的探测会整批失败。改法是把端口映射换成 host 网络：
+
+```yaml
+    # 删掉 ports: 那三行，换成下面这行
+    network_mode: host
+```
+
+两点注意：
+
+- host 模式下容器直接用宿主机网络，`ports` 必须删掉，否则报错或端口冲突；
+- host 模式下 `127.0.0.1:9797` 仍然可用，健康检查不用改。
+
+公开源、央视频接口这类 IPv4 可达的源，桥接模式就够了，不必开 host。
+
+### 方式二：从源码构建
 
 ```bash
 git clone https://github.com/lzp1314/hd-iptv.git
@@ -23,7 +154,7 @@ docker compose up -d --build
 
 `config/` 是空的也没关系，首次启动会自动补一份默认配置。
 
-常用环境变量（`.env` 里写，或直接 `-e`）：
+常用环境变量（方式二写在 `.env` 里；方式一直接在 YAML 的 `environment` 段改）：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -46,9 +177,10 @@ docker compose up -d --build
 给「反代到公网」的场景准备的：设一个密码，所有地址都要带它，不带就只显示
 「身份认证失败」——局域网也一样。
 
+把上面 `docker-compose.yml` 里这一行改成你的密码（或者留着空，启动后在面板里设）：
+
 ```yaml
-environment:
-  HDIPTV_SECRET: "tv7Kd2x"
+      HDIPTV_SECRET: "tv7Kd2x"
 ```
 
 设完之后地址变成：
@@ -123,8 +255,7 @@ config/sources.toml -> [[source]] name = "运营商官方源"  type = "local"
 
 1. 文件管理建目录 `/vol2/1000/docker/hd-iptv/`，里面再建 `config`、`output`
 2. Docker → Compose → 新建项目，项目目录选 `/vol2/1000/docker/hd-iptv`
-3. compose 内容用仓库里的 `docker-compose.yml`，把 `build: .` 换成
-   `image: ghcr.io/lzp1314/hd-iptv:latest`（面板里没有源码，构建不了）
+3. compose 内容直接用上面「方式一」那份完整 YAML（面板里没有源码，构建不了）
 4. 卷映射写**绝对路径**：`/vol2/1000/docker/hd-iptv/config:/app/config`
 5. 启动，浏览器开 `http://飞牛IP:9797`
 
@@ -145,7 +276,8 @@ docker compose up -d --build
 
 ## ARM 板 / Armbian
 
-支持。镜像有 `amd64`、`arm64`、`armv7` 三种，Armbian 上装好 Docker 直接拉就行：
+支持。镜像有 `amd64`、`arm64`、`armv7` 三种，Armbian 上装好 Docker 直接拉就行。
+把上面「方式一」的 `docker-compose.yml` 存到板子上任意目录，然后：
 
 ```bash
 curl -fsSL https://get.docker.com | sh     # 已经装了可跳过
@@ -165,11 +297,12 @@ ARM 板 CPU 弱一点不影响播放：清单由本机整理、分片由播放�
 
 | 位置 | 说明 |
 |---|---|
-| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`），tag 有 `latest` 和 `main` |
+| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.16` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
 | 本地构建 | `docker compose up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库 |
 
-GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉不动 `ghcr.io` 时用本地
-构建那条，效果一样。
+GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉了 `latest` 想升级就重新
+`docker compose pull && docker compose up -d`；想停在某个版本就把 `image` 写成
+`:0.9.16`，之后 pull 也不会动。拉不动 `ghcr.io` 时用本地构建那条，效果一样。
 
 ## 命令行
 
