@@ -79,6 +79,13 @@ secret = ""
 # 订阅里每个台写几行。1 = 只写最好的一条，VLC 这类不按台名归并的播放器不会出现
 # 「重复台」；保留的备用线路还在 result.json 里，想手动切线路就调到 2~4。
 lines_per_channel = 1
+
+# 手动指定省份 / 运营商。留空 = 自动识别（调 IP 归属地接口，结果缓存一天）。
+# 只在自动识别判错时才需要填 —— 跨省出口、机房 IP、CGNAT 都可能被判成邻省。
+# 省份写拼音：hubei / guangdong / neimenggu ……
+# 运营商写：mobile / telecom / unicom / broadnet
+region = ""
+isp = ""
 # 想彻底从订阅里去掉的台（面板上点「隐藏」会自动维护这里）。
 # 留空表示全部输出；写名字要跟 channels.txt 里一致，例如 hidden = ["CCTV-2", "湖南卫视"]
 hidden = []

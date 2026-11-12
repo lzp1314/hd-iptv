@@ -17,6 +17,7 @@ from .logos import Logos
 from .models import Channel, Stream
 from .pipeline import load_result, run_update
 from .relay import Relay, RelayError
+from .region import detect
 from .settings import Settings, clean_secret, coerce_panel, write_panel
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -221,6 +222,11 @@ class State:
         )
         self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
         self.logos = Logos(settings.data_dir / "logos")
+        # 这条宽带是哪里的：只用于面板展示和你自己判断该开哪些源，
+        # 采集流程一概不看它 —— 识别失败也不会少一个台。
+        self.region: dict = {}
+        self._region_lock = threading.Lock()
+        self._region_busy = False
         # 「清单冻住」这类事只在这里看得见，接到面板的运行日志里
         self.relay.attach_log(self.log)
 
@@ -230,6 +236,34 @@ class State:
         with self.lock:
             self.logs.append(line)
             self.logs = self.logs[-200:]
+
+    # ---------------- 这条宽带是哪里的 ----------------
+    def refresh_region(self, force: bool = False) -> dict:
+        """识别省份 / 运营商 / IPv6，结果缓存在 output/region.json。
+
+        放在后台线程跑：两次外部接口 + IPv6 探测最坏要七八秒，不能卡住启动。
+        识别不出来也无所谓，面板上少一行字而已，采集和播放完全不受影响。
+        """
+        with self._region_lock:
+            if self._region_busy:
+                return self.region
+            self._region_busy = True
+        try:
+            info = detect(
+                self.settings.data_dir,
+                manual_province=self.settings.region_hint,
+                manual_isp=self.settings.isp_hint,
+                force=force,
+            )
+        except Exception as exc:                     # noqa: BLE001 - 识别失败不算错误
+            info = {"ok": False, "note": "没能识别出运营商（不影响使用）"}
+            self.log(f"[网络] 识别宽带信息失败：{type(exc).__name__}")
+        with self._region_lock:
+            self._region_busy = False
+            self.region = info
+        if info.get("ok"):
+            self.log(f"[网络] 检测到 {info.get('note')}")
+        return info
 
     # ---------------- 设置 ----------------
     def current_settings(self) -> dict:
@@ -675,6 +709,8 @@ def make_handler(state: State):
                         "logs": state.logs[-40:],
                         "settings": state.current_settings(),
                         "base": self._base(),
+                        # 这条宽带是哪里的。只用于面板提示，采集流程不看它。
+                        "region": state.region or {},
                         "epg": state.epg.stats(),
                         "logos": state.logos.stats(),
                         # 上游被限流时面板要能说清楚，而不是只让用户看到画面卡住
@@ -863,6 +899,8 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
         state.trigger()
 
     threading.Thread(target=_scheduler, args=(state,), daemon=True).start()
+    # 识别宽带放后台：面板第一屏就能打开，几秒后那一行自己补上
+    threading.Thread(target=state.refresh_region, daemon=True).start()
     interval = settings.interval_hours
     state.log(
         f"定时更新：每 {interval:g} 小时一次" if interval > 0 else "定时更新：已关闭（面板里可以打开）"

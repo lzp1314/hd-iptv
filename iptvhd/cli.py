@@ -29,7 +29,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=9797)
 
-    sub.add_parser("doctor", help="环境与配置自检")
+    p_doctor = sub.add_parser("doctor", help="环境与配置自检")
+    p_doctor.add_argument(
+        "--isp", action="store_true",
+        help="改成测本省运营商的 IPTV 入口通不通（只读诊断，不改配置）",
+    )
 
     p_probe = sub.add_parser("probe", help="探测地址的真实画质与速率（判断源能不能用）")
     p_probe.add_argument("urls", nargs="+", help="一个或多个 m3u8 地址")
@@ -115,8 +119,20 @@ def cmd_serve(root: Path, config: str | None, host: str, port: int) -> int:
     return 0
 
 
-def cmd_doctor(root: Path, config: str | None) -> int:
+def cmd_doctor(root: Path, config: str | None, isp_check: bool = False) -> int:
     settings = load_settings(root, config)
+
+    # --isp：只跑运营商自测，不打印配置检查——那一屏对「我这儿能不能用本地源」
+    # 这个问题没帮助，混在一起反而看不到结论。
+    if isp_check:
+        from .ispcheck import run
+
+        return run(
+            settings.data_dir,
+            manual_province=settings.region_hint,
+            manual_isp=settings.isp_hint,
+        )
+
     ok = True
     print(f"hd-iptv {__version__}")
     print(f"Python {sys.version.split()[0]}  平台 {sys.platform}")
@@ -185,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         return cmd_serve(root, args.config, args.host, args.port)
     if args.command == "doctor":
-        return cmd_doctor(root, args.config)
+        return cmd_doctor(root, args.config, args.isp)
     if args.command == "probe":
         return cmd_probe(root, args.config, args.urls)
 

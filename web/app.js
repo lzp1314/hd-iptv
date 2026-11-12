@@ -96,6 +96,32 @@ function renderMissing(rows) {
     (absent.length ? "。上游没有的台不用管，模板里已注释掉；想加就自己接一个订阅源。" : "。下一轮会自动重试，已取到过的台不会从列表里消失。");
 }
 
+// 这条宽带是哪里的。识别不出来就整行不显示 —— 少一行字，比显示「未知」更不烦人。
+// 只做提示：检测结果不参与采集，也不会替你去网上找本省的源（各省地址形态不同，
+// 猜错的代价是整批超时）。真有本地运营商 IPTV 的，按这句提示自己加一条源即可。
+function renderRegion(r) {
+  const box = $("regionNote");
+  if (!box) return;
+  if (!r || !r.ok) {
+    box.hidden = true;
+    return;
+  }
+  const where = [r.province_name, r.isp_name].filter(Boolean).join(" · ");
+  let text = `本机宽带：${where} · ${r.ipv6 ? "IPv6 可用" : "没有 IPv6 出口"}`;
+  if (r.manual) text += "（手动指定）";
+  if (r.province === "hubei" && r.isp === "mobile") {
+    text += "。这条宽带能用自带的运营商源；频道里要是没有湖北本地台，" +
+      "多半是通用版把它跳过了，换成 docker-compose.hubei.yml 即可。";
+  } else if (r.province) {
+    text += "。自带的那份只管湖北省内移动宽带，不用管；你这边如果也开了运营商 IPTV，" +
+      "可以把自己的 m3u 放进 config/，在 sources.toml 里加一条 local 源" +
+      "（trust = true，README 有示例）。";
+    if (!r.ipv6) text += "这类源只走 IPv6，取不到也正常。";
+  }
+  box.hidden = false;
+  box.textContent = text;
+}
+
 async function loadStatus() {
   try {
     const r = await fetch("api/status", { cache: "no-store" });
@@ -152,6 +178,7 @@ async function loadStatus() {
     }
 
     renderMissing(rep.missing || []);
+    renderRegion(d.region || {});
 
     if ($("epgNote")) $("epgNote").textContent = epgText(d.epg);
     fillSettings(d.settings || {});

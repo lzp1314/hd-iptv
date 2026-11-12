@@ -292,6 +292,20 @@ class Settings:
         return (os.environ.get("PUBLIC_URL") or self.get("output", "public_url", "")).strip().rstrip("/")
 
     @property
+    def region_hint(self) -> str:
+        """手动指定省份（拼音，如 ``hubei``）。
+
+        只在自动识别判错时才需要填 —— IP 归属地库偶尔会把跨省出口判成邻省。
+        填了就以它为准，不再看 IP 库。
+        """
+        return (os.environ.get("HDIPTV_REGION") or self.get("output", "region", "")).strip().lower()
+
+    @property
+    def isp_hint(self) -> str:
+        """手动指定运营商：``mobile`` / ``telecom`` / ``unicom`` / ``broadnet``。"""
+        return (os.environ.get("HDIPTV_ISP") or self.get("output", "isp", "")).strip().lower()
+
+    @property
     def secret(self) -> str:
         """访问密码：URL 里的一段必填路径。
 
