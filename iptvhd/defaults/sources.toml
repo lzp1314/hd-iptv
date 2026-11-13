@@ -213,3 +213,22 @@ name_group = 2                 # 第几个捕获组是频道名
 group = "网页"
 # headers = { Referer = "https://example.com/" }
 # base_url = "https://example.com/"   # 相对地址的基准，默认用 url
+
+# hd-iptv: public-sources-v1 —— 0.9.18 起新增的两条公开转播源。
+# 这行是升级标记：看到它就说明这两条源已经处理过。之后你删掉它们、
+# 或者改了别的配置，程序都不会再塞回来。
+# ---------------- 公开转播源（全国可用，补充候选线路） ----------------
+# HerbertHe/iptv-sources 的成品清单，按内容类型分组、不按省份组织。
+# 代价：单个第三方站点维护，随时可能失效或夹广告；探测阶段会按画质和
+# 速率筛，坏线路自动淘汰，匹配不上频道模板的条目会被丢掉。
+[[source]]
+name = "聚合源-公开转播"
+type = "subscription"
+urls = ["https://m3u.ibert.me/cn.m3u"]
+enabled = true
+
+[[source]]
+name = "聚合源-精简线路"
+type = "subscription"
+urls = ["https://m3u.ibert.me/cn_p.m3u"]
+enabled = true

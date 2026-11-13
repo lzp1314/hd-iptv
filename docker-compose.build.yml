@@ -6,9 +6,9 @@
 #
 #   docker compose -f docker-compose.build.yml up -d --build
 #
-# 湖北省内移动宽带：在 .env 里写 HDIPTV_SKIP_SOURCES=（值留空），
-# 或者启动时带上前缀：
-#   HDIPTV_SKIP_SOURCES= docker compose -f docker-compose.build.yml up -d --build
+# 湖北省内移动宽带：把 HDIPTV_SKIP_SOURCES 写成两条全国聚合源的名字，
+# 保留「运营商官方源」、不让第三方清单参与探测：
+#   HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compose -f docker-compose.build.yml up -d --build
 # 注意用的是 `${VAR-默认}` 而不是 `${VAR:-默认}`：`:-` 遇到空串会退回默认值，
 # 那样就永远关不掉跳过了。
 #
@@ -59,6 +59,8 @@ services:
       # 不带就回「身份认证失败」；清单里的分片、台标会自动带上这段，播放器不用改。
       # 只用字母数字和 - _ . ；留空 = 不设密码。改完 docker compose up -d 生效。
       HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
+      # 自动按省取源（面板「运行设置」里的开关优先）；写 0 关闭
+      HDIPTV_AUTO_REGION: "${HDIPTV_AUTO_REGION:-1}"
 
     # Dockerfile 里已有同样的 HEALTHCHECK，这里显式写一份方便肉眼确认
     healthcheck:

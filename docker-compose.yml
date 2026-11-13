@@ -13,7 +13,7 @@
 services:
   hd-iptv:
     # 预构建多架构镜像（amd64 / arm64 / armv7）。想锁版本：.env 里写
-    # HDIPTV_IMAGE_TAG=0.9.17，或者直接把下面的 latest 改成 0.9.17
+    # HDIPTV_IMAGE_TAG=0.9.18，或者直接把下面的 latest 改成 0.9.18
     image: ghcr.io/lzp1314/hd-iptv:${HDIPTV_IMAGE_TAG:-latest}
     container_name: ${CONTAINER_NAME:-hd-iptv}
     restart: unless-stopped
@@ -58,6 +58,8 @@ services:
       # 不带就回「身份认证失败」；清单里的分片、台标会自动带上这段，播放器不用改。
       # 只用字母数字和 - _ . ；留空 = 不设密码。改完 docker compose up -d 生效。
       HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
+      # 自动按省取源（面板「运行设置」里的开关优先）；写 0 关闭
+      HDIPTV_AUTO_REGION: "${HDIPTV_AUTO_REGION:-1}"
 
     # Dockerfile 里已有同样的 HEALTHCHECK，这里显式写一份方便肉眼确认
     healthcheck:

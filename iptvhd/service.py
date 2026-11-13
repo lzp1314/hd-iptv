@@ -273,6 +273,7 @@ class State:
             "playlist_ttl": s.playlist_ttl,
             "cache_mb": int(s.relay_cache_mb),
             "play_mode": s.play_mode,
+            "auto_region": s.auto_region,
             "public_url": s.public_url,
             # 只读：面板据此在每个地址后面带上密码段，前端不允许写回
             "secret": s.secret,
@@ -868,6 +869,10 @@ def _scheduler(state: State) -> None:
             time.sleep(15)
             continue
         state.trigger()
+        # 宽带识别只在启动时跑过一次，缓存一天就过期，容器长期不重启时
+        # 面板那行会消失、自动按省取源也拿不到省份。每轮顺手刷一次；
+        # detect() 命中缓存就直接返回，不会每轮都去查归属地接口。
+        state.refresh_region()
         finish_at = time.time() + interval * 3600
         while time.time() < finish_at:
             # 分片睡眠：面板把间隔改小以后最多 15 秒就生效

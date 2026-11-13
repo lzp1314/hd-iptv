@@ -26,6 +26,19 @@ PANEL_BOUNDS = {
     "cache_mb": (0.0, 4096.0),
 }
 
+_FALSE_WORDS = {"0", "false", "off", "no", "关", "关闭", ""}
+
+
+def as_bool(value, default: bool = True) -> bool:
+    """面板 checkbox / 环境变量 / TOML 三处来的开关统一收敛成布尔。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() not in _FALSE_WORDS
+
 # 公共节目单源：epg.pw 的国内频道表，用 display-name 反查 id
 DEFAULT_EPG_SOURCE = "https://epg.pw/xmltv/epg_CN.xml"
 
@@ -37,6 +50,8 @@ data_dir = "output"
 [update]
 interval_hours = 24
 run_on_start = true
+# 按本机宽带省份自动接入本省运营商单播清单（面板里也能开关，面板优先）
+auto_region = true
 
 [fetch]
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -147,6 +162,8 @@ def coerce_panel(raw: dict) -> dict:
             text = str(value or "").strip().lower()
             if text in ("direct", "proxy"):
                 out[key] = text
+        elif key == "auto_region":
+            out[key] = as_bool(value)
         elif key in PANEL_BOUNDS:
             try:
                 num = float(value)
@@ -290,6 +307,22 @@ class Settings:
         if panel is not None:
             return str(panel).strip().rstrip("/")
         return (os.environ.get("PUBLIC_URL") or self.get("output", "public_url", "")).strip().rstrip("/")
+
+    @property
+    def auto_region(self) -> bool:
+        """是否按本机宽带省份自动接入本省运营商单播清单。
+
+        面板开关优先，其次 ``HDIPTV_AUTO_REGION``，最后 config.toml；默认开。
+        面板里存过一次值（哪怕是关）就以它为准，免得容器环境变量把用户
+        在面板上的选择又顶回去。
+        """
+        panel = self.panel_get("auto_region")
+        if panel is not None:
+            return as_bool(panel)
+        raw = os.environ.get("HDIPTV_AUTO_REGION")
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("update", "auto_region", True))
 
     @property
     def region_hint(self) -> str:
@@ -587,3 +620,65 @@ def upgrade_sources(path: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+# 0.9.18 新增的两条公开转播源。宿主机上挂载的旧 sources.toml 不会随镜像
+# 更新，光改仓库里的模板对老用户没用，所以这里做一次「增量追加」：
+# 只加缺的那两条，用户自己写的东西一个字不动。
+_PUBLIC_SOURCES_MARKER = "# hd-iptv: public-sources-v1"
+_PUBLIC_SOURCES_NAMES = ("聚合源-公开转播", "聚合源-精简线路")
+PUBLIC_SOURCES_BLOCK = """
+
+# hd-iptv: public-sources-v1 —— 0.9.18 起新增的两条公开转播源。
+# 这行是升级标记：看到它就说明这两条源已经处理过。之后你删掉它们、
+# 或者改了别的配置，程序都不会再塞回来。
+# ---------------- 公开转播源（全国可用，补充候选线路） ----------------
+# HerbertHe/iptv-sources 的成品清单，按内容类型分组、不按省份组织。
+# 代价：单个第三方站点维护，随时可能失效或夹广告；探测阶段会按画质和
+# 速率筛，坏线路自动淘汰，匹配不上频道模板的条目会被丢掉。
+[[source]]
+name = "聚合源-公开转播"
+type = "subscription"
+urls = ["https://m3u.ibert.me/cn.m3u"]
+enabled = true
+
+[[source]]
+name = "聚合源-精简线路"
+type = "subscription"
+urls = ["https://m3u.ibert.me/cn_p.m3u"]
+enabled = true
+"""
+
+
+def append_public_sources(path: Path) -> bool:
+    """老用户的 sources.toml 缺这两条源时，追加一次。
+
+    ``upgrade_sources()`` 只在「整个文件还是出厂模板」时才整份替换；
+    已经含「运营商官方源」的文件动不了。这里补上增量升级。
+
+    标记的作用是「只处理一次」：用户后来主动删掉这两条源，不该在每次
+    更新时又被强行加回来。所以有标记就不再追加，哪怕源已经不在了。
+    """
+    path = Path(path)
+    if not path.exists():
+        return False
+    try:
+        current = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    if _PUBLIC_SOURCES_MARKER in current:
+        return False
+    # 只对「还是出厂默认模板」的文件补源。自己写的一份精简 sources.toml
+    # 不含这行特征，一个字都不动 —— 免得把用户没要的源硬塞进去。
+    if _NEW_SOURCES_MARKER not in current:
+        return False
+    block = PUBLIC_SOURCES_BLOCK
+    if any(name in current for name in _PUBLIC_SOURCES_NAMES):
+        # 用户自己加过同名源：只补标记，不重复加
+        block = f"\n{_PUBLIC_SOURCES_MARKER}（同名源已存在，未重复添加）\n"
+    try:
+        with path.open("a", encoding="utf-8") as fp:
+            fp.write(block)
+    except OSError:
+        return False
+    return block == PUBLIC_SOURCES_BLOCK

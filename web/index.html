@@ -95,6 +95,12 @@
           <option value="proxy">经本机转发</option>
         </select>
       </label>
+      <label>自动按省取源
+        <select id="setAutoRegion">
+          <option value="1">开启（推荐）</option>
+          <option value="0">关闭</option>
+        </select>
+      </label>
       <label>对外地址
         <input id="setPublicUrl" type="text" placeholder="留空 = 用你打开面板的这个地址">
       </label>
@@ -117,6 +123,8 @@
     </div>
     <p class="hint" id="settingsNote">
       套了反向代理（Lucky / Nginx）时「对外地址」留空即可，面板和订阅列表都会用你访问时的域名和端口。
+      「自动按省取源」按识别出的省份和运营商去取本省公开清单，只给现有频道补线路；湖北移动会跳过（项目已内置）。
+      开关在下一次更新时生效，想立刻看效果就点一次「立即更新」。
     </p>
   </section>
 

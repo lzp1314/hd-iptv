@@ -12,9 +12,8 @@
 * 公开清单库的 ``Unicast/<省>/<运营商>.txt``：**运行时读，不打包进仓库**
   （那份清单没有许可证，不能随镜像分发）。取不到就只跑内置表，结论里会写明。
 
-为什么不做成「自动接进来」：各省 CDN 形态不同（域名 / 端口 / 账号串 / 签名），
-不在本省网络上试一次，猜错就是整批超时。这里只负责把「有没有、通不通」说清楚，
-接不接、怎么接由人决定。
+自动接入是 ``autoregion`` 的职责（按识别结果取清单、串行慢探、只给模板内频道
+补线路），这里只做只读诊断：把「有没有、通不通」说清楚，方便确认和排障。
 """
 
 from __future__ import annotations
@@ -159,6 +158,9 @@ def fetch_list(province: str, isp: str, timeout: float = 8.0) -> tuple[str, str]
     """取公开清单里本省这一份。返回 ``(文本, 状态)``，状态给人看。
 
     状态：``ok`` / ``missing``（没有这一份）/ ``fail``（取不到）。
+
+    每个入口失败后再试一次：国内访问 GitHub raw / jsDelivr 经常是首次 TLS
+    抖动，隔 0.3 秒重试往往就通。别把偶发抖动当成「本省没有这一份」。
     """
     if not province or not isp:
         return "", "missing"
@@ -166,14 +168,19 @@ def fetch_list(province: str, isp: str, timeout: float = 8.0) -> tuple[str, str]
     for tpl in _LIST_URLS:
         url = tpl.format(province=province, isp=isp)
         req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "*/*"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read(256 * 1024).decode("utf-8", "replace"), "ok"
-        except urllib.error.HTTPError as exc:
-            if exc.code in (403, 404):
-                missing = True
-        except Exception:                        # noqa: BLE001 - 换下一个入口
-            continue
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return resp.read(256 * 1024).decode("utf-8", "replace"), "ok"
+            except urllib.error.HTTPError as exc:
+                if exc.code in (403, 404):
+                    missing = True
+                break                            # 明确的 HTTP 回复，重试也没用
+            except Exception:                    # noqa: BLE001 - 抖动/超时，再试一次
+                if attempt == 0:
+                    time.sleep(0.3)
+                    continue
+        # 这个入口两次都没成，换下一个镜像
     # 「没这一份」是确定的答案（另一个入口是不是通不影响），别被网络问题盖掉
     return "", "missing" if missing else "fail"
 
@@ -245,8 +252,8 @@ def verdict(info: dict, result: dict) -> list[str]:
 
     if ok_rows:
         lines.append(f"结论：{where}能连上运营商入口，这条路值得接。")
-        lines.append("      把本省那份清单存成 config/ 下的 m3u，在 sources.toml 里加一条")
-        lines.append("      type = \"local\"、trust = true 的源即可（湖北移动版已内置）。")
+        lines.append("      自动按省取源（默认开）会自己把这份清单接进来，不用手工加源；")
+        lines.append("      面板「运行设置」里可以关掉，湖北移动版已内置、不会重复接。")
         return lines
 
     if isp == "broadnet":

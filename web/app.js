@@ -113,10 +113,9 @@ function renderRegion(r) {
     text += "。这条宽带能用自带的运营商源；频道里要是没有湖北本地台，" +
       "多半是通用版把它跳过了，换成 docker-compose.hubei.yml 即可。";
   } else if (r.province) {
-    text += "。自带的那份只管湖北省内移动宽带，不用管；你这边如果也开了运营商 IPTV，" +
-      "可以把自己的 m3u 放进 config/，在 sources.toml 里加一条 local 源" +
-      "（trust = true，README 有示例）。";
-    if (!r.ipv6) text += "这类源只走 IPv6，取不到也正常。";
+    text += "。会自动按这个省份去取本省的运营商单播清单，只给央视 / 卫视补线路；" +
+      "在「运行设置 → 自动按省取源」里可以关掉，跑 doctor --isp 能看这路通不通。";
+    if (!r.ipv6) text += "没有 IPv6 时部分入口取不到也正常。";
   }
   box.hidden = false;
   box.textContent = text;
@@ -196,6 +195,7 @@ async function loadStatus() {
 function fillSettings(s) {
   if (settingsDirty) return;
   if ($("setPlayMode")) $("setPlayMode").value = s.play_mode || "direct";
+  if ($("setAutoRegion")) $("setAutoRegion").value = s.auto_region === false ? "0" : "1";
   if ($("setPublicUrl")) $("setPublicUrl").value = s.public_url || "";
   if ($("setInterval")) $("setInterval").value = s.interval_hours != null ? s.interval_hours : "";
   if ($("setTtl")) $("setTtl").value = s.playlist_ttl != null ? s.playlist_ttl : "";
@@ -209,6 +209,7 @@ async function saveSettings() {
   const note = $("settingsNote");
   const payload = {
     play_mode: $("setPlayMode") ? $("setPlayMode").value : "direct",
+    auto_region: $("setAutoRegion") ? $("setAutoRegion").value === "1" : true,
     public_url: $("setPublicUrl").value.trim(),
     interval_hours: Number($("setInterval").value || 0),
     playlist_ttl: Number($("setTtl").value || 1),
@@ -240,7 +241,8 @@ async function saveSettings() {
       return;
     }
     note.textContent = `已保存：更新间隔 ${d.settings.interval_hours} 小时、`
-      + `清单刷新 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB。`
+      + `清单刷新 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB、`
+      + `自动按省取源${d.settings.auto_region === false ? "关闭" : "开启"}。`
       + "播放器里的地址如果变了，重新拉一次列表即可。";
     await refresh();
   } catch (e) {
@@ -900,7 +902,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPlayMode", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
+  ["setPlayMode", "setAutoRegion", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });

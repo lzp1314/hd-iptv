@@ -27,3 +27,8 @@ config/panel.json
 
 # 本机自用配置（host 网络 + 私有路径），不进仓库
 docker-compose.feishu.yml
+
+# 本机自用的湖北频道表接入脚本，以及它下载/备份出来的文件（都不进仓库）
+add-hubei-channels.sh
+config/hubei-mobile.m3u
+config/*.bak-*

@@ -2,7 +2,8 @@
 #
 # 家里是湖北省内的移动宽带（武汉、宜昌、襄阳、荆州……全省都算）用这一份。
 #
-# 和 docker-compose.yml 的唯一差别：这一份**不跳过**「运营商官方源」。
+# 和 docker-compose.yml 的差别：这一份**保留**「运营商官方源」，同时跳过两条
+# 全国聚合源（本省已有稳定的自有线路，不需要第三方清单再参与探测）。
 # 不是湖北省内移动宽带的，请改用 docker-compose.yml。
 #
 # 这一份同样不需要源码、不需要 Dockerfile，只有这段文本就能跑：
@@ -26,11 +27,11 @@ services:
 
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      # 刻意写死空字符串，**不读 .env 里的 HDIPTV_SKIP_SOURCES**：
-      # 那份 .env 是给通用版用的，默认值就是「运营商官方源」，读过来会把这一份
-      # 想启用的源正好跳过，两个文件互相打架。
-      # 哪天真要临时关掉官方源，把下面的 "" 改成 "运营商官方源" 即可。
-      HDIPTV_SKIP_SOURCES: ""
+      # 刻意写死、不读 .env 里的 HDIPTV_SKIP_SOURCES：那份 .env 是给通用版
+      # 用的，默认值是「运营商官方源」，读过来会把这一份想启用的源正好跳过。
+      # 这里只跳过两条全国聚合源，「运营商官方源」保持启用；想连官方源一起
+      # 关掉，把名字补进下面这一行即可（逗号分隔）。
+      HDIPTV_SKIP_SOURCES: "聚合源-公开转播,聚合源-精简线路"
       HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-24}
       HDIPTV_MIN_HEIGHT: ${HDIPTV_MIN_HEIGHT:-720}
       HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-2160}
@@ -38,6 +39,8 @@ services:
       HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
       PUBLIC_URL: "${PUBLIC_URL:-}"
       HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
+      # 自动按省取源（面板「运行设置」里的开关优先）；写 0 关闭
+      HDIPTV_AUTO_REGION: "${HDIPTV_AUTO_REGION:-1}"
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"]

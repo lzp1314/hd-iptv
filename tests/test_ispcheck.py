@@ -219,5 +219,41 @@ class TestRun(unittest.TestCase):
         self.assertIn("手动指定", text)
 
 
+class _Resp:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, _n):
+        return b"CCTV1,http://1.2.3.4/a.m3u8\n"
+
+
+class TestFetchListRetry(unittest.TestCase):
+    """国内访问 GitHub raw / jsDelivr 的首次 TLS 抖动不该被当成「没有这一份」。"""
+
+    def test_transient_error_retries_same_url(self):
+        import urllib.error
+
+        with mock.patch.object(
+            ispcheck.urllib.request, "urlopen",
+            side_effect=[urllib.error.URLError("tls"), _Resp()],
+        ) as opened:
+            text, state = ispcheck.fetch_list("anhui", "mobile")
+        self.assertEqual(state, "ok")
+        self.assertIn("CCTV1", text)
+        self.assertEqual(opened.call_count, 2)
+
+    def test_404_is_missing_not_fail(self):
+        import urllib.error
+
+        err = urllib.error.HTTPError("http://x", 404, "Not Found", {}, None)
+        with mock.patch.object(ispcheck.urllib.request, "urlopen", side_effect=err) as opened:
+            _, state = ispcheck.fetch_list("nowhere", "mobile")
+        self.assertEqual(state, "missing")
+        self.assertEqual(opened.call_count, 2, "两个镜像各确认一次")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -11,14 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import writers
+from . import autoregion, writers
 from .collectors import Collector, SubscriptionCollector, build_collectors, parse_list
 from .models import Channel, RunReport, Stream, need_mbps
 from .net import build_client
 from .normalize import ChannelMatcher, load_channels
 from .probe import probe_gentle, probe_many
 from .relay import needs_relay, static_slug
-from .settings import Settings, upgrade_channels, upgrade_sources
+from .settings import Settings, append_public_sources, upgrade_channels, upgrade_sources
 
 Logger = Callable[[str], None]
 
@@ -44,6 +44,13 @@ def load_sources(settings: Settings, log: Logger | None = None) -> list[dict]:
             url = line.strip()
             if url:
                 sources.append({"name": f"env-{len(sources)}", "type": "subscription", "url": url})
+
+    # 按省份自动挂一份本省运营商单播清单。这里只判断「本地缓存文件在不在」，
+    # 不发网络请求；清单由 run_update() 开头的 refresh() 落盘。放在 skip 之前，
+    # 这样 HDIPTV_SKIP_SOURCES=本省自动源 也能把它关掉。
+    auto = autoregion.auto_source(settings)
+    if auto:
+        sources.append(auto)
 
     # 按名字整条跳过。给的是「不在本省宽带上」的人用：运营商官方源是按省隔离的，
     # 外省的出口 IP 一律 403/302 循环，开着只会白跑一趟并在面板上留一片灰。
@@ -437,8 +444,15 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     # 删容器重建也没用——起来的还是那个被限流的源。
     if upgrade_sources(settings.sources_file):
         log(f"[源] 旧版默认采集源已换成新版（含官方直连）：{settings.sources_file}")
+    if append_public_sources(settings.sources_file):
+        log("[源] 已补上两条公开转播源（你原有的配置未改动，标记后不再重复添加）")
     if settings.config_upgraded:
         log("[配置] 画质上限已从 1080 放开到 4K —— 官方源常常只有 4K 一路")
+
+    # 自动按省取源：唯一会联网的一步，有 24 小时缓存；失败只写一行日志，
+    # 绝不影响后面那些源。放在这里而不是 load_sources()，是为了让测试、
+    # 面板、CLI 调 load_sources() 时保持零网络。
+    autoregion.refresh(settings, log)
 
     channels = load_channels(settings.channels_file)
     report.channels_total = len(channels)
