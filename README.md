@@ -21,6 +21,10 @@
 
 非湖北省内用户，用通用版 `docker-compose.yml` 就行，什么都不用改。
 
+这两份都是**预构建镜像版**：不依赖源码、不需要 `Dockerfile`，只有 compose 文本也能跑，
+可以直接贴进飞牛 / 群晖的 Docker 面板。要本地构建改代码，另用
+`docker-compose.build.yml`（见「方式二」）。
+
 选错了也不会坏，只是有部分频道出不来；改起来就是换一个 compose 文件。拿不准自己
 是哪种，先用通用版跑起来，再看面板顶部那行「本机宽带」——显示湖北移动就换成另一份。
 
@@ -33,16 +37,21 @@
 三步：建一个空目录进去 → 把下面的内容存成 `docker-compose.yml` → `docker compose up -d`。
 `config/`、`output/` 会自动创建，不用手工建。
 
+下面这段可以直接贴进 Docker 面板：`${...}` 变量都填成了默认值，另外把常用的
+`HDIPTV_LINES_PER_CHANNEL` 也一并写出来。仓库根目录的 `docker-compose.yml` 保留了
+变量，方便用 `.env` 调端口、目录和镜像标签，两者效果一样。
+
 ```bash
 mkdir -p ~/hd-iptv && cd ~/hd-iptv
 # 把下面这段存成这个目录里的 docker-compose.yml
 ```
 
 ```yaml
-# hd-iptv —— 通用部署文件
+# hd-iptv —— 通用部署文件（预构建镜像版）
 # 存成 docker-compose.yml，与 config/、output/ 同级
 #
 # 非湖北省内用户用这一份。湖北省内移动宽带请改用 docker-compose.hubei.yml。
+# 不需要源码、不需要 Dockerfile，只有这段文本也能跑。
 
 services:
   hd-iptv:
@@ -125,23 +134,21 @@ docker compose up -d
 
 #### 湖北省内移动宽带：换一份 YAML
 
-仓库里有一份 `docker-compose.hubei.yml`，直接用这份就行。或者把上面那份里的这一行
-**删掉**（值改成空字符串也一样）：
+仓库里的 `docker-compose.hubei.yml` 同样是预构建镜像版，直接用就行：
+
+```bash
+docker compose -f docker-compose.hubei.yml up -d
+```
+
+或者在 Docker 面板里贴它的内容。也可以只把上面那份里的这一行**删掉**（值改成空
+字符串也一样），效果完全相同：
 
 ```yaml
       HDIPTV_SKIP_SOURCES: "运营商官方源"        # ← 删掉这一行
 ```
 
-其余一个字都不用改。
-
-`docker-compose.hubei.yml` 是源码构建版，里面写的是 `build: .` + `image: hd-iptv:local`，
-用预构建镜像的话把这两行换成：
-
-```yaml
-    image: ghcr.io/lzp1314/hd-iptv:latest
-```
-
-这份刻意不读 `.env` 里的同名变量，免得通用版的设置把它要启用的源跳掉。
+其余一个字都不用改。湖北版刻意不读 `.env` 里的同名变量，免得通用版的设置
+把它要启用的源跳掉。
 
 浏览器打开 `http://你的IP:9797` 就是面板。第一次进去列表是空的，点「立即更新」，
 等一两分钟出结果。`config/`、`output/` 空着没关系，容器会自己建并补一份默认配置。
@@ -160,9 +167,10 @@ docker compose logs -f     # 看采集日志，Ctrl+C 退出
 
 1. **换个网络重试**：手机热点、给路由器换 DNS，往往一次就过；
 2. **给 Docker 配代理**：设置 `HTTP_PROXY` / `HTTPS_PROXY` 后重新 `pull`；
-3. **改用源码构建**：见下面「方式二」，完全不依赖镜像仓库，代价是多花几分钟。
+3. **改用源码构建**：见下面「方式二」，用 `docker-compose.build.yml` 不依赖 GHCR，
+   代价是要 clone 完整源码、多花几分钟。
 
-方式二同样要拉 Python 基础镜像（走 Docker Hub），若 Docker Hub 也慢，先配镜像加速器。
+源码构建要拉 Python 基础镜像（走 Docker Hub），若 Docker Hub 也慢，先配镜像加速器。
 
 #### 湖北省内移动宽带：建议改用 host 网络
 
@@ -183,26 +191,33 @@ docker compose logs -f     # 看采集日志，Ctrl+C 退出
 
 ### 方式二：从源码构建
 
+改代码、或者不想依赖任何镜像仓库时用这一份。前提是**当前目录有完整源码**
+（`Dockerfile`、`iptvhd/`、`web/`）；只有 compose 文本会报
+`open Dockerfile: no such file or directory`。
+
 ```bash
 git clone https://github.com/lzp1314/hd-iptv.git
 cd hd-iptv
 cp .env.example .env      # 按需改端口和目录，不改也能跑
 
-# 非湖北省内用户：用这份（默认，自动跳过运营商官方源）
-docker compose up -d --build
+# 非湖北省内用户（默认，自动跳过运营商官方源）
+docker compose -f docker-compose.build.yml up -d --build
 
-# 湖北省内移动宽带：换成这份（不跳过官方源）
-docker compose -f docker-compose.hubei.yml up -d --build
+# 湖北省内移动宽带（不跳过官方源）：HDIPTV_SKIP_SOURCES 留空
+HDIPTV_SKIP_SOURCES= docker compose -f docker-compose.build.yml up -d --build
 ```
 
-两个文件内容完全独立，**换一份的时候先 `docker compose down`**，否则同名容器会
-打架。`config/` 是挂载卷，换哪份都不丢配置；空着也没关系，首次启动会自动补一份
-默认配置。
+> 从旧的 `docker compose up -d --build` 迁过来：现在根目录的 `docker-compose.yml`
+> 是预构建镜像版，`--build` 对它不起作用。要构建本地代码必须显式 `-f` 上面这份。
 
-常用环境变量（方式二写在 `.env` 里；方式一直接在 YAML 的 `environment` 段改）：
+换部署文件时**先 `docker compose down`**，否则同名容器会打架。`config/` 是挂载卷，
+换哪份都不丢配置；空着也没关系，首次启动会自动补一份默认配置。
+
+常用环境变量（写 `.env` 里，或者直接在 YAML 的 `environment` 段改）：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.17`；源码构建版不看这一项 |
 | `HOST_PORT` | `9797` | 宿主机端口，容器内始终是 9797 |
 | `CONFIG_DIR` | `./config` | 配置目录，建议写绝对路径 |
 | `OUTPUT_DIR` | `./output` | 结果目录，建议写绝对路径 |
@@ -358,9 +373,10 @@ udpxy 转；**连清单都没有**基本就是没有对外单播地址，别白�
 
 1. 文件管理建目录 `/vol2/1000/docker/hd-iptv/`，里面再建 `config`、`output`
 2. Docker → Compose → 新建项目，项目目录选 `/vol2/1000/docker/hd-iptv`
-3. compose 内容直接用上面「方式一」那份完整 YAML（面板里没有源码，构建不了）。
-   **湖北省内移动宽带记得删掉 `HDIPTV_SKIP_SOURCES` 那一行**（或直接用
-   `docker-compose.hubei.yml`），否则官方源那批频道不会出现。
+3. compose 内容用上面「方式一」那份完整 YAML，或直接用仓库根目录的
+   `docker-compose.yml` —— 两份都是预构建镜像版，面板里没有源码也能跑。
+   **湖北省内移动宽带记得删掉 `HDIPTV_SKIP_SOURCES` 那一行**（或贴
+   `docker-compose.hubei.yml` 的内容），否则官方源那批频道不会出现。
 4. 卷映射写**绝对路径**：`/vol2/1000/docker/hd-iptv/config:/app/config`
 5. 启动，浏览器开 `http://飞牛IP:9797`
 
@@ -370,7 +386,7 @@ udpxy 转；**连清单都没有**基本就是没有对外单播地址，别白�
 cd /vol2/1000/docker
 git clone https://github.com/lzp1314/hd-iptv.git
 cd hd-iptv
-docker compose up -d --build
+docker compose -f docker-compose.build.yml up -d --build
 ```
 
 > **两个坑**
@@ -403,11 +419,12 @@ ARM 板 CPU 弱一点不影响播放：清单由本机整理、分片由播放�
 | 位置 | 说明 |
 |---|---|
 | `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.17` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
-| 本地构建 | `docker compose up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库 |
+| 本地构建 | `docker compose -f docker-compose.build.yml up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库，但必须有完整源码 |
 
 GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉了 `latest` 想升级就重新
-`docker compose pull && docker compose up -d`；想停在某个版本就把 `image` 写成
-`:0.9.17`，之后 pull 也不会动。拉不动 `ghcr.io` 时用本地构建那条，效果一样。
+`docker compose pull && docker compose up -d`；想停在某个版本，在 `.env` 里写
+`HDIPTV_IMAGE_TAG=0.9.17`（或直接把 `image` 的 `latest` 改成 `0.9.17`），之后 pull
+也不会动。拉不动 `ghcr.io` 时用「方式二」的源码构建版，效果一样，但要先 clone 源码。
 
 ## 命令行
 
