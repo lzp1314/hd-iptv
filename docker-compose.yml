@@ -1,16 +1,20 @@
-# hd-iptv —— 通用部署文件
+# hd-iptv —— 通用部署文件（预构建镜像版）
 #
 # 非湖北省内用户用这一份。默认跳过「运营商官方源」，只启用全国都能用的源。
 # 湖北省内移动宽带请改用 docker-compose.hubei.yml。
 #
-#   docker compose up -d --build      本地构建（clone 源码后用这个）
+# 这一份不需要源码、不需要 Dockerfile，只有这段文本就能跑：
+#   docker compose up -d
+# 飞牛 / 群晖等 Docker 面板里直接粘贴即可。
+# 要本地构建改代码，用 docker-compose.build.yml（见 README「方式二」）。
 #
 # 端口、目录、刷新间隔都可以写进同目录的 .env 文件，见 .env.example。
 
 services:
   hd-iptv:
-    build: .
-    image: hd-iptv:local
+    # 预构建多架构镜像（amd64 / arm64 / armv7）。想锁版本：.env 里写
+    # HDIPTV_IMAGE_TAG=0.9.17，或者直接把下面的 latest 改成 0.9.17
+    image: ghcr.io/lzp1314/hd-iptv:${HDIPTV_IMAGE_TAG:-latest}
     container_name: ${CONTAINER_NAME:-hd-iptv}
     restart: unless-stopped
 
@@ -30,7 +34,7 @@ services:
       # 按名字跳过源，逗号分隔。默认跳过运营商官方源（仅湖北省内移动宽带可用）。
       # 用 `-` 而不是 `:-`：这样在 .env 里写 `HDIPTV_SKIP_SOURCES=`（留空）
       # 就能真的关掉跳过，而不会被默认值顶回去——`:-` 遇到空值会退回默认。
-      HDIPTV_SKIP_SOURCES: ${HDIPTV_SKIP_SOURCES-运营商官方源}
+      HDIPTV_SKIP_SOURCES: "${HDIPTV_SKIP_SOURCES-运营商官方源}"
       # 定时刷新间隔（小时）。每轮要把每个台各取一次清单，上游按 IP 限频，
       # 别调太勤；播放地址是按需换票的，列表过期不影响观看。
       HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-24}
@@ -47,13 +51,13 @@ services:
       HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
       # 对外地址。留空即可：列表按请求的域名端口现拼，套了反代也自动用外网地址；
       # 只有反代不透传 Host 头时才需要填，例如 https://tv.example.com:8443
-      PUBLIC_URL: ${PUBLIC_URL:-}
+      PUBLIC_URL: "${PUBLIC_URL:-}"
       # 访问密码（URL 路径段）。设了之后**所有**地址都要带它：
       #   面板   https://域名:9797/mypass/
       #   订阅   https://域名:9797/mypass/playlist.m3u
       # 不带就回「身份认证失败」；清单里的分片、台标会自动带上这段，播放器不用改。
       # 只用字母数字和 - _ . ；留空 = 不设密码。改完 docker compose up -d 生效。
-      HDIPTV_SECRET: ${HDIPTV_SECRET:-}
+      HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
 
     # Dockerfile 里已有同样的 HEALTHCHECK，这里显式写一份方便肉眼确认
     healthcheck:

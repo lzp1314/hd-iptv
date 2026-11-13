@@ -1,0 +1,75 @@
+# hd-iptv —— 源码构建版（改代码 / 想完全不依赖镜像仓库时用这一份）
+#
+# 前提：当前目录是本仓库的完整源码（有 Dockerfile、iptvhd/、web/）。
+# 只有 compose 文本没有源码，会报 open Dockerfile: no such file or directory。
+# 绝大多数用户请用 docker-compose.yml（预构建镜像，不需要源码）。
+#
+#   docker compose -f docker-compose.build.yml up -d --build
+#
+# 湖北省内移动宽带：在 .env 里写 HDIPTV_SKIP_SOURCES=（值留空），
+# 或者启动时带上前缀：
+#   HDIPTV_SKIP_SOURCES= docker compose -f docker-compose.build.yml up -d --build
+# 注意用的是 `${VAR-默认}` 而不是 `${VAR:-默认}`：`:-` 遇到空串会退回默认值，
+# 那样就永远关不掉跳过了。
+#
+# 端口、目录、刷新间隔都可以写进同目录的 .env 文件，见 .env.example。
+
+services:
+  hd-iptv:
+    build: .
+    image: hd-iptv:local
+    container_name: ${CONTAINER_NAME:-hd-iptv}
+    restart: unless-stopped
+
+    ports:
+      # 左边是 NAS 上的端口，冲突了改左边（比如 9798:9797）
+      - "${HOST_PORT:-9797}:9797"
+
+    volumes:
+      # 配置：频道模板、采集源、config.toml
+      # 目录为空也没关系，首次启动会自动写入一份默认配置
+      - ${CONFIG_DIR:-./config}:/app/config
+      # 结果：result.m3u / result.txt / result.json
+      - ${OUTPUT_DIR:-./output}:/app/output
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 按名字跳过源，逗号分隔。默认跳过运营商官方源（仅湖北省内移动宽带可用）。
+      HDIPTV_SKIP_SOURCES: "${HDIPTV_SKIP_SOURCES-运营商官方源}"
+      # 定时刷新间隔（小时）。每轮要把每个台各取一次清单，上游按 IP 限频，
+      # 别调太勤；播放地址是按需换票的，列表过期不影响观看。
+      HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-24}
+      # 画质区间：720 起步（只有 720P 的台也留着），上限 2160。
+      # **别在这里写 1080**：芒果、浙江广电这些官方源常常只给 4K 一路，
+      # 卡在 1080 就把唯一能用的地址整条丢掉，退回 1 Mbps 的中转空壳（卡顿的根源）。
+      # 环境变量优先级高于 config.toml，写错这一条，配置文件里改对了也没用。
+      HDIPTV_MIN_HEIGHT: ${HDIPTV_MIN_HEIGHT:-720}
+      HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-2160}
+      # 播放方式：direct = 清单本机下发、分片播放器直连 CDN（最流畅）；
+      # proxy = 分片也经本机转发（只有直连放不出来时才用）
+      HDIPTV_PLAY_MODE: ${HDIPTV_PLAY_MODE:-direct}
+      # 分片缓存上限（MB）：只对 proxy 模式生效
+      HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
+      # 对外地址。留空即可：列表按请求的域名端口现拼，套了反代也自动用外网地址；
+      # 只有反代不透传 Host 头时才需要填，例如 https://tv.example.com:8443
+      PUBLIC_URL: "${PUBLIC_URL:-}"
+      # 访问密码（URL 路径段）。设了之后**所有**地址都要带它：
+      #   面板   https://域名:9797/mypass/
+      #   订阅   https://域名:9797/mypass/playlist.m3u
+      # 不带就回「身份认证失败」；清单里的分片、台标会自动带上这段，播放器不用改。
+      # 只用字母数字和 - _ . ；留空 = 不设密码。改完 docker compose up -d 生效。
+      HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
+
+    # Dockerfile 里已有同样的 HEALTHCHECK，这里显式写一份方便肉眼确认
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
