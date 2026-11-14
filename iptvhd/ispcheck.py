@@ -222,6 +222,31 @@ def check(province: str, isp: str, *, timeout: float = 4.0,
     }
 
 
+def scan_province(province: str, isps=None, timeout: float = 4.0) -> dict:
+    """扫一个省的几家运营商，看公开清单里哪家有。
+
+    面板「扫本省 4 家」要的是「有没有、大约几条」，所以只拉清单数公网入口，
+    不做 TCP 探测（那太慢）。四家并发拉，最慢也就一个 ``timeout``。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    province = (province or "").strip().lower()
+    if not province:
+        return {"province": "", "isps": {}, "error": "缺少省份"}
+    targets = list(isps) if isps else list(region.ISP_NAMES)
+
+    def one(isp: str) -> tuple[str, dict]:
+        text, state = fetch_list(province, isp, timeout=timeout)
+        entries = len(parse_endpoints(text, include_private=False)) if state == "ok" else 0
+        return isp, {"state": state, "entries": entries, "name": region.ISP_NAMES.get(isp, isp)}
+
+    found: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=len(targets) or 1) as pool:
+        for isp, info in pool.map(one, targets):
+            found[isp] = info
+    return {"province": province, "isps": found}
+
+
 def _ipv6_note(ok_v6: bool) -> str:
     return "IPv6 可用" if ok_v6 else "没有 IPv6 出口"
 
@@ -346,5 +371,5 @@ def run(data_dir, *, manual_province: str = "", manual_isp: str = "",
 
 __all__ = [
     "KNOWN_HOSTS", "parse_endpoints", "is_private_host", "tcp_probe", "http_status",
-    "fetch_list", "check", "list_note", "verdict", "run",
+    "fetch_list", "check", "scan_province", "list_note", "verdict", "run",
 ]

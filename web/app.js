@@ -196,6 +196,8 @@ function fillSettings(s) {
   if (settingsDirty) return;
   if ($("setPlayMode")) $("setPlayMode").value = s.play_mode || "direct";
   if ($("setAutoRegion")) $("setAutoRegion").value = s.auto_region === false ? "0" : "1";
+  if ($("setRegion")) $("setRegion").value = s.region || "";
+  if ($("setIsp")) $("setIsp").value = s.isp || "";
   if ($("setPublicUrl")) $("setPublicUrl").value = s.public_url || "";
   if ($("setInterval")) $("setInterval").value = s.interval_hours != null ? s.interval_hours : "";
   if ($("setTtl")) $("setTtl").value = s.playlist_ttl != null ? s.playlist_ttl : "";
@@ -210,6 +212,8 @@ async function saveSettings() {
   const payload = {
     play_mode: $("setPlayMode") ? $("setPlayMode").value : "direct",
     auto_region: $("setAutoRegion") ? $("setAutoRegion").value === "1" : true,
+    region: $("setRegion") ? $("setRegion").value : "",
+    isp: $("setIsp") ? $("setIsp").value : "",
     public_url: $("setPublicUrl").value.trim(),
     interval_hours: Number($("setInterval").value || 0),
     playlist_ttl: Number($("setTtl").value || 1),
@@ -249,6 +253,101 @@ async function saveSettings() {
     note.textContent = "保存失败：" + e.message;
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function loadRegionOptions() {
+  try {
+    const r = await fetch("api/region/options", { cache: "no-store" });
+    const d = await r.json();
+    const prov = $("setRegion");
+    const isp = $("setIsp");
+    if (prov) {
+      for (const p of d.provinces || []) {
+        const o = document.createElement("option");
+        o.value = p.code;
+        o.textContent = p.name;
+        prov.appendChild(o);
+      }
+    }
+    if (isp) {
+      for (const i of d.isps || []) {
+        const o = document.createElement("option");
+        o.value = i.code;
+        o.textContent = i.name;
+        isp.appendChild(o);
+      }
+    }
+  } catch (_) { /* 拿不到选项就只保留「自动识别」 */ }
+}
+
+async function probeRegion() {
+  const note = $("regionProbeNote");
+  const btn = $("btnProbe");
+  const province = $("setRegion") ? $("setRegion").value : "";
+  const isp = $("setIsp") ? $("setIsp").value : "";
+  if (!province || !isp) {
+    if (note) { note.hidden = false; note.textContent = "先选好省份和运营商，再检测；只选一个不够。"; }
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (note) { note.hidden = false; note.textContent = "检测中，最多几秒…"; }
+  try {
+    const r = await fetch("api/region/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ province, isp }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    if (note) {
+      const lines = [`检测结果：${d.note || ""}`];
+      if (Array.isArray(d.verdict)) lines.push(...d.verdict);
+      note.style.whiteSpace = "pre-line";
+      note.textContent = lines.join("\n");
+    }
+  } catch (e) {
+    if (note) note.textContent = "检测失败：" + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function scanProvince() {
+  const note = $("regionProbeNote");
+  const btn = $("btnScan");
+  const province = $("setRegion") ? $("setRegion").value : "";
+  if (!province) {
+    if (note) { note.hidden = false; note.textContent = "先选一个省份，再点扫描。"; }
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (note) { note.hidden = false; note.textContent = "扫描中，4 家并发拉取公开清单…"; }
+  try {
+    const r = await fetch("api/region/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ province }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    const rows = Object.values(d.isps || {}).map((x) => {
+      const state = x.state === "ok"
+        ? `有清单，约 ${x.entries} 条公网入口`
+        : x.state === "missing"
+          ? "没有这一份"
+          : "取不到（网络问题，稍后重试）";
+      return `${x.name}：${state}`;
+    });
+    if (note) {
+      note.style.whiteSpace = "pre-line";
+      note.textContent = `本省（${d.province}）公开清单扫描：\n` + rows.join("\n")
+        + "\n\n有清单不等于能播，选好组合再点「检测这个组合」看通不通。";
+    }
+  } catch (e) {
+    if (note) note.textContent = "扫描失败：" + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -849,6 +948,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btnRefresh").addEventListener("click", refresh);
   $("btnCheckUpdate").addEventListener("click", checkUpdate);
   $("btnSaveSettings").addEventListener("click", saveSettings);
+  if ($("btnProbe")) $("btnProbe").addEventListener("click", probeRegion);
+  if ($("btnScan")) $("btnScan").addEventListener("click", scanProvince);
+  loadRegionOptions().then(() => {
+    if (settings && Object.keys(settings).length && !settingsDirty) fillSettings(settings);
+  });
   $("search").addEventListener("input", () => renderChannels(cache));
   if ($("showHidden")) $("showHidden").addEventListener("change", () => renderChannels(cache));
 
@@ -902,7 +1006,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPlayMode", "setAutoRegion", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
+  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });

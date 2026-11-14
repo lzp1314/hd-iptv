@@ -274,6 +274,8 @@ class State:
             "cache_mb": int(s.relay_cache_mb),
             "play_mode": s.play_mode,
             "auto_region": s.auto_region,
+            "region": s.region_hint,
+            "isp": s.isp_hint,
             "public_url": s.public_url,
             # 只读：面板据此在每个地址后面带上密码段，前端不允许写回
             "secret": s.secret,
@@ -325,7 +327,21 @@ class State:
                 names = self._channel_names()
                 if self.epg.source and names:
                     threading.Thread(target=self._warm_epg, args=(names,), daemon=True).start()
+            if "region" in clean or "isp" in clean:
+                # 改了省份/运营商：重新识别，并按新组合拉一次本省清单。
+                # 放后台跑，别让面板保存卡在一个网络往返上。
+                threading.Thread(target=self._apply_region_change, daemon=True).start()
         return self.current_settings()
+
+    def _apply_region_change(self) -> None:
+        """面板改了省/运营商：重新识别 + 按新组合拉一次本省清单。"""
+        from .autoregion import refresh as refresh_auto
+
+        try:
+            self.refresh_region(force=True)
+            refresh_auto(self.settings, log=self.log)
+        except Exception as exc:                     # noqa: BLE001 - 面板操作不该抛到线程外
+            self.log(f"[自动源] 按选定省份取源失败：{type(exc).__name__}")
 
     def _channel_names(self) -> list[str]:
         result = load_result(self.settings) or {}
@@ -742,6 +758,13 @@ def make_handler(state: State):
                 )
             elif path == "/api/settings":
                 self._json({"settings": state.current_settings(), "epg": state.epg.stats()})
+            elif path == "/api/region/options":
+                from .region import ISP_NAMES, PROVINCES
+
+                self._json({
+                    "provinces": [{"code": k, "name": v} for k, v in PROVINCES.items()],
+                    "isps": [{"code": k, "name": v} for k, v in ISP_NAMES.items()],
+                })
             elif path == "/api/channels":
                 result = load_result(settings) or {}
                 hidden = set(settings.hidden)
@@ -841,6 +864,34 @@ def make_handler(state: State):
                 shown = {k: ("***" if k == "secret" and v else v) for k, v in updated.items()}
                 state.log(f"[设置] 已更新 {', '.join(f'{k}={v}' for k, v in shown.items())}")
                 self._json({"ok": True, "settings": updated})
+            elif path == "/api/region/probe":
+                values = self._body()
+                if values is None:
+                    return
+                province = str(values.get("province") or "").strip().lower()
+                isp = str(values.get("isp") or "").strip().lower()
+                if not province or not isp:
+                    self._json({"error": "需要同时提供省份和运营商"}, 400)
+                    return
+                from .ispcheck import check as isp_check, list_note, verdict
+
+                # 面板上是「点一下等几秒」，所以样本和超时都压小：
+                # 只要看出这省这家有没有公开入口、通不通即可，不做全量探测。
+                result = isp_check(province, isp, timeout=2.0, sample=3, list_timeout=6.0)
+                result["note"] = list_note(result)
+                result["verdict"] = verdict({}, result)
+                self._json(result)
+            elif path == "/api/region/scan":
+                values = self._body()
+                if values is None:
+                    return
+                province = str(values.get("province") or "").strip().lower()
+                if not province:
+                    self._json({"error": "缺少省份"}, 400)
+                    return
+                from .ispcheck import scan_province
+
+                self._json(scan_province(province, timeout=4.0))
             elif path == "/api/hidden":
                 values = self._body()
                 if values is None:

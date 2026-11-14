@@ -13,7 +13,7 @@
 services:
   hd-iptv:
     # 预构建多架构镜像（amd64 / arm64 / armv7）。想锁版本：.env 里写
-    # HDIPTV_IMAGE_TAG=0.9.18，或者直接把下面的 latest 改成 0.9.18
+    # HDIPTV_IMAGE_TAG=0.9.19，或者直接把下面的 latest 改成 0.9.19
     image: ghcr.io/lzp1314/hd-iptv:${HDIPTV_IMAGE_TAG:-latest}
     container_name: ${CONTAINER_NAME:-hd-iptv}
     restart: unless-stopped

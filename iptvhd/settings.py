@@ -164,6 +164,23 @@ def coerce_panel(raw: dict) -> dict:
                 out[key] = text
         elif key == "auto_region":
             out[key] = as_bool(value)
+        elif key in ("region", "isp"):
+            # 空串是有效值：表示「回到自动识别」。非空则归一化成拼音代码，
+            # 认不出来就丢掉这一项（别把半截输入写进 panel.json 让采集去猜）。
+            text = str(value or "").strip().lower()
+            if not text:
+                out[key] = ""
+            else:
+                from .region import ISP_NAMES, PROVINCES, isp_of, province_of
+
+                if key == "region":
+                    code = province_of(text)
+                    if code in PROVINCES:
+                        out[key] = code
+                else:
+                    code = isp_of(text) or text
+                    if code in ISP_NAMES:
+                        out[key] = code
         elif key in PANEL_BOUNDS:
             try:
                 num = float(value)
@@ -326,16 +343,25 @@ class Settings:
 
     @property
     def region_hint(self) -> str:
-        """手动指定省份（拼音，如 ``hubei``）。
+        """手动指定省份（拼音，如 ``hubei``）。优先级：面板 > 环境变量 > config.toml。
 
-        只在自动识别判错时才需要填 —— IP 归属地库偶尔会把跨省出口判成邻省。
-        填了就以它为准，不再看 IP 库。
+        面板里存空串表示「回到自动识别」，所以必须用 ``is not None`` 判断，
+        不能用 ``or``——否则用户主动选回「自动」会被环境变量顶回去。
         """
+        panel = self.panel_get("region")
+        if panel is not None:
+            return str(panel).strip().lower()
         return (os.environ.get("HDIPTV_REGION") or self.get("output", "region", "")).strip().lower()
 
     @property
     def isp_hint(self) -> str:
-        """手动指定运营商：``mobile`` / ``telecom`` / ``unicom`` / ``broadnet``。"""
+        """手动指定运营商：``mobile`` / ``telecom`` / ``unicom`` / ``broadnet``。
+
+        优先级同 ``region_hint``：面板 > 环境变量 > config.toml，空串=自动识别。
+        """
+        panel = self.panel_get("isp")
+        if panel is not None:
+            return str(panel).strip().lower()
         return (os.environ.get("HDIPTV_ISP") or self.get("output", "isp", "")).strip().lower()
 
     @property

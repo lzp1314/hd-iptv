@@ -2,7 +2,7 @@
 
 **自部署的 IPTV 播放列表管理工具：整理、测速、聚合与分发节目清单，供个人与家庭内网使用。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![Version](https://img.shields.io/badge/version-0.9.18-blue.svg)](https://github.com/lzp1314/hd-iptv)
+[![Version](https://img.shields.io/badge/version-0.9.19-blue.svg)](https://github.com/lzp1314/hd-iptv)
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -56,7 +56,7 @@ mkdir -p ~/hd-iptv && cd ~/hd-iptv
 services:
   hd-iptv:
     # 预构建多架构镜像（amd64 / arm64 / armv7），自动匹配你的机器
-    # 想锁死版本写 :0.9.18；想跟着修 bug 写 :latest
+    # 想锁死版本写 :0.9.19；想跟着修 bug 写 :latest
     image: ghcr.io/lzp1314/hd-iptv:latest
     container_name: hd-iptv
     restart: unless-stopped
@@ -223,7 +223,7 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.18`；源码构建版不看这一项 |
+| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.19`；源码构建版不看这一项 |
 | `HOST_PORT` | `9797` | 宿主机端口，容器内始终是 9797 |
 | `CONFIG_DIR` | `./config` | 配置目录，建议写绝对路径 |
 | `OUTPUT_DIR` | `./output` | 结果目录，建议写绝对路径 |
@@ -235,11 +235,11 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 | `HDIPTV_LINES_PER_CHANNEL` | `1` | 订阅里每个台写几行。1 不会出现「重复台」；想手动切备用线路调 2~4 |
 | `HDIPTV_SECRET` | 空 | 访问密码（URL 路径段）。设了之后所有地址都要带 `/<密码>/`，见下 |
 | `HDIPTV_SKIP_SOURCES` | 空 | 按名字跳过源，逗号分隔。通用版 `docker-compose.yml` 里设成 `运营商官方源`；湖北版 `docker-compose.hubei.yml` 里设成 `聚合源-公开转播,聚合源-精简线路` |
-| `HDIPTV_REGION` | 空 | 手动指定省份（拼音如 `hubei`）。只在自动识别判错时才需要 |
-| `HDIPTV_ISP` | 空 | 手动指定运营商：`mobile` / `telecom` / `unicom` / `broadnet` |
+| `HDIPTV_REGION` | 空 | 手动指定省份（拼音如 `hubei`）；面板「省份」下拉优先于它，留空 = 自动识别 |
+| `HDIPTV_ISP` | 空 | 手动指定运营商：`mobile` / `telecom` / `unicom` / `broadnet`；面板优先于它 |
 | `HDIPTV_AUTO_REGION` | `true` | 自动按省取源开关，写 `0` 关闭。面板「运行设置」里的开关优先 |
 
-端口、刷新间隔、播放方式、对外地址、自动按省取源都可以直接在面板上改；
+端口、刷新间隔、播放方式、对外地址、自动按省取源、省份 / 运营商都可以直接在面板上改；
 开关类设置保存后在下一次更新时生效，其余改完立刻生效，都不用重启容器。
 
 ### 面板上那一行「本机宽带」
@@ -282,6 +282,13 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 - 日志里的「本省自动源」就是这一路；不想让它参与，也可以写
   `HDIPTV_SKIP_SOURCES=本省自动源`。
 - 想确认「本省这路到底通不通」，跑 `python -m iptvhd doctor --isp`（见下文）。
+- **面板里可以直接选省份和运营商**（「运行设置 → 省份 / 运营商」两个下拉，默认「自动识别」）。
+  选好点「检测这个组合」，当场返回该省该运营商在公开清单里有没有、多少条、通不通，
+  不用等一轮采集；点「扫本省 4 家」一次列出移动 / 电信 / 联通 / 广电哪家有清单。
+  确认有再点「保存」，下一轮采集就按这个组合取源。手动值存在 `config/panel.json`，
+  优先级高于 `HDIPTV_REGION` / `HDIPTV_ISP` 和 `config.toml`；选回「自动识别」即取消。
+  注意：选的组合要和实际出口宽带一致——运营商源按省隔离，选错会大面积超时 / 403，
+  那不是故障，是这条源只认本地出口；广电没有公开单播清单，选中会提示「没有可抓源」。
 
 默认采集源里还有两条 HerbertHe/iptv-sources 的公开转播清单，全国可用，给央视卫视
 多几路候选。它们是第三方站点维护的，随时可能失效或夹广告；探测阶段会按画质和速率
@@ -445,12 +452,12 @@ ARM 板 CPU 弱一点不影响播放：清单由本机整理、分片由播放�
 
 | 位置 | 说明 |
 |---|---|
-| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.18` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
+| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.19` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
 | 本地构建 | `docker compose -f docker-compose.build.yml up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库，但必须有完整源码 |
 
 GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉了 `latest` 想升级就重新
 `docker compose pull && docker compose up -d`；想停在某个版本，在 `.env` 里写
-`HDIPTV_IMAGE_TAG=0.9.18`（或直接把 `image` 的 `latest` 改成 `0.9.18`），之后 pull
+`HDIPTV_IMAGE_TAG=0.9.19`（或直接把 `image` 的 `latest` 改成 `0.9.19`），之后 pull
 也不会动。拉不动 `ghcr.io` 时用「方式二」的源码构建版，效果一样，但要先 clone 源码。
 
 ## 命令行

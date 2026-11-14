@@ -121,6 +121,11 @@
         <input id="setEpgSource" type="text" placeholder="https://epg.pw/xmltv/epg_CN.xml">
       </label>
     </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+      <button id="btnProbe" class="btn" type="button">检测这个组合</button>
+      <button id="btnScan" class="btn" type="button">扫本省 4 家</button>
+    </div>
+    <p class="hint" id="regionProbeNote" hidden></p>
     <p class="hint" id="settingsNote">
       套了反向代理（Lucky / Nginx）时「对外地址」留空即可，面板和订阅列表都会用你访问时的域名和端口。
       「自动按省取源」按识别出的省份和运营商去取本省公开清单，只给现有频道补线路；湖北移动会跳过（项目已内置）。
