@@ -108,14 +108,45 @@ class TestPanelMarkup(unittest.TestCase):
         block = html[start:start + 200]
         self.assertIn('<option value="">', block)
 
-    def test_every_nav_item_has_view(self):
+    # ---- 结构：这一组控件必须待在「宽带与省份」页里，别再散回运行设置 ----
+    def _panel(self, html: str, view: str) -> str:
+        # 按分区 id 定位，不能用 data-view：导航按钮上也有同名属性，会先命中它
+        start = html.index(f'id="{view}Panel"')
+        return html[start:html.index("</section>", start)]
+
+    def test_controls_live_in_region_view(self):
         html = (self.WEB / "index.html").read_text(encoding="utf-8")
+        region = self._panel(html, "region")
+        for elem_id in ("setAutoRegion", "setRegion", "setIsp", "btnProbe", "btnScan", "btnRegionSave"):
+            self.assertIn(f'id="{elem_id}"', region, f"「宽带与省份」页缺少 #{elem_id}")
+
+    def test_settings_view_no_longer_holds_region_controls(self):
+        # 同一批控件只能有一份，两边都放会导致「改了这边、保存那边」的错乱
+        html = (self.WEB / "index.html").read_text(encoding="utf-8")
+        settings = self._panel(html, "settings")
+        self.assertNotIn('id="setRegion"', settings)
+        self.assertNotIn('id="setIsp"', settings)
+        self.assertNotIn('id="setAutoRegion"', settings)
+
+    def test_nav_has_region_entry(self):
         import re
 
-        navs = re.findall(r'data-view="(\w+)"', html)
+        html = (self.WEB / "index.html").read_text(encoding="utf-8")
+        nav = html[html.index("<nav"):html.index("</nav>")]
+        items = re.findall(r'data-view="(\w+)">([^<]+)</button>', nav)
+        self.assertIn(("region", "宽带与省份"), items)
+        self.assertEqual(len(items), 6, "导航项数量变了，检查是否漏了分区")
+
+    def test_every_nav_item_has_view_and_vice_versa(self):
+        import re
+
+        html = (self.WEB / "index.html").read_text(encoding="utf-8")
+        nav = html[html.index("<nav"):html.index("</nav>")]
+        navs = set(re.findall(r'data-view="(\w+)"', nav))
         views = set(re.findall(r'class="panel view" id="\w+" data-view="(\w+)"', html))
         self.assertTrue(navs)
-        self.assertEqual(set(navs) - views, set(), "有导航项没有对应分区")
+        self.assertEqual(navs - views, set(), "有导航项没有对应分区")
+        self.assertEqual(views - navs, set(), "有分区没有导航入口（只能靠地址栏进）")
 
 
 if __name__ == "__main__":

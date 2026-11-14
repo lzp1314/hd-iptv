@@ -64,9 +64,9 @@ function setDot(state) {
 }
 
 // ---------------- 分区切换 ----------------
-// 一页一个分区：状态 / 我的频道 / 订阅地址 / 运行设置 / 运行日志。
+// 一页一个分区：状态 / 我的频道 / 订阅地址 / 宽带与省份 / 运行设置 / 运行日志。
 // 状态卡在 .statbar 里，不参与切换，所以切到哪个分区都还看得见。
-const VIEWS = ["status", "channels", "subscribe", "settings", "logs"];
+const VIEWS = ["status", "channels", "subscribe", "region", "settings", "logs"];
 
 function setView(name, syncHash = true) {
   if (!VIEWS.includes(name)) name = "status";
@@ -141,7 +141,7 @@ function renderRegion(r) {
       "多半是通用版把它跳过了，换成 docker-compose.hubei.yml 即可。";
   } else if (r.province) {
     text += "。会自动按这个省份去取本省的运营商单播清单，只给央视 / 卫视补线路；" +
-      "在「运行设置 → 自动按省取源」里可以关掉，跑 doctor --isp 能看这路通不通。";
+      "在「宽带与省份」页可以关掉，也能手动指定省份 / 运营商，跑 doctor --isp 能看这路通不通。";
     if (!r.ipv6) text += "没有 IPv6 时部分入口取不到也正常。";
   }
   box.hidden = false;
@@ -273,9 +273,11 @@ function fillSettings(s) {
   if ($("setSecret")) $("setSecret").value = s.secret || "";
 }
 
-async function saveSettings() {
-  const btn = $("btnSaveSettings");
-  const note = $("settingsNote");
+// 两个分区各有一颗「保存」，都提交同一份设置（表单控件在 DOM 里始终存在，
+// 只是当前页看不到）；按钮和结果提示按传入的 id 区分，不写死。
+async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") {
+  const btn = $(btnId);
+  const note = $(noteId);
   const payload = {
     play_mode: $("setPlayMode") ? $("setPlayMode").value : "direct",
     auto_region: $("setAutoRegion") ? $("setAutoRegion").value === "1" : true,
@@ -311,10 +313,23 @@ async function saveSettings() {
       setTimeout(() => { location.href = home; }, 500);
       return;
     }
-    note.textContent = `已保存：更新间隔 ${d.settings.interval_hours} 小时、`
-      + `清单刷新 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB、`
-      + `自动按省取源${d.settings.auto_region === false ? "关闭" : "开启"}。`
-      + "播放器里的地址如果变了，重新拉一次列表即可。";
+    if (btnId === "btnRegionSave") {
+      // 宽带与省份页：只报这一页关心的三样，别把间隔/缓存也塞进来
+      const picked = (id) => {
+        const el = $(id);
+        return el && el.selectedOptions && el.selectedOptions[0] ? el.selectedOptions[0].textContent : "自动识别";
+      };
+      note.textContent = `已保存：自动按省取源${d.settings.auto_region === false ? "关闭" : "开启"}，`
+        + `省份 ${picked("setRegion")}、运营商 ${picked("setIsp")}。`
+        + (d.settings.auto_region === false
+          ? "开关是关的，这一页的选择暂时不生效。"
+          : "下一轮更新按这个组合取源，想立刻看效果就点「立即更新」。");
+    } else {
+      note.textContent = `已保存：更新间隔 ${d.settings.interval_hours} 小时、`
+        + `清单刷新 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB、`
+        + `自动按省取源${d.settings.auto_region === false ? "关闭" : "开启"}。`
+        + "播放器里的地址如果变了，重新拉一次列表即可。";
+    }
     await refresh();
   } catch (e) {
     note.textContent = "保存失败：" + e.message;
@@ -1028,7 +1043,8 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btnUpdate").addEventListener("click", triggerUpdate);
   $("btnRefresh").addEventListener("click", refresh);
   $("btnCheckUpdate").addEventListener("click", checkUpdate);
-  $("btnSaveSettings").addEventListener("click", saveSettings);
+  $("btnSaveSettings").addEventListener("click", () => saveSettings());
+  if ($("btnRegionSave")) $("btnRegionSave").addEventListener("click", () => saveSettings("btnRegionSave", "regionSaveNote"));
   if ($("btnProbe")) $("btnProbe").addEventListener("click", probeRegion);
   if ($("btnScan")) $("btnScan").addEventListener("click", scanProvince);
   loadRegionOptions().then(() => {

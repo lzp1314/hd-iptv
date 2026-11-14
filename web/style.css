@@ -69,7 +69,7 @@ body {
 /* 左边导航 + 右边内容。只有内容区滚动，导航跟着页面一起粘住 */
 .shell {
   display: grid;
-  grid-template-columns: 186px minmax(0, 1fr);
+  grid-template-columns: 196px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
   max-width: 1280px;
@@ -91,9 +91,9 @@ main { min-width: 0; padding: 0; }
 .nav-item {
   border: 0;
   background: transparent;
-  border-radius: 7px;
-  padding: 8px 11px;
-  font: 13px/1.4 inherit;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font: 17px/1.4 inherit;
   color: var(--muted);
   text-align: left;
   cursor: pointer;
@@ -175,6 +175,18 @@ main { min-width: 0; padding: 0; }
 .hint { color: var(--muted); font-size: 12px; margin: -4px 0 12px; }
 /* 紧跟标题栏的说明别再往上收：按钮比标题高，负边距会顶到按钮底下 */
 .panel-head + .hint { margin-top: 0; }
+/* 检测 / 扫描结果：多行输出按原样换行，加个浅底跟说明文字区分开 */
+.hint.result {
+  white-space: pre-line;
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7f9fb;
+  color: var(--text);
+  line-height: 1.7;
+}
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 0; }
 
 .url-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .tag {
@@ -536,8 +548,16 @@ footer .mono { font-size: 11.5px; }
     background: var(--bg);
     padding: 8px 0;
   }
-  .nav { flex-direction: row; overflow-x: auto; padding: 5px; gap: 4px; }
-  .nav-item { flex: none; white-space: nowrap; padding: 7px 12px; }
+  /* 六个入口排成两行三列：比横向滚动好点——不用猜右边还藏着没有，
+     手指也更容易点到。字号不缩，靠减内边距腾地方 */
+  .nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    padding: 5px;
+    overflow: visible;
+  }
+  .nav-item { padding: 7px 6px; text-align: center; white-space: nowrap; }
   .statbar { position: static; padding-top: 2px; }
   .statbar::after { display: none; }
 }

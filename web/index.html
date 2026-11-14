@@ -27,6 +27,7 @@
       <button class="nav-item is-on" type="button" data-view="status">状态</button>
       <button class="nav-item" type="button" data-view="channels">我的频道</button>
       <button class="nav-item" type="button" data-view="subscribe">订阅地址</button>
+      <button class="nav-item" type="button" data-view="region">宽带与省份</button>
       <button class="nav-item" type="button" data-view="settings">运行设置</button>
       <button class="nav-item" type="button" data-view="logs">运行日志</button>
     </nav>
@@ -62,6 +63,7 @@
       <div class="kv-actions">
         <button class="btn" type="button" data-goto="channels">去我的频道</button>
         <button class="btn" type="button" data-goto="subscribe">复制订阅地址</button>
+        <button class="btn" type="button" data-goto="region">看宽带与省份</button>
         <button class="btn" type="button" data-goto="settings">去运行设置</button>
       </div>
     </section>
@@ -128,22 +130,6 @@
           <option value="proxy">经本机转发</option>
         </select>
       </label>
-      <label>自动按省取源
-        <select id="setAutoRegion">
-          <option value="1">开启（推荐）</option>
-          <option value="0">关闭</option>
-        </select>
-      </label>
-      <label>省份（手动指定）
-        <select id="setRegion">
-          <option value="">自动识别</option>
-        </select>
-      </label>
-      <label>运营商（手动指定）
-        <select id="setIsp">
-          <option value="">自动识别</option>
-        </select>
-      </label>
       <label>对外地址
         <input id="setPublicUrl" type="text" placeholder="留空 = 用你打开面板的这个地址">
       </label>
@@ -164,16 +150,49 @@
         <input id="setEpgSource" type="text" placeholder="https://epg.pw/xmltv/epg_CN.xml">
       </label>
     </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+    <p class="hint" id="settingsNote">
+      套了反向代理（Lucky / Nginx）时「对外地址」留空即可，面板和订阅列表都会用你访问时的域名和端口。
+      改完在下一次更新时生效，想立刻看效果就点一次「立即更新」。
+      「自动按省取源」「省份 / 运营商」不在这里，挪到了左侧「宽带与省份」那一页。
+    </p>
+  </section>
+
+  <section class="panel view" id="regionPanel" data-view="region" hidden>
+    <div class="panel-head">
+      <h2>宽带与省份</h2>
+      <button id="btnRegionSave" class="btn primary">保存</button>
+    </div>
+    <p class="hint">
+      这一页只管一件事：告诉程序你这条宽带是哪省哪家，好去取本省的运营商单播清单——只给已有的央视 / 卫视补线路，
+      不会凭空多出台。用「自动识别」就能跑，识别不准、或者你知道自己走的是哪家出口时，再手动指定。
+    </p>
+    <div class="form">
+      <label>自动按省取源
+        <select id="setAutoRegion">
+          <option value="1">开启（推荐）</option>
+          <option value="0">关闭</option>
+        </select>
+      </label>
+      <label>省份（手动指定）
+        <select id="setRegion">
+          <option value="">自动识别</option>
+        </select>
+      </label>
+      <label>运营商（手动指定）
+        <select id="setIsp">
+          <option value="">自动识别</option>
+        </select>
+      </label>
+    </div>
+    <div class="btn-row">
       <button id="btnProbe" class="btn" type="button">检测这个组合</button>
       <button id="btnScan" class="btn" type="button">扫本省 4 家</button>
     </div>
-    <p class="hint" id="regionProbeNote" hidden></p>
-    <p class="hint" id="settingsNote">
-      套了反向代理（Lucky / Nginx）时「对外地址」留空即可，面板和订阅列表都会用你访问时的域名和端口。
-      「自动按省取源」按识别出的省份和运营商去取本省公开清单，只给现有频道补线路；湖北移动会跳过（项目已内置）。
-      自动识别不准、或者你不确定这条宽带走哪家出口时，把「省份 / 运营商」手动指定一下，先用下面两颗按钮查一查再保存。
-      改完在下一次更新时生效，想立刻看效果就点一次「立即更新」。
+    <p class="hint result" id="regionProbeNote" hidden></p>
+    <p class="hint" id="regionSaveNote">
+      检测和扫描都不改配置，只是查给你看；挑到有源再点右上角「保存」。
+      湖北移动、广电会被程序自动跳过（前者已内置运营商源，后者没有公开单播清单）。
+      选的省份或运营商跟你实际出口对不上时，探测会大面积超时或报错——那是运营商源按省隔离的正常表现，不是装坏了。
     </p>
   </section>
 
