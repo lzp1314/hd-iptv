@@ -87,5 +87,36 @@ class TestScanProvince(unittest.TestCase):
         self.assertIn("error", got)
 
 
+class TestPanelMarkup(unittest.TestCase):
+    """面板 HTML 里必须真有这些控件。
+
+    之前出过一次：后端接口、前端 JS 都写好了，HTML 里却没放下拉框，JS 用
+    ``if ($("setRegion"))`` 保护着，于是悄无声息地什么都不发生——点按钮只提示
+    「先选好省份和运营商」。这条测试就是拦这种「只缺一块拼图」的回归。
+    """
+
+    WEB = Path(__file__).resolve().parent.parent / "web"
+
+    def test_region_controls_present(self):
+        html = (self.WEB / "index.html").read_text(encoding="utf-8")
+        for elem_id in ("setRegion", "setIsp", "setAutoRegion", "btnProbe", "btnScan"):
+            self.assertIn(f'id="{elem_id}"', html, f"面板缺少 #{elem_id}")
+
+    def test_province_select_has_auto_option(self):
+        html = (self.WEB / "index.html").read_text(encoding="utf-8")
+        start = html.index('id="setRegion"')
+        block = html[start:start + 200]
+        self.assertIn('<option value="">', block)
+
+    def test_every_nav_item_has_view(self):
+        html = (self.WEB / "index.html").read_text(encoding="utf-8")
+        import re
+
+        navs = re.findall(r'data-view="(\w+)"', html)
+        views = set(re.findall(r'class="panel view" id="\w+" data-view="(\w+)"', html))
+        self.assertTrue(navs)
+        self.assertEqual(set(navs) - views, set(), "有导航项没有对应分区")
+
+
 if __name__ == "__main__":
     unittest.main()

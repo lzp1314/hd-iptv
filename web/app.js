@@ -63,6 +63,33 @@ function setDot(state) {
   dot.className = "dot " + state;
 }
 
+// ---------------- 分区切换 ----------------
+// 一页一个分区：状态 / 我的频道 / 订阅地址 / 运行设置 / 运行日志。
+// 状态卡在 .statbar 里，不参与切换，所以切到哪个分区都还看得见。
+const VIEWS = ["status", "channels", "subscribe", "settings", "logs"];
+
+function setView(name, syncHash = true) {
+  if (!VIEWS.includes(name)) name = "status";
+  document.querySelectorAll(".view").forEach((el) => {
+    el.hidden = el.dataset.view !== name;
+  });
+  document.querySelectorAll(".nav-item").forEach((el) => {
+    el.classList.toggle("is-on", el.dataset.view === name);
+  });
+  if (syncHash && location.hash.slice(1) !== name) {
+    history.replaceState(null, "", "#" + name);
+  }
+  window.scrollTo(0, 0);
+}
+
+// 顶栏在窄屏会折行，高度不是固定的；吸顶偏移按真实高度算，写死会错位
+function syncTopbarHeight() {
+  const bar = document.querySelector(".topbar");
+  if (!bar) return;
+  const h = Math.round(bar.getBoundingClientRect().height);
+  if (h > 0) document.documentElement.style.setProperty("--topbar-h", h + "px");
+}
+
 function epgText(epg) {
   if (!epg) return "节目单：-";
   const n = epg.channels || 0;
@@ -119,6 +146,45 @@ function renderRegion(r) {
   }
   box.hidden = false;
   box.textContent = text;
+}
+
+// 状态页的键值表：把「顶栏四张卡」没覆盖到的信息补齐（宽带识别、开关、模式、间隔）
+function fillOverview(d) {
+  const rep = d.report || {};
+  const reg = d.region || {};
+  const s = d.settings || {};
+  const put = (id, text) => {
+    const el = $(id);
+    if (el) el.textContent = text;
+  };
+
+  put("ovVersion", "v" + (d.version || "-"));
+
+  if (reg.ok) {
+    let where = [reg.province_name, reg.isp_name].filter(Boolean).join(" · ") || "已识别";
+    if (reg.manual) where += "（手动指定）";
+    where += reg.ipv6 ? " · IPv6 可用" : " · 无 IPv6 出口";
+    put("ovRegion", where);
+  } else {
+    put("ovRegion", "未识别（不影响播放，只是不会自动按省补线路）");
+  }
+
+  put("ovAutoRegion", s.auto_region === false ? "关闭" : "开启");
+  put("ovPlayMode", s.play_mode === "proxy" ? "经本机转发" : "直连 CDN");
+
+  const iv = Number(s.interval_hours);
+  put("ovInterval", !iv ? "关闭（只手动更新）" : iv + " 小时");
+
+  const hiddenCount = (s.hidden || []).length;
+  const total = rep.channels_matched;
+  const shown = total == null ? null : Math.max(total - hiddenCount, 0);
+  put("ovCounts", `${shown == null ? "-" : shown} / ${rep.published == null ? "-" : rep.published}`
+    + (hiddenCount ? `（另有 ${hiddenCount} 个已隐藏）` : ""));
+
+  put("ovTime", d.generated_at ? shortTime(d.generated_at) : "-");
+  put("ovRunning", d.running ? "正在更新…" : (d.last_error ? "上次更新失败" : "空闲"));
+  const runningEl = $("ovRunning");
+  if (runningEl) runningEl.title = d.last_error || "";
 }
 
 async function loadStatus() {
@@ -178,6 +244,7 @@ async function loadStatus() {
 
     renderMissing(rep.missing || []);
     renderRegion(d.region || {});
+    fillOverview(d);
 
     if ($("epgNote")) $("epgNote").textContent = epgText(d.epg);
     fillSettings(d.settings || {});
@@ -941,8 +1008,22 @@ async function refresh() {
 
 document.addEventListener("DOMContentLoaded", () => {
   fillUrls();
+  syncTopbarHeight();
+  // 刷新页面时保留上次待的分区（地址栏 #channels 这种）
+  setView(location.hash.slice(1) || "status", false);
   refresh();
   setInterval(refresh, 5000);
+
+  document.querySelectorAll(".nav-item").forEach((el) => {
+    el.addEventListener("click", () => setView(el.dataset.view));
+  });
+  document.querySelectorAll("[data-goto]").forEach((el) => {
+    el.addEventListener("click", () => setView(el.dataset.goto));
+  });
+  window.addEventListener("hashchange", () => setView(location.hash.slice(1), false));
+  window.addEventListener("resize", syncTopbarHeight);
+  // 字体加载完、版本号/检查更新结论写进顶栏后，高度还会变一点，补一次校准
+  setTimeout(syncTopbarHeight, 300);
 
   $("btnUpdate").addEventListener("click", triggerUpdate);
   $("btnRefresh").addEventListener("click", refresh);

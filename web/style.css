@@ -10,6 +10,8 @@
   --warn: #d97706;
   --err: #dc2626;
   --radius: 10px;
+  /* 顶栏实际高度，JS 会按真实高度改写：窄屏顶栏会折行，写死会错位 */
+  --topbar-h: 57px;
 }
 
 * { box-sizing: border-box; }
@@ -64,7 +66,81 @@ body {
 .btn.primary:hover { background: #1d4ed8; }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
 
-main { max-width: 1080px; margin: 0 auto; padding: 20px 22px 40px; }
+/* 左边导航 + 右边内容。只有内容区滚动，导航跟着页面一起粘住 */
+.shell {
+  display: grid;
+  grid-template-columns: 186px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 16px 22px 8px;
+}
+main { min-width: 0; padding: 0; }
+
+.sidebar { position: sticky; top: calc(var(--topbar-h) + 16px); }
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 7px;
+}
+.nav-item {
+  border: 0;
+  background: transparent;
+  border-radius: 7px;
+  padding: 8px 11px;
+  font: 13px/1.4 inherit;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+  transition: .15s;
+}
+.nav-item:hover { background: #eef1f4; color: var(--text); }
+.nav-item.is-on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* 状态区吸顶：切到哪个分区都固定在上方，不跟着内容滚走。
+   背景要铺满，否则内容从下面滚上来会透出来 */
+.statbar {
+  position: sticky;
+  top: var(--topbar-h);
+  z-index: 6;
+  background: var(--bg);
+  padding: 14px 0 2px;
+}
+.statbar .cards { margin-bottom: 12px; }
+/* 吸顶时内容在它下面滚，补一条极浅的分隔，避免糊成一片 */
+.statbar::after {
+  content: "";
+  display: block;
+  height: 1px;
+  background: linear-gradient(to right, var(--line), transparent);
+}
+
+/* 状态概览：一行一个键值，窄屏自动两列 */
+.kv {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 2px 18px;
+}
+.kv-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 13px;
+  min-width: 0;
+}
+.kv-row span { color: var(--muted); font-size: 12px; flex: none; }
+.kv-row strong { font-weight: 600; min-width: 0; overflow-wrap: anywhere; text-align: right; }
+.kv-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+
+.view[hidden] { display: none; }
 
 .cards {
   display: grid;
@@ -350,6 +426,8 @@ code {
   color: #92400e;
   font-size: 13px;
   line-height: 1.6;
+  /* 里面会写 docker-compose.hubei.yml 这种长串，窄屏要能断行 */
+  overflow-wrap: anywhere;
 }
 
 /* 「检查更新」在顶栏版本号后面，结论就写在旁边，不另开一块面板 */
@@ -442,10 +520,34 @@ footer .mono { font-size: 11.5px; }
   .form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .chan-layout { grid-template-columns: 140px minmax(0, 1fr); gap: 10px; }
   .chan-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .shell { grid-template-columns: 158px minmax(0, 1fr); gap: 12px; padding: 14px 14px 8px; }
+}
+
+/* 窄屏：侧边栏横过来当标签条，吸在顶栏下面。状态卡在小屏上不吸顶，
+   否则顶栏 + 标签条 + 四张卡会把手机屏幕吃掉大半 */
+@media (max-width: 760px) {
+  /* minmax(0,1fr) 而不是 1fr：1fr 的最小宽度是 auto，里面的长内容会把整列撑宽，
+     横幅文字就跟着被切到屏幕外 */
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px 12px 8px; }
+  .sidebar {
+    position: sticky;
+    top: var(--topbar-h);
+    z-index: 8;
+    background: var(--bg);
+    padding: 8px 0;
+  }
+  .nav { flex-direction: row; overflow-x: auto; padding: 5px; gap: 4px; }
+  .nav-item { flex: none; white-space: nowrap; padding: 7px 12px; }
+  .statbar { position: static; padding-top: 2px; }
+  .statbar::after { display: none; }
 }
 
 @media (max-width: 640px) {
   .search { width: 120px; }
+  /* 标题行放不下就换行，别硬撑：否则「显示已隐藏 + 搜索框 + 全部恢复」
+     会把整块面板撑得比屏幕还宽，右侧内容被切掉 */
+  .panel-head { flex-wrap: wrap; }
+  .list-tools { flex-wrap: wrap; }
   .card strong { font-size: 18px; }
   /* 窄屏：分组横过来当标签条，频道窗格两列，整个页面不用左右滑 */
   .chan-layout { grid-template-columns: 1fr; gap: 10px; }

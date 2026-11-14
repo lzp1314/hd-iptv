@@ -21,34 +21,67 @@
   </div>
 </header>
 
-<main>
-  <section class="cards">
-    <div class="card"><span class="label">频道</span><strong id="statChannels">-</strong></div>
-    <div class="card"><span class="label">直播流</span><strong id="statStreams">-</strong></div>
-    <div class="card"><span class="label">画质</span><strong id="statGrades" class="small">-</strong></div>
-    <div class="card"><span class="label">上次生成</span><strong id="statTime" class="small">-</strong></div>
-  </section>
+<div class="shell">
+  <aside class="sidebar">
+    <nav class="nav" aria-label="分区导航">
+      <button class="nav-item is-on" type="button" data-view="status">状态</button>
+      <button class="nav-item" type="button" data-view="channels">我的频道</button>
+      <button class="nav-item" type="button" data-view="subscribe">订阅地址</button>
+      <button class="nav-item" type="button" data-view="settings">运行设置</button>
+      <button class="nav-item" type="button" data-view="logs">运行日志</button>
+    </nav>
+  </aside>
 
-  <div id="regionNote" class="banner quiet" hidden></div>
-  <div id="relayBanner" class="banner" hidden></div>
-  <div id="missingNote" class="banner quiet" hidden></div>
+  <main>
+    <div class="statbar">
+      <section class="cards">
+        <div class="card"><span class="label">频道</span><strong id="statChannels">-</strong></div>
+        <div class="card"><span class="label">直播流</span><strong id="statStreams">-</strong></div>
+        <div class="card"><span class="label">画质</span><strong id="statGrades" class="small">-</strong></div>
+        <div class="card"><span class="label">上次生成</span><strong id="statTime" class="small">-</strong></div>
+      </section>
 
-  <section class="panel" id="channelsPanel">
-    <div class="panel-head">
-      <h2>我的频道 <span id="hiddenCount" class="count" hidden></span>
-        <button id="btnUnhideAll" class="btn mini" hidden>全部恢复</button>
-      </h2>
-      <div class="list-tools">
-        <label class="chk"><input id="showHidden" type="checkbox"> 显示已隐藏</label>
-        <input id="search" class="search" placeholder="搜索频道">
+      <div id="regionNote" class="banner quiet" hidden></div>
+      <div id="relayBanner" class="banner" hidden></div>
+      <div id="missingNote" class="banner quiet" hidden></div>
+    </div>
+
+    <section class="panel view" id="viewStatus" data-view="status">
+      <h2>状态概览</h2>
+      <p class="hint">上面四张卡片在任何页面都固定显示。这一页把当前运行情况集中列一下。</p>
+      <div class="kv">
+        <div class="kv-row"><span>版本</span><strong id="ovVersion">-</strong></div>
+        <div class="kv-row"><span>宽带识别</span><strong id="ovRegion">-</strong></div>
+        <div class="kv-row"><span>自动按省取源</span><strong id="ovAutoRegion">-</strong></div>
+        <div class="kv-row"><span>播放方式</span><strong id="ovPlayMode">-</strong></div>
+        <div class="kv-row"><span>自动更新间隔</span><strong id="ovInterval">-</strong></div>
+        <div class="kv-row"><span>频道 / 直播流</span><strong id="ovCounts">-</strong></div>
+        <div class="kv-row"><span>上次生成</span><strong id="ovTime">-</strong></div>
+        <div class="kv-row"><span>当前状态</span><strong id="ovRunning">-</strong></div>
       </div>
-    </div>
-    <div id="channelList" class="chan-layout">
-      <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
-    </div>
-  </section>
+      <div class="kv-actions">
+        <button class="btn" type="button" data-goto="channels">去我的频道</button>
+        <button class="btn" type="button" data-goto="subscribe">复制订阅地址</button>
+        <button class="btn" type="button" data-goto="settings">去运行设置</button>
+      </div>
+    </section>
 
-  <section class="panel" id="subscribePanel">
+    <section class="panel view" id="channelsPanel" data-view="channels" hidden>
+      <div class="panel-head">
+        <h2>我的频道 <span id="hiddenCount" class="count" hidden></span>
+          <button id="btnUnhideAll" class="btn mini" hidden>全部恢复</button>
+        </h2>
+        <div class="list-tools">
+          <label class="chk"><input id="showHidden" type="checkbox"> 显示已隐藏</label>
+          <input id="search" class="search" placeholder="搜索频道">
+        </div>
+      </div>
+      <div id="channelList" class="chan-layout">
+        <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
+      </div>
+    </section>
+
+  <section class="panel view" id="subscribePanel" data-view="subscribe" hidden>
     <h2>订阅地址</h2>
     <p class="hint">
       填进播放器（观屿TV / TiviMate / 影视 / Kodi / PotPlayer 均可）。
@@ -78,7 +111,7 @@
     <p class="hint" id="epgNote">节目单：等待首轮更新</p>
   </section>
 
-  <section class="panel" id="settingsPanel">
+  <section class="panel view" id="settingsPanel" data-view="settings" hidden>
     <div class="panel-head">
       <h2>运行设置</h2>
       <button id="btnSaveSettings" class="btn primary">保存</button>
@@ -99,6 +132,16 @@
         <select id="setAutoRegion">
           <option value="1">开启（推荐）</option>
           <option value="0">关闭</option>
+        </select>
+      </label>
+      <label>省份（手动指定）
+        <select id="setRegion">
+          <option value="">自动识别</option>
+        </select>
+      </label>
+      <label>运营商（手动指定）
+        <select id="setIsp">
+          <option value="">自动识别</option>
         </select>
       </label>
       <label>对外地址
@@ -129,15 +172,17 @@
     <p class="hint" id="settingsNote">
       套了反向代理（Lucky / Nginx）时「对外地址」留空即可，面板和订阅列表都会用你访问时的域名和端口。
       「自动按省取源」按识别出的省份和运营商去取本省公开清单，只给现有频道补线路；湖北移动会跳过（项目已内置）。
-      开关在下一次更新时生效，想立刻看效果就点一次「立即更新」。
+      自动识别不准、或者你不确定这条宽带走哪家出口时，把「省份 / 运营商」手动指定一下，先用下面两颗按钮查一查再保存。
+      改完在下一次更新时生效，想立刻看效果就点一次「立即更新」。
     </p>
   </section>
 
-  <section class="panel">
+  <section class="panel view" id="logPanel" data-view="logs" hidden>
     <h2>运行日志</h2>
     <pre id="log" class="log"></pre>
   </section>
-</main>
+  </main>
+</div>
 
 <footer>
   <span>hd-iptv · 仅用于个人学习与家庭内网使用，请遵守当地法律法规与内容授权要求</span>
