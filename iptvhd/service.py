@@ -202,7 +202,7 @@ def live_target(raw_slug: str) -> tuple[str, str] | None:
     if name:
         return key, name
     if static_url(key):
-        return key, "运营商源"
+        return key, ("运营商源" if key.startswith("o:") else "上游源")
     return None
 
 

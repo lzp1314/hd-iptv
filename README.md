@@ -2,7 +2,7 @@
 
 **自部署的 IPTV 播放列表管理工具：整理、测速、聚合与分发节目清单，供个人与家庭内网使用。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![Version](https://img.shields.io/badge/version-0.9.23-blue.svg)](https://github.com/lzp1314/hd-iptv)
+[![Version](https://img.shields.io/badge/version-0.9.24-blue.svg)](https://github.com/lzp1314/hd-iptv)
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -56,7 +56,7 @@ mkdir -p ~/hd-iptv && cd ~/hd-iptv
 services:
   hd-iptv:
     # 预构建多架构镜像（amd64 / arm64 / armv7），自动匹配你的机器
-    # 想锁死版本写 :0.9.23；想跟着修 bug 写 :latest
+    # 想锁死版本写 :0.9.24；想跟着修 bug 写 :latest
     image: ghcr.io/lzp1314/hd-iptv:latest
     container_name: hd-iptv
     restart: unless-stopped
@@ -223,7 +223,7 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.23`；源码构建版不看这一项 |
+| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.24`；源码构建版不看这一项 |
 | `HOST_PORT` | `9797` | 宿主机端口，容器内始终是 9797 |
 | `CONFIG_DIR` | `./config` | 配置目录，建议写绝对路径 |
 | `OUTPUT_DIR` | `./output` | 结果目录，建议写绝对路径 |
@@ -318,6 +318,30 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 想自己手动切线路的，把 `HDIPTV_LINES_PER_CHANNEL` 调到 2 以上——那时不再自动换线，
 每个台会写出多行，由你在播放器里挑。排查「到底哪条线路有问题」时，可以用
 `HDIPTV_FAILOVER=0` 关掉自动换线，让每台退回一条直连地址。
+
+### 清单由本机取，播放器只连分片
+
+订阅里每个台的地址都是本机地址（`/live/…m3u8`），分两种前缀：
+
+| 前缀 | 是什么 | 取清单用的 UA |
+|---|---|---|
+| `o:` | 运营商 IPTV 边缘（移动/电信/联通的单播源） | 机顶盒同款 `okhttp` |
+| `u:` | 聚合源、公开转播 | 采集阶段验证过的浏览器 UA |
+
+**为什么不让播放器直连。** 直连写进订阅的是采集那一刻从上游拿到的地址，之后不再
+变化。聚合源普遍认 UA、按 IP 限流，地址里还带 `time=` 这类时间戳；播放器自己拼出来
+的请求撞上校验就回 403，表现就是「列表能刷出来，点进去源服务器返回错误」。列表里的
+`#EXTVLCOPT:http-user-agent` 只有 VLC 认，ExoPlayer 系（观屿、影视仓等）直接当注释
+跳过，所以那行等于没写。
+
+改由本机取清单之后，用的是探测阶段就验证过的那套请求头；分片仍然由播放器直连 CDN
+（`HDIPTV_PLAY_MODE=direct`），多一跳内网转发，出口 IP 不变。若某个源连分片都校验
+来源，把它切成 `proxy`，分片也经本机转发。
+
+**带了签名的地址容易过期。** 同档画质里会优先选不带 `time=`/`sign=`/`token=` 的长期
+地址，签名地址退到备用。但备用也只是「过期前能用」，所以外网使用建议把「自动更新
+间隔」调到 **4~6 小时**（面板里就能改），别设成 24 小时——那等于让订阅里躺着一批早就
+过期的地址。
 
 ### 访问密码
 
@@ -478,12 +502,12 @@ ARM 板 CPU 弱一点不影响播放：清单由本机整理、分片由播放�
 
 | 位置 | 说明 |
 |---|---|
-| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.23` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
+| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.24` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
 | 本地构建 | `docker compose -f docker-compose.build.yml up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库，但必须有完整源码 |
 
 GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉了 `latest` 想升级就重新
 `docker compose pull && docker compose up -d`；想停在某个版本，在 `.env` 里写
-`HDIPTV_IMAGE_TAG=0.9.23`（或直接把 `image` 的 `latest` 改成 `0.9.23`），之后 pull
+`HDIPTV_IMAGE_TAG=0.9.24`（或直接把 `image` 的 `latest` 改成 `0.9.24`），之后 pull
 也不会动。拉不动 `ghcr.io` 时用「方式二」的源码构建版，效果一样，但要先 clone 源码。
 
 ## 命令行

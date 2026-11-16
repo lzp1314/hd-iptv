@@ -24,6 +24,30 @@ def need_mbps(height: int) -> float:
     return 1.0
 
 
+# 「地址里有时间戳 / 签名」的痕迹。这类地址是上游现签发给我们的，有效期常常
+# 只有几分钟到几小时——写进订阅那一刻还能播，过一阵再点就是 403，而卡片上
+# 画质码率一切正常，很难判断是源的问题还是网络的问题。
+#
+# 探测时它是通的（刚签的就该通），所以只靠探测淘汰不掉，只能在**排序**上让
+# 位：同档画质里优先选不带签名的长期地址，签名的留作备用线路。
+_VOLATILE_MARKS = (
+    "time=", "sign=", "token=", "expire", "expires=", "auth_key", "authkey",
+    "txsecret", "wssecret", "hdnts=", "wstime=", "wssecret=",
+)
+
+
+def is_volatile(url: str) -> bool:
+    """这个地址是不是「带签名、会过期」的那种。
+
+    只对广告/聚合源常见的参数名做匹配，不解析时间戳本身——解密各家签名规则
+    不现实，而且没必要：只要能判出「它会过期」，排序时让位就够了。
+    """
+    low = (url or "").lower()
+    if not low:
+        return False
+    return any(mark in low for mark in _VOLATILE_MARKS)
+
+
 def _prefer_rank(height: int) -> int:
     """同档速度下的画质偏好：1080P > 720P > 4K > 其他。
 
@@ -133,7 +157,11 @@ class Stream:
 
         第三项区分「官方的还是拼来的」：速率同样够用时，运营商官方源优先。
 
-        第四项是这一版加的**历史成绩**：过去几轮里成功率不到一半的线路，哪怕
+        第四项区分「地址会不会过期」：带 ``time=``/``sign=`` 这类参数的地址是上游
+        现签的，写进订阅几十分钟后就是 403，而它探测那一刻必然通、淘汰不掉，
+        只能在排序上让位给长期地址。
+
+        第五项是**历史成绩**：过去几轮里成功率不到一半的线路，哪怕
         它标着 1080P，也排到「稳/未知」的后面去。列表每个台只写一行，排第二的
         那条永远没人看到——所以「哪条排第一」等于「用户会播哪条」，不能只看
         这一轮碰巧通不通。
@@ -152,12 +180,16 @@ class Stream:
         # 第三项：同样「撑得住」时，运营商自己的源排前面。它不换票、不限额、
         # 不夹广告，比任何公开聚合源都稳；只有它跑不动了才轮到聚合源。
         official = 0 if self.trusted else 1
+        # 第四项：带签名、会过期的地址让位。这类地址探测那一刻必然通（刚签的），
+        # 淘汰不掉，但写进订阅之后就不归我们管了——同档画质优先选长期地址。
+        volatile = 1 if is_volatile(self.url) else 0
         hist = self.hist_bucket()
         unstable = 1 if hist == 2 else 0
         return (
             direct,
             fit,
             official,
+            volatile,
             unstable,
             _prefer_rank(self.height),
             hist,

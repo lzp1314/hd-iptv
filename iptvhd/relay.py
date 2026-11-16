@@ -137,6 +137,18 @@ def decode(token: str) -> str:
 # 播放器多半没有 IPv6；让清单和分片都从本机过一手，播放端就与 IPv6 无关了。
 STATIC_PREFIX = "o:"
 
+# 普通上游源（聚合源、公开转播）也走中转，用 ``u:`` 区分。
+#
+# 为什么不能只让「官方源 / IPv6 源」走中转，其余直连：直连的地址是**采集那一刻**
+# 从上游拿到的，写进订阅之后就不再变。而聚合源普遍认 UA、按 IP 限流、地址里还
+# 带 ``time=`` 这类时间戳——播放器（尤其 ExoPlayer 系）拿到的是一个它自己拼不出来
+# 的请求，撞上校验就回 403，表现就是「列表能刷出来，点进去源服务器返回错误」。
+# 列表里的 ``#EXTVLCOPT:http-user-agent`` 只有 VLC 认，ExoPlayer 直接当注释跳过。
+#
+# 改成本机取清单之后，用的是采集阶段就验证过的那套请求头，播放器只需取分片
+# （分片绝大多数不校验 UA），「能刷出列表却播不了」这一类就没了。
+RELAY_PREFIX = "u:"
+
 # 这类源要的 UA（实测移动的 IPTV 边缘认 okhttp，浏览器 UA 也放行，但用
 # 机顶盒同款更稳）
 _STATIC_UA = "okhttp/3.12.0"
@@ -157,15 +169,34 @@ def static_ua() -> str:
 
 
 def static_slug(url: str) -> str:
-    """为静态源生成 slug。"""
+    """为官方源生成 slug（运营商边缘，走机顶盒 UA）。"""
     return STATIC_PREFIX + encode(url)
 
 
+def plain_slug(url: str) -> str:
+    """为普通上游源生成 slug（聚合源等，走采集时的浏览器 UA）。"""
+    return RELAY_PREFIX + encode(url)
+
+
 def static_url(slug: str) -> str:
-    """从静态 slug 还原上游地址；不是静态 slug 返回空串。"""
-    if not slug.startswith(STATIC_PREFIX):
-        return ""
-    return decode(slug[len(STATIC_PREFIX):])
+    """从静态 slug 还原上游地址；``o:`` 与 ``u:`` 两种前缀都认。
+
+    两者只差「取清单时用哪套请求头」，对调用方来说都是「地址编在 slug 里，
+    不用注册表」。
+    """
+    for prefix in (STATIC_PREFIX, RELAY_PREFIX):
+        if slug.startswith(prefix):
+            return decode(slug[len(prefix):])
+    return ""
+
+
+def slug_ua(slug: str) -> str:
+    """这条静态 slug 该用哪套 UA。``u:`` 用浏览器 UA，其余用机顶盒 UA。"""
+    if slug.startswith(RELAY_PREFIX):
+        from .settings import BROWSER_UA
+
+        return BROWSER_UA
+    return _STATIC_UA
 
 
 # 频道级 slug：``c:`` + base64url(频道名)。
@@ -673,7 +704,7 @@ class Relay:
         # 完全不碰下面那套给央视频设计的退避 / 预算逻辑。
         static = static_url(slug)
         if static:
-            return static, _STATIC_UA
+            return static, slug_ua(slug)
 
         # 换线路一定意味着要重新向上游要地址，不能走「手里还有旧地址就照旧给」。
         # 只对支持换线的解析器生效：央视频那类源只有一条路，清了窗口反而会让

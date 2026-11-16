@@ -333,7 +333,12 @@ def _probe_hls(stream: Stream, client: HttpClient, body_text: str, resp, sample_
     # 就停在原地。这里只登记「待复核」，真正的等待与复核放到 probe_many 里
     # 统一做——每条源各睡 4 秒的话，332 条要多花好几分钟，而它们完全可以
     # 一起等同一个 8 秒。
-    if not stream.playlist_only and info["segments"] <= _SHORT_WINDOW:
+    #
+    # 以前这里写着 `not stream.playlist_only`，等于把订阅类源整批排除在复核
+    # 之外——而它们恰恰是短窗口的重灾区：3 片的列表播十几秒就停，正是用户说的
+    # 「点进去能看一会儿，然后卡住」。复核是统一等 8 秒，不随条数线性增长，
+    # 放开后不增加总耗时。
+    if info["segments"] <= _SHORT_WINDOW:
         seq = _seq_of(text)
         if seq >= 0:
             stream.roll_url = base

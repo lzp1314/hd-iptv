@@ -149,26 +149,39 @@ class SharedEndpointTest(unittest.TestCase):
 
 
 class RelayRoutingTest(unittest.TestCase):
-    """官方源必须写成本机地址，否则没有 IPv6 的播放器直接放不出来。"""
+    """可播的流都写成本机地址：清单由 NAS 取，播放器只连分片。"""
 
     def test_trusted_stream_gets_static_slug(self):
         s = Stream(url="http://ztecdn.hb.chinamobile.com:6060/a/index.m3u8",
                    channel="CCTV-1", trusted=True)
-        self.assertEqual(pipeline._route_official_through_relay([s]), 1)
+        self.assertEqual(pipeline._route_through_relay([s]), (1, 0))
         self.assertTrue(s.slug.startswith("o:"))
         self.assertEqual(static_url(s.slug), s.url)
 
     def test_ipv6_final_url_gets_slug_without_trust(self):
         s = Stream(url="http://plain.example.com/a.m3u8", channel="CCTV-1")
         s.final_url = "http://[2409:8087::9]:6610/a/index.m3u8"
-        self.assertEqual(pipeline._route_official_through_relay([s]), 1)
+        self.assertEqual(pipeline._route_through_relay([s]), (1, 0))
         self.assertTrue(s.slug.startswith("o:"))
 
-    def test_ordinary_source_is_left_direct(self):
+    def test_ordinary_source_gets_plain_slug(self):
+        """聚合源也要走中转。
+
+        直连写进订阅的是采集那一刻的地址：聚合源认 UA、按 IP 限流、地址还带
+        时间戳。播放器（ExoPlayer 系）不认 ``#EXTVLCOPT``，自己拼出的请求撞上
+        校验就 403——「列表能刷出来，点进去源服务器返回错误」就是这么来的。
+        """
         s = Stream(url="https://cdn.example.com/live/a.m3u8", channel="CCTV-1")
         s.final_url = "https://cdn.example.com/live/a.m3u8"
-        self.assertEqual(pipeline._route_official_through_relay([s]), 0)
-        self.assertEqual(s.slug, "")
+        self.assertEqual(pipeline._route_through_relay([s]), (0, 1))
+        self.assertTrue(s.slug.startswith("u:"))
+        self.assertEqual(static_url(s.slug), s.url)
+
+    def test_already_slugged_stream_is_untouched(self):
+        """央视频那类只有频道名、播放时现换票的，不该被再包一层。"""
+        s = Stream(url="", channel="CCTV-1", slug="cctv1")
+        self.assertEqual(pipeline._route_through_relay([s]), (0, 0))
+        self.assertEqual(s.slug, "cctv1")
 
 
 class TrustedOrderTest(unittest.TestCase):

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import tempfile
 import threading
 import unittest
@@ -12,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from iptvhd.pipeline import run_update
+from iptvhd.relay import static_url
 from iptvhd.settings import load_settings
 
 SEG = b"\x47" * 400_000  # 伪造的 TS 分片，够大才好测速
@@ -167,6 +169,20 @@ enabled = true
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _targets(text: str) -> list[str]:
+        """把列表里的本机地址还原成上游地址。
+
+        输出写的是 ``/live/u:<base64>``，上游地址编在 slug 里——直接搜明文
+        地址永远搜不到，只能解码之后断言。
+        """
+        out = []
+        for match in re.finditer(r"/live/([A-Za-z0-9_\-:.]+)\.m3u8", text):
+            url = static_url(match.group(1))
+            if url:
+                out.append(url)
+        return out
+
     def test_full_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -181,13 +197,18 @@ enabled = true
             self.assertEqual(report.published, 1)
 
             m3u = (root / "output" / "result.m3u").read_text(encoding="utf-8")
-            self.assertIn("/1080/master.m3u8", m3u)
-            self.assertNotIn("/sd/master.m3u8", m3u)
+            # 列表里写的是本机地址（``u:`` = 普通上游源走中转），上游地址编在
+            # slug 里。断言要解码后再看，直接搜明文地址永远搜不到。
+            self.assertIn("/live/u:", m3u)
+            targets = self._targets(m3u)
+            self.assertEqual(len(targets), 1, m3u)
+            self.assertIn("/1080/master.m3u8", targets[0])
+            self.assertNotIn("/sd/master.m3u8", targets[0])
             self.assertIn("tvg-name=\"演示A\"", m3u)
 
             txt = (root / "output" / "result.txt").read_text(encoding="utf-8")
             self.assertIn("演示,#genre#", txt)
-            self.assertIn("/1080/master.m3u8", txt)
+            self.assertEqual(self._targets(txt), targets)
 
             # 分辨率来自主播放列表的 RESOLUTION，不是靠猜
             self.assertTrue(any("1080" in line for line in logs))

@@ -17,7 +17,7 @@ from .models import Channel, RunReport, Stream, need_mbps
 from .net import build_client
 from .normalize import ChannelMatcher, load_channels
 from .probe import probe_gentle, probe_many
-from .relay import needs_relay, static_slug
+from .relay import needs_relay, plain_slug, static_slug
 from .settings import Settings, append_public_sources, upgrade_channels, upgrade_sources
 
 Logger = Callable[[str], None]
@@ -429,28 +429,37 @@ def _probe_candidates(
             log(f"! [探测·官方源] {reason}")
 
 
-def _route_official_through_relay(streams: list[Stream]) -> int:
-    """把「上游在 IPv6 上」的静态源改成走本机转发，返回改了几条。
+def _route_through_relay(streams: list[Stream]) -> tuple[int, int]:
+    """把可播的流都改成走本机取清单，返回 ``(官方源条数, 普通源条数)``。
 
-    运营商 IPTV 的边缘只下发 IPv6 单播地址。播放器（电视盒子、老版本 VLC）
-    一大半没有 IPv6，直连必报「格式不支持」——而 302 前的原始地址看着完全正常，
-    排查时最容易误判成播放器的问题。这类源一律由本机中转：清单和分片都过 NAS，
-    播放端有没有 IPv6 就无所谓了。
+    两类分开是有原因的，UA 不一样：
 
-    做法是把地址编进 slug（见 relay.static_slug），输出列表里就成了
-    ``/live/<slug>.m3u8``，中转层拿 slug 里的地址去取，不用注册表。
+    * 运营商 IPTV 边缘（``trusted`` 或落在 IPv6 上）只认机顶盒同款 UA，用
+      ``o:`` 前缀，取清单时用 okhttp；
+    * 聚合源、公开转播用采集阶段那个浏览器 UA（采集能取到，说明上游认它），
+      用 ``u:`` 前缀。
 
-    ``trusted`` 的源无条件走这条路，不等探测记下最终地址：探测被跳过、或者这
-    一轮只拿到 302 头没跟到底，都会漏掉，而漏掉的后果就是「这个台放不出来」。
+    **为什么普通源也要走中转**：直连写进订阅的地址是采集那一刻拿到的，之后
+    不再变化。聚合源普遍认 UA、按 IP 限流、地址里还带 ``time=`` 时间戳，播放器
+    自己拼不出这个请求，撞上校验就 403——表现就是列表能刷出来、点进去报「源
+    服务器返回错误」。列表里的 ``#EXTVLCOPT:http-user-agent`` 只有 VLC 认，
+    ExoPlayer 系（观屿、影视仓等）直接当注释跳过，所以那行等于没写。
+
+    改由本机取清单之后，用的是已经验证过的那套请求头；分片仍然由播放器直连
+    CDN（``direct`` 模式），多一跳内网转发，不改变出口 IP。
     """
-    routed = 0
+    official = plain = 0
     for s in streams:
         if s.slug or not s.url:
+            # 已经有 slug（央视频那类只有频道名、播放时现换票），或者根本没地址
             continue
         if s.trusted or needs_relay(s.final_url or s.url):
             s.slug = static_slug(s.url)
-            routed += 1
-    return routed
+            official += 1
+        else:
+            s.slug = plain_slug(s.url)
+            plain += 1
+    return official, plain
 
 
 def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
@@ -548,11 +557,17 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
 
     log(
         f"[过滤] 可用 {len(alive)} 条"
-        f"（画质 {settings.min_height}~{settings.max_height}P，速率门槛 {settings.min_speed_mbps}Mbps）"
+        f"（画质 {settings.min_height}~{settings.max_height}P，"
+        f"速率门槛为该档画质的 70%、最低 {settings.min_speed_mbps}Mbps）"
     )
 
     kept_by_channel: dict[str, list[Stream]] = {}
-    _route_official_through_relay(alive)
+    routed_official, routed_plain = _route_through_relay(alive)
+    if routed_plain:
+        log(
+            f"[中转] {routed_official} 条官方源 + {routed_plain} 条聚合源改由本机取清单"
+            "（播放器只连分片，不再自己带 UA 去要被拒的清单）"
+        )
     for s in alive:
         kept_by_channel.setdefault(s.channel, []).append(s)
 
