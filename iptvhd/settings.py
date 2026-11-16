@@ -42,7 +42,14 @@ def as_bool(value, default: bool = True) -> bool:
 # 公共节目单源：epg.pw 的国内频道表，用 display-name 反查 id
 DEFAULT_EPG_SOURCE = "https://epg.pw/xmltv/epg_CN.xml"
 
-DEFAULT_CONFIG = """\
+# 默认浏览器 UA。采集和「中转层替播放器取清单」都用它：采集阶段能用它取到清单，
+# 说明上游认；换成别的（比如机顶盒 UA）反而会被聚合源拒。
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
+
+DEFAULT_CONFIG = f"""\
 [app]
 name = "hd-iptv"
 data_dir = "output"
@@ -54,7 +61,7 @@ run_on_start = true
 auto_region = true
 
 [fetch]
-user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+user_agent = "{BROWSER_UA}"
 timeout = 8
 retries = 2
 http_proxy = ""
@@ -62,12 +69,18 @@ http_proxy = ""
 [probe]
 enabled = true
 concurrency = 24
-sample_bytes = 262144
+# 每条流采样多少字节来测速。256KB 在 4 Mbps 的 1080P 上只够读半秒，测得的是
+# 「这一瞬间的爆发速度」，源头几十毫秒的抖动看不出来；512KB 才接近真实吞吐。
+sample_bytes = 524288
 # 单条流探测的总时限（秒）。慢滴流到点即弃，避免整轮更新卡死。
 timeout = 15
-# 整批探测的总预算（秒）。到点用已回来的结果收工。
-budget = 180
+# 整批探测的总预算（秒）。到点用已回来的结果收工。采样翻倍后要留出余量，
+# 否则加严的代价会变成「排在后面的台根本没探到」。
+budget = 210
 min_speed_mbps = 0.8
+# 实测速率要达到「该档画质所需带宽」的几成才算可用。0.5 意味着 1080P 只要
+# 2 Mbps 就放行，而 1080P 真要 4 Mbps 才连续播——放进来就是卡一下停一下。
+speed_ratio = 0.7
 min_height = 720
 max_height = 2160
 max_per_channel = 4
@@ -87,6 +100,9 @@ ttl_hours = 6
 epg_url = ""
 logo_base = ""
 public_url = ""
+# 一个台有多条线路时，列表里只写一个固定地址，线路切换交给本机中转。
+# 关掉就退回「每台一条直连地址」——那样一条线路被上游拒了就只能报错。
+failover = true
 """
 
 
@@ -241,7 +257,12 @@ class Settings:
 
     @property
     def user_agent(self) -> str:
-        return os.environ.get("HDIPTV_USER_AGENT") or self.get("fetch", "user_agent", "")
+        """取清单用的 UA。留空时回落到默认浏览器 UA，而不是空串。
+
+        中转层替播放器取清单时也用这一个：留空会一路传到 ``urllib``，最后
+        落成 ``qqlive``——那是央视频的客户端标识，聚合源看到它就 403。
+        """
+        return os.environ.get("HDIPTV_USER_AGENT") or self.get("fetch", "user_agent", "") or BROWSER_UA
 
     @property
     def timeout(self) -> float:
@@ -261,7 +282,13 @@ class Settings:
 
     @property
     def sample_bytes(self) -> int:
-        return int(os.environ.get("HDIPTV_SAMPLE_BYTES") or self.get("probe", "sample_bytes", 262144))
+        """每条流采样多少字节测速。
+
+        256KB 在 4 Mbps 的 1080P 上只值半秒，测出来的是「这一瞬间的爆发速度」，
+        上游偶尔快一下就会被当成好源；512KB 才接近真实吞吐。调小可以省时间，
+        但代价是更容易把抖动当能力。
+        """
+        return int(os.environ.get("HDIPTV_SAMPLE_BYTES") or self.get("probe", "sample_bytes", 524288))
 
     @property
     def probe_timeout(self) -> float:
@@ -275,7 +302,21 @@ class Settings:
     @property
     def probe_budget(self) -> float:
         """整批探测的总预算（秒）。到点就用已回来的结果收工。"""
-        return float(os.environ.get("HDIPTV_PROBE_BUDGET") or self.get("probe", "budget", 180))
+        return float(os.environ.get("HDIPTV_PROBE_BUDGET") or self.get("probe", "budget", 210))
+
+    @property
+    def speed_ratio(self) -> float:
+        """实测速率要打到「该档画质所需带宽」的几成才算可用。
+
+        0.5 太松：1080P 只要 2 Mbps 就放行，而它真要 4 Mbps 才连续播，结果就是
+        播几秒卡一下。0.7 是留了线路波动余量的值——再往上会把「刚好够」的源全
+        砍光，那些源白天其实能看。夹在 0.3~1.0 之间，防止配错成 0 或 5。
+        """
+        raw = os.environ.get("HDIPTV_SPEED_RATIO") or self.get("probe", "speed_ratio", 0.7)
+        try:
+            return min(1.0, max(0.3, float(raw)))
+        except (TypeError, ValueError):
+            return 0.7
 
     @property
     def min_speed_mbps(self) -> float:
@@ -313,6 +354,19 @@ class Settings:
     @property
     def allow_unknown(self) -> bool:
         return bool(self.get("probe", "allow_unknown_resolution", False))
+
+    @property
+    def failover(self) -> bool:
+        """一个台有多条线路时，是否启用「单地址多线路自动切换」。
+
+        开：列表里写 ``/live/c:<台名>.m3u8``，中转层内部按顺序换线路，
+        播放器只认一个地址，一条被上游拒了也不会「无法播放」。
+        关：退回每台一条直连地址（旧行为），排查「到底哪条线路有问题」时用。
+        """
+        raw = os.environ.get("HDIPTV_FAILOVER")
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("output", "failover", True))
 
     @property
     def public_url(self) -> str:
@@ -534,6 +588,11 @@ def upgrade_config(path: Path) -> bool:
     * ``playlist_ttl = 2.5`` → 5.0。2.5 秒比上游滚片（5 秒一片）还勤，一半请求
       拿到的是同一份清单，纯烧出口配额；出口被按 IP 记账打到限流之后，换新票也
       全是 403。这条只在文件里还是旧默认值时改，面板上的值优先。
+    * ``sample_bytes = 262144`` → 524288。256KB 在 4 Mbps 的 1080P 上只值半秒，
+      测出来的是爆发速度，上游偶尔快一下就被当成好源——这正是「看着有码率、
+      播起来还是卡」的来源之一。
+    * ``budget = 180`` → 210。采样翻倍后每条流多读一倍数据，预算不跟着放宽，
+      加严的代价就变成「排在后面的台根本没轮到探测」。
     """
     if not path.exists():
         return False
@@ -543,6 +602,12 @@ def upgrade_config(path: Path) -> bool:
         return False
 
     original = current
+    if "sample_bytes = 262144" in current:
+        current = current.replace("sample_bytes = 262144", "sample_bytes = 524288", 1)
+        # 行内注释里写着「（256KB）」，不改就成了自相矛盾的注释
+        current = current.replace("（256KB）", "（512KB）", 1)
+    if "budget = 180" in current:
+        current = current.replace("budget = 180", "budget = 210", 1)
     if "max_height = 1080" in current:
         current = current.replace(
             "max_height = 1080",

@@ -10,6 +10,57 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .models import Channel, RunReport, Stream
+from .relay import channel_slug
+
+
+def failover_key(channel: Channel, lines_per_channel: int = 1) -> str:
+    """这个台该不该换成一个「多线路自动切换」的本机地址。
+
+    条件三条，缺一不可：
+
+    * 列表里只写一行。``lines_per_channel > 1`` 是用户主动要「手动切线路」，
+      那时多行指向同一个地址反而没得切，保持原样；
+    * 至少有两条可用线路。只有一条的话换地址没有任何收益，只会把清单请求
+      从播放器挪到本机；
+    * 至少有一条是真地址（``http``）。全是「只登记了频道、播放时现换票」的
+      那种，线路表里没有可比的东西，交给原来的解析器更省事。
+
+    满足条件时返回频道级 slug，列表里就写 ``/live/c:<频道名>.m3u8``。这个地址
+    不随更新变化，播放器收藏的、正在播的都一直有效；具体走哪条线路由中转层
+    现场决定，一条被拒就换下一条，播放器那边完全无感。
+    """
+    if lines_per_channel > 1:
+        return ""
+    usable = [s for s in channel.streams if s.url or s.slug]
+    if len(usable) < 2:
+        return ""
+    if not any(str(s.url).lower().startswith("http") for s in usable):
+        return ""
+    return channel_slug(channel.name)
+
+
+def _play_url(stream: Stream, relay_base: str, channel_key: str = "") -> str:
+    """有 slug 就给本机地址。
+
+    直连地址对 UA 敏感、且有寿命；走本机下发清单后播放器用什么客户端都能放，
+    地址也不会过期。没有对外地址时给相对路径——播放器按 m3u 所在地址解析，
+    少数不解析相对路径的播放器由服务端现拼时补全（``/playlist.m3u`` 走的就是
+    这条路径）。只有完全没有 slug 的流才退回它自己的地址。
+
+    ``channel_key`` 是频道级 slug：给了就用它，让同一个台的所有线路共用这一个
+    对外地址，线路切换在中转层内部完成。
+
+    **有 slug 的流绝不退回 ``stream.url``**：央视频那些台的 url 是「抽测轮」
+    临时换来的票，寿命只有几小时。写进列表就是一条死链——播放器打开只看到
+    黑屏，而且卡片上还显示着画质和码率，很容易以为是源不好。
+    """
+    key = channel_key or stream.slug
+    if key:
+        base = relay_base.rstrip("/") if relay_base else ""
+        if base:
+            return f"{base}/live/{key}.m3u8"
+        return f"/live/{key}.m3u8"
+    return stream.url
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -53,26 +104,6 @@ def _logo(channel: Channel, logo_base: str) -> str:
     return ""
 
 
-def _play_url(stream: Stream, relay_base: str) -> str:
-    """有 slug 就给本机地址。
-
-    直连地址对 UA 敏感、且有寿命；走本机下发清单后播放器用什么客户端都能放，
-    地址也不会过期。没有对外地址时给相对路径——播放器按 m3u 所在地址解析，
-    少数不解析相对路径的播放器由服务端现拼时补全（``/playlist.m3u`` 走的就是
-    这条路径）。只有完全没有 slug 的流才退回它自己的地址。
-
-    **有 slug 的流绝不退回 ``stream.url``**：央视频那些台的 url 是「抽测轮」
-    临时换来的票，寿命只有几小时。写进列表就是一条死链——播放器打开只看到
-    黑屏，而且卡片上还显示着画质和码率，很容易以为是源不好。
-    """
-    if stream.slug:
-        base = relay_base.rstrip("/") if relay_base else ""
-        if base:
-            return f"{base}/live/{stream.slug}.m3u8"
-        return f"/live/{stream.slug}.m3u8"
-    return stream.url
-
-
 def render_m3u(
     channels: list[Channel],
     *,
@@ -82,6 +113,7 @@ def render_m3u(
     relay_base: str = "",
     tvg_ids: dict | None = None,
     lines_per_channel: int = 1,
+    failover: bool = True,
 ) -> tuple[str, int]:
     """生成 m3u 文本，返回 ``(内容, 条数)``。
 
@@ -94,6 +126,10 @@ def render_m3u(
     几条备用线路全写出去，VLC 这类播放器会老老实实列成好几行，看着就是一排
     重复台（观屿会按台名归并，所以那边看不出来）。备用线路仍然留在内部，
     要手动切线路的把这里调到 2~4。
+
+    ``failover`` 打开时，有多条线路的台改用一个固定的本机地址
+    （``/live/c:<台名>.m3u8``），线路切换由中转层内部完成——这样「只写一行」
+    不会变成「一条挂了就播不了」。
     """
     lines = []
     head = "#EXTM3U"
@@ -109,11 +145,12 @@ def render_m3u(
             continue
         logo = _logo(ch, logo_base)
         seen: set[str] = set()
+        key = failover_key(ch, lines_per_channel) if failover else ""
         picked = ch.streams[: max(1, lines_per_channel)]
         for stream in picked:
             # 走转发时，同一个台的多个源会塌缩成同一个地址；重复条目会让
             # 播放器在两条一模一样的记录之间来回跳，先去掉
-            target = _play_url(stream, relay_base)
+            target = _play_url(stream, relay_base, key)
             if target in seen:
                 continue
             seen.add(target)
@@ -148,6 +185,7 @@ def write_m3u(
     relay_base: str = "",
     tvg_ids: dict | None = None,
     lines_per_channel: int = 1,
+    failover: bool = True,
 ) -> int:
     """生成 m3u 文件。返回写入的流条数。"""
     text, count = render_m3u(
@@ -158,13 +196,14 @@ def write_m3u(
         relay_base=relay_base,
         tvg_ids=tvg_ids,
         lines_per_channel=lines_per_channel,
+        failover=failover,
     )
     _atomic_write(path, text)
     return count
 
 
 def render_txt(channels: list[Channel], *, relay_base: str = "",
-               lines_per_channel: int = 1) -> tuple[str, int]:
+               lines_per_channel: int = 1, failover: bool = True) -> tuple[str, int]:
     """生成 txt 列表（按分组分段），返回 ``(内容, 条数)``。"""
     lines: list[str] = []
     count = 0
@@ -175,17 +214,18 @@ def render_txt(channels: list[Channel], *, relay_base: str = "",
         if ch.group != current_group:
             current_group = ch.group
             lines.append(f"{ch.group},#genre#")
+        key = failover_key(ch, lines_per_channel) if failover else ""
         for stream in ch.streams[: max(1, lines_per_channel)]:
-            lines.append(f"{ch.name},{_play_url(stream, relay_base)}")
+            lines.append(f"{ch.name},{_play_url(stream, relay_base, key)}")
             count += 1
     return "\n".join(lines) + "\n", count
 
 
 def write_txt(channels: list[Channel], path: Path, *, relay_base: str = "",
-              lines_per_channel: int = 1) -> int:
+              lines_per_channel: int = 1, failover: bool = True) -> int:
     """生成 txt 列表文件。"""
     text, count = render_txt(channels, relay_base=relay_base,
-                             lines_per_channel=lines_per_channel)
+                             lines_per_channel=lines_per_channel, failover=failover)
     _atomic_write(path, text)
     return count
 

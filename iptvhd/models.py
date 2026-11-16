@@ -9,6 +9,12 @@ from dataclasses import dataclass, field
 # 720P 在 2~4 Mbps；低于这个数播放器就会一直等下一片，表现就是卡一下停一下。
 _NEED_MBPS = ((2160, 8.0), (1080, 4.0), (720, 2.0))
 
+# 历史成绩的分档门槛。样本不到 HIST_MIN_SAMPLES 轮就当作「不知道」，排序结果与
+# 没有这套统计时完全一致——新部署、刚加的源不会被历史拖后腿。
+HIST_MIN_SAMPLES = 3
+HIST_STABLE = 0.75
+HIST_FLAKY = 0.5
+
 
 def need_mbps(height: int) -> float:
     """这一档画质大概需要多少带宽才播得动。"""
@@ -87,6 +93,11 @@ class Stream:
     roll_url: str = ""          # 需要复核「清单是否在滚」的清单地址，空 = 不用复核
     roll_seq: int = -1          # 首次取到的分片序号
 
+    # ---- 历史成绩（由 history 模块回填，只参与排序）----
+    hist_rate: float = -1.0     # 过去几轮的成功率，-1 = 没有样本
+    hist_samples: int = 0       # 一共观察了几轮
+    hist_fails: int = 0         # 最近连续失败了几轮
+
     # ---- 匹配结果（由管线回填）----
     channel: str = ""
     channel_group: str = ""
@@ -94,6 +105,20 @@ class Stream:
     @property
     def grade(self) -> str:
         return height_grade(self.height)
+
+    def hist_bucket(self) -> int:
+        """历史成绩分档：0 稳、1 一般/未知、2 不稳。
+
+        样本不够一律返回 1，与「没有这套统计」等价——不能因为刚部署、还没攒够
+        样本就改变排序结果。
+        """
+        if self.hist_samples < HIST_MIN_SAMPLES:
+            return 1
+        if self.hist_rate >= HIST_STABLE:
+            return 0
+        if self.hist_rate < HIST_FLAKY:
+            return 2
+        return 1
 
     def sort_key(self) -> tuple:
         """排序：直连优先 → 速度能不能撑住画质 → 画质 → 速率 → 延迟。
@@ -107,6 +132,14 @@ class Stream:
         而它一直排第一，仅仅因为分辨率标签比 720P 那条高。
 
         第三项区分「官方的还是拼来的」：速率同样够用时，运营商官方源优先。
+
+        第四项是这一版加的**历史成绩**：过去几轮里成功率不到一半的线路，哪怕
+        它标着 1080P，也排到「稳/未知」的后面去。列表每个台只写一行，排第二的
+        那条永远没人看到——所以「哪条排第一」等于「用户会播哪条」，不能只看
+        这一轮碰巧通不通。
+
+        分档只区分「历史不稳」和「其余」，稳与未知之间不设卡：画质仍然优先，
+        刚加的源不会因为没攒够样本就被挤到后面。
         """
         direct = 0 if self.url else 1
         need = need_mbps(self.height)
@@ -119,7 +152,19 @@ class Stream:
         # 第三项：同样「撑得住」时，运营商自己的源排前面。它不换票、不限额、
         # 不夹广告，比任何公开聚合源都稳；只有它跑不动了才轮到聚合源。
         official = 0 if self.trusted else 1
-        return (direct, fit, official, _prefer_rank(self.height), -self.speed_mbps, self.delay_ms)
+        hist = self.hist_bucket()
+        unstable = 1 if hist == 2 else 0
+        return (
+            direct,
+            fit,
+            official,
+            unstable,
+            _prefer_rank(self.height),
+            hist,
+            -self.speed_mbps,
+            self.delay_ms,
+            self.hist_fails,
+        )
 
 
 @dataclass(slots=True)

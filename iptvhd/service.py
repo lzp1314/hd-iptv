@@ -16,7 +16,7 @@ from .epg import Epg
 from .logos import Logos
 from .models import Channel, Stream
 from .pipeline import load_result, run_update
-from .relay import Relay, RelayError
+from .relay import Relay, RelayError, channel_name, channel_slug, static_ua
 from .region import detect
 from .settings import Settings, clean_secret, coerce_panel, write_panel
 
@@ -180,10 +180,12 @@ def _ysp_resolver(slug: str) -> tuple[str, str]:
 def live_target(raw_slug: str) -> tuple[str, str] | None:
     """判断 ``/live/<slug>.m3u8`` 里的 slug 该交给谁，返回 ``(key, 展示名)``。
 
-    两套 slug 并存：
+    三套 slug 并存：
 
     - ``cctv1`` 这类：央视频的台，要现换票，地址不在 URL 里；
-    - ``o:<base64>`` 这类：官方源（运营商 IPTV 等），上游地址整条编在 slug 里。
+    - ``o:<base64>`` 这类：官方源（运营商 IPTV 等），上游地址整条编在 slug 里；
+    - ``c:<base64>`` 这类：**频道级**，一个地址对应这个台的几条线路，具体走哪条
+      由中转层现场决定（见 ``State._resolve``）。
 
     只认前者的话，官方源接进来之后所有台都会回 404「未知频道」，播放器那边
     看到的就是「源服务器返回错误」——0.9.13 就是这么翻车的。播放器还会把
@@ -196,6 +198,9 @@ def live_target(raw_slug: str) -> tuple[str, str] | None:
     row = ysp.CHANNEL_BY_SLUG.get(key.lower())
     if row is not None:
         return key.lower(), row[1]
+    name = channel_name(key)
+    if name:
+        return key, name
     if static_url(key):
         return key, "运营商源"
     return None
@@ -213,9 +218,22 @@ class State:
         self.last_error = ""
         self.report: dict = {}
         self.logs: list[str] = []
+        # ---- 频道级线路表 ----
+        # slug（``c:...``）→ 这个台的几条线路，按质量排好序。线路本身不存
+        # 在这里，而是每次 latest.json 变了就从里面重建：更新一轮之后哪条线路
+        # 好哪条坏全变了，留着旧的等于拿上一轮的结论播这一轮。
+        self._lines: dict[str, list[tuple[str, str, str]]] = {}
+        self._lines_mtime = 0.0
+        self._lines_lock = threading.Lock()
+        # slug → 当前在用第几条。轮换是「失败驱动」的：只有上游真的拒了才往下
+        # 走一条，正常播放不会自己漂移。
+        self._line_at: dict[str, int] = {}
+        self._line_lock = threading.Lock()
+        # slug → 上次记「换线」日志的时刻，同一台 30 秒只记一条
+        self._line_note: dict[str, float] = {}
         # 清单由本机取（用上游认的 UA），分片默认让播放器直连 CDN
         self.relay = Relay(
-            _ysp_resolver,
+            self._resolve,
             prefetch_every=settings.playlist_ttl,
             cache_bytes=int(settings.relay_cache_mb * 1024 * 1024),
             mode=settings.play_mode,
@@ -236,6 +254,86 @@ class State:
         with self.lock:
             self.logs.append(line)
             self.logs = self.logs[-200:]
+
+    # ---------------- 频道级线路 ----------------
+    def _ensure_lines(self) -> None:
+        """按 ``latest.json`` 重建线路表；文件没变就什么也不做。
+
+        为什么不常驻内存一次性建好：每轮更新之后「哪条线路好」全变了，而
+        latest.json 是唯一写这份结论的地方。用 mtime 判断，比在每个更新出口
+        都去通知一遍可靠——手动跑一次 CLI、换个容器重建，这里都能跟上。
+        """
+        path = self.settings.data_dir / "latest.json"
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return
+        if mtime == self._lines_mtime:
+            return
+        with self._lines_lock:
+            if mtime == self._lines_mtime:
+                return
+            lines: dict[str, list[tuple[str, str]]] = {}
+            result = load_result(self.settings) or {}
+            for row in result.get("channels") or []:
+                name = str(row.get("name") or "")
+                if not name:
+                    continue
+                items: list[tuple[str, str]] = []
+                for item in row.get("streams") or []:
+                    url = str(item.get("url") or "").strip()
+                    slug = str(item.get("slug") or "").strip()
+                    if not url and not slug:
+                        continue
+                    items.append((url, slug))
+                if items:
+                    # 顺序就是更新时算好的质量排序，第一条最该用
+                    lines[channel_slug(name)] = items
+            self._lines = lines
+            self._lines_mtime = mtime
+            self._line_at.clear()
+
+    def _resolve(self, slug: str, rotate: bool = False) -> tuple[str, str]:
+        """给中转层解析一条线路。
+
+        频道级 slug（``c:``）：这个台挂着几条源，按顺序取当前这条；``rotate``
+        表示刚被上游拒了，换下一条。换到头就回到第一条——比「所有线路都试过
+        就报错」好：上游的 403 大多是按 IP、按分钟计的，绕一圈回来往往就好了。
+
+        其它 slug（央视频的 ``cctv1``）：交给原来的解析器，它要现换票。
+        """
+        name = channel_name(slug)
+        if not name:
+            return _ysp_resolver(slug)
+
+        self._ensure_lines()
+        items = self._lines.get(slug) or []
+        if not items:
+            raise RelayError(f"{name} 暂时没有可用线路（结果可能已过期，等下一轮更新）")
+
+        with self._line_lock:
+            if rotate and len(items) > 1:
+                self._line_at[slug] = (self._line_at.get(slug, 0) + 1) % len(items)
+            idx = self._line_at.get(slug, 0) % len(items)
+            moved = rotate and len(items) > 1
+            now = time.time()
+            # 同一台 30 秒只记一条：上游按 IP 限流时，几十条请求会连着换线，
+            # 每条都写日志等于把面板刷满，真正要看的错误反而被冲走
+            if moved and now - self._line_note.get(slug, 0.0) >= 30.0:
+                self._line_note[slug] = now
+                quiet = False
+            else:
+                quiet = True
+        if moved and not quiet:
+            self.log(f"[换线] {name} 改用第 {idx + 1}/{len(items)} 条线路")
+
+        url, inner = items[idx]
+        if url:
+            # 官方源（运营商的 IPv6 边缘）认机顶盒同款 UA；聚合源用采集时那个
+            # 浏览器 UA —— 采集阶段就是用它取到清单的，说明上游认。
+            ua = static_ua() if inner.startswith("o:") else self.settings.user_agent
+            return url, ua
+        return _ysp_resolver(inner)
 
     # ---------------- 这条宽带是哪里的 ----------------
     def refresh_region(self, force: bool = False) -> dict:
@@ -573,6 +671,7 @@ def make_handler(state: State):
                 relay_base=base,
                 tvg_ids=state.epg.mapping(),
                 lines_per_channel=settings.lines_per_channel,
+                failover=settings.failover,
             )
             self._send(
                 200,
@@ -694,7 +793,8 @@ def make_handler(state: State):
                     self._json({"error": "结果尚未生成，请先更新一次"}, 404)
                     return
                 text, _ = writers.render_txt(channels, relay_base=self._base(),
-                                             lines_per_channel=settings.lines_per_channel)
+                                             lines_per_channel=settings.lines_per_channel,
+                                             failover=settings.failover)
                 self._send(200, text.encode("utf-8"), "text/plain; charset=utf-8")
             elif path in ("/json", "/result.json"):
                 result = load_result(settings)

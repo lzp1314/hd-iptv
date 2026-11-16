@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import math
 import re
 import threading
@@ -146,6 +147,15 @@ def needs_relay(url: str) -> bool:
     return bool(_ipv6_host(url))
 
 
+def static_ua() -> str:
+    """取官方静态源该用的 UA。
+
+    调用方自己解析线路时（频道级 slug 要按线路决定走哪条）得知道这个值，
+    不然会拿浏览器 UA 去打只认机顶盒的运营商边缘。
+    """
+    return _STATIC_UA
+
+
 def static_slug(url: str) -> str:
     """为静态源生成 slug。"""
     return STATIC_PREFIX + encode(url)
@@ -156,6 +166,31 @@ def static_url(slug: str) -> str:
     if not slug.startswith(STATIC_PREFIX):
         return ""
     return decode(slug[len(STATIC_PREFIX):])
+
+
+# 频道级 slug：``c:`` + base64url(频道名)。
+#
+# 和静态 slug 的区别在「一个 slug 对应几条线路」。静态 slug 自带一条上游地址，
+# 出一条、换一条都得重写列表；而列表里每个台只写一行，那条一旦被上游拒了，
+# 播放器就直接报「无法播放」——它手里没有任何备份。
+#
+# 频道级 slug 只记「是哪个台」，具体用哪条线路交给中转层现场决定：清单取不到
+# 就换下一路，播放器这边看到的永远是同一个地址，不需要重新拉订阅。等于把
+# 「这个台有好几条源」这件事从列表里挪到了服务端。
+CHANNEL_PREFIX = "c:"
+
+
+def channel_slug(name: str) -> str:
+    """为频道生成频道级 slug。"""
+    return CHANNEL_PREFIX + encode(name)
+
+
+def channel_name(slug: str) -> str:
+    """从频道级 slug 还原频道名；不是频道级 slug 返回空串。"""
+    if not slug.startswith(CHANNEL_PREFIX):
+        return ""
+    return decode(slug[len(CHANNEL_PREFIX):])
+
 
 
 def parse_range(spec: str, size: int) -> tuple[int, int] | None:
@@ -475,6 +510,12 @@ class Relay:
         warm: bool = True,
     ):
         self._resolver = resolver
+        # 解析器支持不支持「换下一路」。老实现只有一个参数，这里探测一次，
+        # 免得为了一个可选参数让所有调用方（含测试里的假解析器）都得改。
+        try:
+            self._resolver_rotates = "rotate" in inspect.signature(resolver).parameters
+        except (TypeError, ValueError):
+            self._resolver_rotates = False
         self._mode = mode if mode in ("direct", "proxy") else "direct"
         # 是否启用后台预取。关掉之后就退回「每次请求同步去上游」，只给测试用。
         self._warm = warm
@@ -599,11 +640,25 @@ class Relay:
             return playing
 
     # ---------------- 上游 ----------------
-    def upstream(self, slug: str, *, fresh: bool = False) -> tuple[str, str]:
+    def _call_resolver(self, slug: str, rotate: bool) -> tuple[str, str]:
+        """调解析器，``rotate=True`` 表示「这一路不行，换下一路」。
+
+        解析器是构造时从外面塞进来的，老实现只有一个参数。这里先探测签名，
+        免得为了一个可选参数把所有调用方（含测试里的假解析器）都改一遍。
+        """
+        if rotate and self._resolver_rotates:
+            return self._resolver(slug, rotate=True)  # type: ignore[call-arg]
+        return self._resolver(slug)
+
+    def upstream(self, slug: str, *, fresh: bool = False, rotate: bool = False) -> tuple[str, str]:
         """取该频道当前可用的上游地址与 UA。
 
         ``fresh=True`` 表示「刚被上游拒绝，想换一个」，受冷却时间约束：
         短时间内重复失败只试一次，避免把接口敲到限流。
+
+        ``rotate=True`` 是更重的一档：不只是换一张票，而是**换一条线路**。
+        频道级 slug 下同一个台挂着好几条源，第一路 403 了就轮到第二路——
+        这是「列表里只写一行」还不会「一挂就播不了」的关键。
 
         三道闸，任何一道关着就**一枪不打上游**：
 
@@ -619,6 +674,17 @@ class Relay:
         static = static_url(slug)
         if static:
             return static, _STATIC_UA
+
+        # 换线路一定意味着要重新向上游要地址，不能走「手里还有旧地址就照旧给」。
+        # 只对支持换线的解析器生效：央视频那类源只有一条路，清了窗口反而会让
+        # 播放器手里的清单突然变短。
+        if rotate and self._resolver_rotates:
+            fresh = True
+            # 旧线路攒下的分片窗口必须丢掉：新线路的分片地址完全是另一套，
+            # 混在一起发出去，播放器会去取一堆已经不属于这条线路的分片。
+            with self._lock:
+                self._windows.pop(slug, None)
+                self._raw.pop(slug, None)
 
         with self._lock:
             hit = self._cache.get(slug)
@@ -658,7 +724,7 @@ class Relay:
                 raise RelayError("正在批量请求频道，稍后自动恢复")
 
         try:
-            url, ua = self._resolver(slug)
+            url, ua = self._call_resolver(slug, rotate)
         except Exception as exc:  # noqa: BLE001 - 解析失败要能兜住
             message = str(exc) or type(exc).__name__
             with self._lock:
@@ -1114,13 +1180,14 @@ class Relay:
             last_reticket = self._reticket_at.get(slug, 0.0)
 
         # 序号 10 秒没滚，基本就是这张票据冻住了，换一张重取。换票也吃配额，
-        # 所以 10 秒最多换一次。
+        # 所以 10 秒最多换一次。多线路的台顺便换条路：冻住十有八九是这条线路
+        # 自己的问题，而播放器那边已经停在原地了，换票和换线路的成本一样。
         fresh = idle >= _FROZEN_AFTER and now - last_reticket >= _FROZEN_AFTER
         if fresh:
             with self._lock:
                 self._reticket_at[slug] = now
         try:
-            text, base = self._fetch_raw(slug, fresh=fresh)
+            text, base = self._fetch_raw(slug, fresh=fresh, rotate=fresh)
         except RelayError:
             return
         self._absorb(slug, text, base)
@@ -1143,7 +1210,9 @@ class Relay:
             except Exception:  # noqa: BLE001 - 记日志不能反过来搞崩播放
                 pass
 
-    def _fetch_raw(self, slug: str, *, fresh: bool = False) -> tuple[str, str]:
+    def _fetch_raw(
+        self, slug: str, *, fresh: bool = False, rotate: bool = False
+    ) -> tuple[str, str]:
         """去上游取一份**原始**清单，连它的基准地址一起返回。
 
         为什么不在这里顺手改写：同一个台可能同时被内网和外网访问，改写结果
@@ -1157,14 +1226,18 @@ class Relay:
         if cooling_channel and not fresh:
             raise RelayError("本台线路暂时受限，几秒后自动重试")
 
-        url, ua = self.upstream(slug, fresh=fresh)
+        url, ua = self.upstream(slug, fresh=fresh, rotate=rotate)
         status, _, body, final = self._fetch(url, ua)
         if status in _GONE:
             # 同一个清单地址连取几次就会被 CDN 拒（实测 2~5 次后开始 403，
             # 换张新票立刻恢复）。这里先安静 1 秒再换票重取——1 秒是实测能
             # 把「刚被拒」的窗口熬过去的最短时间，再短只会被拒得一样干脆。
+            #
+            # 这里顺手 rotate：一个台挂着好几条源时，「这条 403 了」最常见的
+            # 原因就是这条线路本身不行，换条路比死磕同一个域名划算得多。
+            # 只有一条线路时 resolver 会原地返回同一个地址，退化成原来的行为。
             time.sleep(1.0)
-            url, ua = self.upstream(slug, fresh=True)
+            url, ua = self.upstream(slug, fresh=True, rotate=True)
             status, _, body, final = self._fetch(url, ua)
         if status != 200 or not body:
             self._mark_failed(slug, f"上游返回 {status}")

@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import autoregion, writers
+from . import autoregion, history, writers
 from .collectors import Collector, SubscriptionCollector, build_collectors, parse_list
 from .models import Channel, RunReport, Stream, need_mbps
 from .net import build_client
@@ -269,6 +269,7 @@ def _filter(streams: list[Stream], settings: Settings) -> list[Stream]:
     max_h = settings.max_height
     min_speed = settings.min_speed_mbps
     allow_unknown = settings.allow_unknown
+    ratio = settings.speed_ratio
     kept: list[Stream] = []
     for s in streams:
         if not s.ok:
@@ -284,9 +285,9 @@ def _filter(streams: list[Stream], settings: Settings) -> list[Stream]:
         if s.speed_mbps:
             # 门槛按画质分档，不再一刀切 0.8 Mbps：那个数字连 480P 都勉强，
             # 1080P 标称 1.33 Mbps 的源照样放行，结果就是播一卡一。
-            # 取「该档画质的一半」当底线——留出线路波动的余量，又不至于把
-            # 1.5~2 Mbps 这类凑合能看的源全砍光（砍光就只能回落央视频换票）。
-            floor = max(min_speed, need_mbps(s.height) * 0.5)
+            # 取「该档画质所需带宽 × speed_ratio」当底线——留出线路波动的余量，
+            # 又不至于把「刚好够」的源全砍光（砍光就只能回落央视频换票）。
+            floor = max(min_speed, need_mbps(s.height) * ratio)
             if s.speed_mbps < floor:
                 continue
         kept.append(s)
@@ -503,8 +504,19 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
             s.ok = True
 
     _drop_shared_endpoints(candidates, log)
+
+    # 历史成绩：先记账再回填。排序（Channel.accept）在下面，所以这里必须排好
+    # 顺序——先 record 会把本轮结果也算进去，等于「这一轮通了就加一分」，
+    # 那和一个台只写一行列表的初衷是矛盾的。所以顺序是：读旧账 → 回填本轮排序
+    # 用的分数 → 再把本轮结果记进账本。
+    book = history.load(settings)
+    history.apply(candidates, book)
     alive = _filter([s for s in candidates], settings)
     report.alive = len(alive)
+
+    # 只记真的探测过的条目：官方源失败多半是出口被限流，记进账本会把它自己
+    # 打成低分（history.record 内部已跳过 trusted）。
+    history.record(settings, candidates, book)
 
     # 抽测数据落地：抽测轮把真实测速结果存进缓存；非抽测轮把历史测速回填，
     # 让面板持续显示码率/测速而不是永远「未测速」。
@@ -565,9 +577,11 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
         logo_base=settings.logo_base,
         relay_base=settings.public_url,
         lines_per_channel=settings.lines_per_channel,
+        failover=settings.failover,
     )
     writers.write_txt(channels, txt_path, relay_base=settings.public_url,
-                      lines_per_channel=settings.lines_per_channel)
+                      lines_per_channel=settings.lines_per_channel,
+                      failover=settings.failover)
     writers.write_json(channels, json_path, report)
     writers.write_json(channels, out_dir / "latest.json", report)
     log(

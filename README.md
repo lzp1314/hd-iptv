@@ -2,7 +2,7 @@
 
 **自部署的 IPTV 播放列表管理工具：整理、测速、聚合与分发节目清单，供个人与家庭内网使用。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![Version](https://img.shields.io/badge/version-0.9.21-blue.svg)](https://github.com/lzp1314/hd-iptv)
+[![Version](https://img.shields.io/badge/version-0.9.22-blue.svg)](https://github.com/lzp1314/hd-iptv)
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -56,7 +56,7 @@ mkdir -p ~/hd-iptv && cd ~/hd-iptv
 services:
   hd-iptv:
     # 预构建多架构镜像（amd64 / arm64 / armv7），自动匹配你的机器
-    # 想锁死版本写 :0.9.21；想跟着修 bug 写 :latest
+    # 想锁死版本写 :0.9.22；想跟着修 bug 写 :latest
     image: ghcr.io/lzp1314/hd-iptv:latest
     container_name: hd-iptv
     restart: unless-stopped
@@ -223,16 +223,18 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.21`；源码构建版不看这一项 |
+| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.22`；源码构建版不看这一项 |
 | `HOST_PORT` | `9797` | 宿主机端口，容器内始终是 9797 |
 | `CONFIG_DIR` | `./config` | 配置目录，建议写绝对路径 |
 | `OUTPUT_DIR` | `./output` | 结果目录，建议写绝对路径 |
 | `PUBLIC_URL` | 空 | 对外地址。留空则按访问时的域名端口自动判断，套反代不用填 |
 | `HDIPTV_INTERVAL_HOURS` | `24` | 自动刷新间隔（小时），0 关闭 |
 | `HDIPTV_MIN_HEIGHT` / `HDIPTV_MAX_HEIGHT` | `720` / `2160` | 画质区间 |
+| `HDIPTV_SPEED_RATIO` | `0.7` | 实测速率要打到该档画质所需带宽的几成才算可用，0.3~1.0。调低放宽（台更多、更容易卡），调高收紧 |
+| `HDIPTV_FAILOVER` | `true` | 一个台有多条线路时，订阅里只写一个固定地址，线路切换由本机完成。写 `0` 关掉，退回每台一条直连地址 |
 | `HDIPTV_PLAY_MODE` | `direct` | `direct` 分片直连 CDN；`proxy` 分片经本机转发 |
 | `HDIPTV_RELAY_CACHE_MB` | `96` | 分片缓存（MB），仅 `proxy` 模式 |
-| `HDIPTV_LINES_PER_CHANNEL` | `1` | 订阅里每个台写几行。1 不会出现「重复台」；想手动切备用线路调 2~4 |
+| `HDIPTV_LINES_PER_CHANNEL` | `1` | 订阅里每个台写几行。1 不会出现「重复台」；想手动切备用线路调 2~4（调大后不再自动换线，只能自己在播放器里换行） |
 | `HDIPTV_SECRET` | 空 | 访问密码（URL 路径段）。设了之后所有地址都要带 `/<密码>/`，见下 |
 | `HDIPTV_SKIP_SOURCES` | 空 | 按名字跳过源，逗号分隔。通用版 `docker-compose.yml` 里设成 `运营商官方源`；湖北版 `docker-compose.hubei.yml` 里设成 `聚合源-公开转播,聚合源-精简线路` |
 | `HDIPTV_REGION` | 空 | 手动指定省份（拼音如 `hubei`）；面板「省份」下拉优先于它，留空 = 自动识别 |
@@ -299,6 +301,20 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 就不再动），不想要可以在 `config/sources.toml` 里把对应 `enabled` 改成 `false`。
 湖北省内移动宽带用的 `docker-compose.hubei.yml` 已经按名字跳过这两条，升级后本机
 的行为和之前一致，不会多出一轮第三方清单的探测。
+
+### 一个台有多条线路时，订阅里只写一个地址
+
+同一个台常常能从几个源里各拿到一条地址。以前订阅里每个台只写一行（写多了播放器
+会列出一排重复台），那一行被上游拒了，播放器就只能报「无法播放」——它手里没有备份。
+
+现在这种情况订阅里写的是一个固定的本机地址（`/live/c:…m3u8`）。这个地址不随更新
+变化，收藏过的、正在看的都一直有效。真正用哪条线路由服务端现场决定：第一条取不到
+就换下一条，转完一圈再从第一条重来，播放器那边看不出变化；正在播的台清单冻住了，
+也会换一条继续。
+
+想自己手动切线路的，把 `HDIPTV_LINES_PER_CHANNEL` 调到 2 以上——那时不再自动换线，
+每个台会写出多行，由你在播放器里挑。排查「到底哪条线路有问题」时，可以用
+`HDIPTV_FAILOVER=0` 关掉自动换线，让每台退回一条直连地址。
 
 ### 访问密码
 
@@ -455,12 +471,12 @@ ARM 板 CPU 弱一点不影响播放：清单由本机整理、分片由播放�
 
 | 位置 | 说明 |
 |---|---|
-| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.21` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
+| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.22` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
 | 本地构建 | `docker compose -f docker-compose.build.yml up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库，但必须有完整源码 |
 
 GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉了 `latest` 想升级就重新
 `docker compose pull && docker compose up -d`；想停在某个版本，在 `.env` 里写
-`HDIPTV_IMAGE_TAG=0.9.21`（或直接把 `image` 的 `latest` 改成 `0.9.21`），之后 pull
+`HDIPTV_IMAGE_TAG=0.9.22`（或直接把 `image` 的 `latest` 改成 `0.9.22`），之后 pull
 也不会动。拉不动 `ghcr.io` 时用「方式二」的源码构建版，效果一样，但要先 clone 源码。
 
 ## 命令行
@@ -486,7 +502,7 @@ python -m iptvhd --version
 | `/txt` `/json` | TXT 订阅 / 频道明细 |
 | `/epg.xml` | 节目单（只含自己的频道） |
 | `/logo/<频道名>.png` | 台标，服务端取一次存本地 |
-| `/live/<slug>.m3u8` | 单频道播放列表，服务端现换地址下发；响应头 `X-HD-Seq` 标出当前分片序号 |
+| `/live/<slug>.m3u8` | 单频道播放列表，服务端现换地址下发。一个台有多条线路时这里就是它的唯一地址，换线在服务端内部完成；响应头 `X-HD-Seq` 标出当前分片序号 |
 | `/relay/<slug>/p/<token>` | 仅 `proxy` 模式下使用，播放器自动请求，不用手填 |
 | `/api/live` | 可用频道 slug 清单 |
 | `/api/status` | 运行状态、统计、设置、最近日志，以及本机宽带识别结果（`region`） |

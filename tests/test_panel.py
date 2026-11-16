@@ -160,7 +160,9 @@ class TestRenderM3u(unittest.TestCase):
     def test_one_line_per_channel_by_default(self):
         """VLC 不按台名归并：一个台写几行就列几行，看着就是一排重复台。
 
-        所以默认只写第一行（最好那条），备用线路留在 result.json 里不动。
+        所以默认只写第一行，备用线路留在 result.json 里不动。多个线路的台在
+        这一行里换成**频道级地址**（``/live/c:<台名>.m3u8``）——只写一行不等于
+        只剩一条路，具体走哪条由中转层现场决定。
         """
         channel = Channel(
             name="CCTV-1",
@@ -174,7 +176,7 @@ class TestRenderM3u(unittest.TestCase):
         text, count = writers.render_m3u([channel], relay_base="http://h")
         self.assertEqual(count, 1)
         self.assertEqual(text.count("#EXTINF"), 1)
-        self.assertIn("/live/o:aaa.m3u8", text)
+        self.assertIn("/live/c:Q0NUVi0x.m3u8", text)
         # 只剩一行时不该再带「·1080P」这种区分后缀
         self.assertNotIn("·1080P", text)
 
