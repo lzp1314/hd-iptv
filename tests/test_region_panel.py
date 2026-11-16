@@ -117,7 +117,8 @@ class TestPanelMarkup(unittest.TestCase):
     def test_controls_live_in_region_view(self):
         html = (self.WEB / "index.html").read_text(encoding="utf-8")
         region = self._panel(html, "region")
-        for elem_id in ("setAutoRegion", "setRegion", "setIsp", "btnProbe", "btnScan", "btnRegionSave"):
+        for elem_id in ("setAutoRegion", "setRegion", "setIsp", "setAutoSwitch",
+                        "btnProbe", "btnScan", "btnRegionSave"):
             self.assertIn(f'id="{elem_id}"', region, f"「宽带与省份」页缺少 #{elem_id}")
 
     def test_settings_view_no_longer_holds_region_controls(self):
@@ -127,6 +128,7 @@ class TestPanelMarkup(unittest.TestCase):
         self.assertNotIn('id="setRegion"', settings)
         self.assertNotIn('id="setIsp"', settings)
         self.assertNotIn('id="setAutoRegion"', settings)
+        self.assertNotIn('id="setAutoSwitch"', settings)
 
     def test_nav_has_region_entry(self):
         import re

@@ -237,6 +237,7 @@ class State:
             prefetch_every=settings.playlist_ttl,
             cache_bytes=int(settings.relay_cache_mb * 1024 * 1024),
             mode=settings.play_mode,
+            auto_switch=settings.auto_switch,
         )
         self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
         self.logos = Logos(settings.data_dir / "logos")
@@ -374,6 +375,7 @@ class State:
             "auto_region": s.auto_region,
             "region": s.region_hint,
             "isp": s.isp_hint,
+            "auto_switch": s.auto_switch,
             "public_url": s.public_url,
             # 只读：面板据此在每个地址后面带上密码段，前端不允许写回
             "secret": s.secret,
@@ -417,6 +419,7 @@ class State:
                 prefetch_every=self.settings.playlist_ttl,
                 cache_bytes=int(self.settings.relay_cache_mb * 1024 * 1024),
                 mode=self.settings.play_mode,
+                auto_switch=self.settings.auto_switch,
             )
             if "epg_source" in clean:
                 # 换了节目单源就把旧的清掉，免得播放器拿到对不上的节目单

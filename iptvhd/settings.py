@@ -98,6 +98,10 @@ probe_playlist_children = true
 playlist_ttl = 5.0
 cache_mb = 96
 mode = "direct"
+# 自动换源：播放中某条线路被上游拒、或者清单冻住时，是否自动切到这个台的
+# 下一条线路。开着更抗封（一条挂了还有替补），关掉则固定第一条不变——排查
+# 「到底哪条线路有问题」、或者线路之间来回跳的时候用。
+auto_switch = true
 
 [epg]
 source = "https://epg.pw/xmltv/epg_CN.xml"
@@ -186,6 +190,8 @@ def coerce_panel(raw: dict) -> dict:
             if text in ("direct", "proxy"):
                 out[key] = text
         elif key == "auto_region":
+            out[key] = as_bool(value)
+        elif key == "auto_switch":
             out[key] = as_bool(value)
         elif key in ("region", "isp"):
             # 空串是有效值：表示「回到自动识别」。非空则归一化成拼音代码，
@@ -413,6 +419,30 @@ class Settings:
         if raw is not None and str(raw).strip():
             return as_bool(raw)
         return as_bool(self.get("output", "failover", True))
+
+    @property
+    def auto_switch(self) -> bool:
+        """播放中是否允许自动换源（切到这个台的下一条线路）。
+
+        开（默认）：一条线路被上游拒、或者清单不往前滚，就换下一条。一个台挂了
+        替补，用户不用手动切。
+
+        关：固定用排序第一的那条，取不到就如实报错，不再自己跳。线路之间来回
+        跳（两条都有问题、或者判定过严）时用它先把画面稳下来；也用来定位「到底
+        是哪条线路在坏」。
+
+        关掉不影响「换票重取」：同一个地址重试还是照常，只是不再换到别的地址。
+
+        优先级：面板 > 环境变量 > 配置文件。面板排第一是因为这个开关是给「正在
+        卡着看的人」用的——他点了要立刻见效，不能被部署时写的环境变量压回去。
+        """
+        panel = self.panel_get("auto_switch")
+        if panel is not None:
+            return as_bool(panel)
+        raw = os.environ.get("HDIPTV_AUTO_SWITCH")
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("relay", "auto_switch", True))
 
     @property
     def public_url(self) -> str:

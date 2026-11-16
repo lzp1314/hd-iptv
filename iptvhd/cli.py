@@ -179,7 +179,8 @@ def cmd_doctor(root: Path, config: str | None, isp_check: bool = False) -> int:
     print(
         f"测速采样：{settings.sample_bytes // 1024}KB/条，"
         f"实测速率需达该档画质带宽的 {settings.speed_ratio:.0%}；"
-        f"多线路自动换线：{'开' if settings.failover else '关'}"
+        f"单地址多线路：{'开' if settings.failover else '关'}，"
+        f"播放中自动换源：{'开' if settings.auto_switch else '关'}"
     )
     print(
         f"并发：{settings.concurrency}  单次超时：{settings.timeout}s  "

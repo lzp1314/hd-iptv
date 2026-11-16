@@ -164,21 +164,103 @@ class TestRelayRotate(unittest.TestCase):
         self.assertEqual(calls, ["http://a/1.m3u8", "http://b/2.m3u8"])
         self.assertEqual(base, "http://b/2.m3u8")
 
-    def test_frozen_playlist_rotates(self):
-        """清单冻住十有八九是这条线路自己的问题，换票和换线路成本一样。"""
+    def test_frozen_playlist_retickets_before_switching(self):
+        """清单冻住时先换票重取同一条线路，**连续两次**才换线路。
+
+        一次没滚不等于这条路坏了：运营商官方源一片就是 10 秒，滚动周期贴着
+        判定阈值，差半拍就会被当成冻住。以前一次就换，换过去窗口从零开始攒，
+        十秒后再「冻住」再换回来——播放器看到的就是一直在换源、画面一卡一卡。
+        """
         res = _resolver_for(["http://a/1.m3u8", "http://b/2.m3u8"])
         relay = Relay(res, warm=False)
         relay._absorb("c:x", MEDIA.format(seq=1), "http://a/1.m3u8")
-        with patch("iptvhd.relay._FROZEN_AFTER", 0.0), patch("iptvhd.relay.time.sleep"):
-            calls = []
+        # 把「一片多长」抹掉，让阈值退化成 _FROZEN_AFTER（下面 patch 成 0），
+        # 否则真实分片时长会把 frozen_after 抬到十几秒，测试等不到。
+        relay._windows["c:x"].target = 0.0
+        calls: list[str] = []
 
-            def fake_fetch(url, ua, timeout=None):
-                calls.append(url)
-                return 200, {}, MEDIA.format(seq=99).encode(), url
+        def fake_fetch(url, ua, timeout=None):
+            calls.append(url)
+            # 序号一直不动 = 上游确实冻住了
+            return 200, {}, MEDIA.format(seq=1).encode(), url
 
-            with patch.object(relay, "_fetch", side_effect=fake_fetch):
+        with patch("iptvhd.relay._FROZEN_AFTER", 0.0), \
+                patch.object(relay, "_fetch", side_effect=fake_fetch), \
+                patch("iptvhd.relay.time.sleep"):
+            relay._prefetch("c:x")                 # 第一次：只换票
+            first = list(calls)
+            # 每取回一份清单，target 会被真实分片时长（10 秒）重新填上，
+            # 阈值随之回到 25 秒。测试里把它清掉，等于「时间已经过了很久」。
+            relay._windows["c:x"].target = 0.0
+            relay._prefetch("c:x")                 # 第二次：才换线路
+
+        self.assertEqual(first, ["http://a/1.m3u8"])       # 没换线
+        self.assertIn("http://b/2.m3u8", calls)            # 第二次换过去了
+
+    def test_auto_switch_off_never_rotates(self):
+        """自动换源关掉：上游拒了也只换票重取，不换线路。"""
+        res = _resolver_for(["http://a/1.m3u8", "http://b/2.m3u8"])
+        relay = Relay(res, warm=False, auto_switch=False)
+        relay._absorb("c:x", MEDIA.format(seq=1), "http://a/1.m3u8")
+        relay._windows["c:x"].target = 0.0
+        calls: list[str] = []
+
+        def fake_fetch(url, ua, timeout=None):
+            calls.append(url)
+            return 200, {}, MEDIA.format(seq=1).encode(), url
+
+        with patch("iptvhd.relay._FROZEN_AFTER", 0.0), \
+                patch.object(relay, "_fetch", side_effect=fake_fetch), \
+                patch("iptvhd.relay.time.sleep"):
+            for _ in range(4):
                 relay._prefetch("c:x")
-        self.assertIn("http://b/2.m3u8", calls)
+                relay._windows["c:x"].target = 0.0
+
+        self.assertTrue(calls)
+        self.assertTrue(all(u == "http://a/1.m3u8" for u in calls), calls)
+
+    def test_403_does_not_rotate_when_switch_off(self):
+        res = _resolver_for(["http://a/1.m3u8", "http://b/2.m3u8"])
+        relay = Relay(res, warm=False, auto_switch=False)
+        calls: list[str] = []
+
+        def fake_fetch(url, ua, timeout=None):
+            calls.append(url)
+            return 403, {}, b"", url
+
+        with patch.object(relay, "_fetch", side_effect=fake_fetch), \
+                patch("iptvhd.relay.time.sleep"):
+            with self.assertRaises(Exception):
+                relay._fetch_raw("c:x")
+
+        self.assertTrue(all(u == "http://a/1.m3u8" for u in calls), calls)
+
+
+class TestFrozenThreshold(unittest.TestCase):
+    """「多久没滚才算冻住」必须跟着分片时长走。"""
+
+    def _window(self, durations):
+        from iptvhd.relay import _Window
+
+        window = _Window()
+        segs = [(d, f"http://a/{i}.ts", "", False) for i, d in enumerate(durations)]
+        window.feed([], 100, segs, 1.0)
+        return window
+
+    def test_ten_second_segments_give_generous_threshold(self):
+        window = self._window([10.0, 10.0, 10.0])
+        self.assertGreaterEqual(window.frozen_after, 25.0)
+
+    def test_short_segments_still_reasonable(self):
+        window = self._window([3.0, 3.0, 3.0])
+        self.assertGreaterEqual(window.frozen_after, 10.0)
+        self.assertLessEqual(window.frozen_after, 15.0)
+
+    def test_zero_target_falls_back_to_default(self):
+        from iptvhd.relay import _FROZEN_AFTER, _Window
+
+        window = _Window()
+        self.assertEqual(window.frozen_after, _FROZEN_AFTER)
 
 
 class TestStateLines(unittest.TestCase):

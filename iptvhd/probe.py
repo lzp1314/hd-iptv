@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+import urllib.parse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable, Iterable
 
@@ -585,12 +586,25 @@ def _looks_timeout(stream: Stream) -> bool:
     return any(hint in text for hint in _TIMEOUT_HINTS)
 
 
+def _host_of(url: str) -> str:
+    """地址的主机名，小写；取不出来返回空串。"""
+    try:
+        return (urllib.parse.urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def _inherit(backup: Stream, winner: Stream) -> None:
     """同台的备用线路：不单独探测，直接继承已探通那条的结论。
 
-    同一个台的多条地址基本都在同一张 CDN、同一个账号下，探一条就等于探了整组；
-    每条都探既慢又白敲上游（143 条串行要半小时，用户看到的就是「卡住不动」）。
-    万一某条备用线其实是死的也不影响可用性——中转层换到它时取不到会再换下一条。
+    只对**同一主机**的地址允许继承（调用方保证）：同一个台的多条地址常常落在
+    同一张 CDN、同一个账号下，探一条就等于探了整组；每条都探既慢又白敲上游
+    （143 条串行要半小时，用户看到的就是「卡住不动」）。
+
+    为什么必须限定同主机：一份「本省源」里经常混进别省的入口（实测湖北清单里
+    出现过上海的 ``iptvrr.sh.chinamobile.com``），那种地址跨省根本连不通。以前
+    按台名分组就继承，等于给它盖了个「已验证 322Mbps」的章，排序时还排在能用
+    的线路前面——播放时就卡在它身上等超时。
     """
     backup.ok = True
     backup.status = winner.status or 200
@@ -667,9 +681,37 @@ def probe_gentle(
             rest.error = rest.error or reason_text
 
     for gidx, bucket in enumerate(groups):
-        winner: Stream | None = None
-        probed = 0
-        for stream in bucket[:tries]:
+        # 主机 -> 该主机的代表结论（None 表示这个主机的第一条就不通）
+        hosts: dict[str, Stream | None] = {}
+        host_done = 0        # 已处理条数（含继承），用来卡「每个台探几组」
+        for sidx, stream in enumerate(bucket):
+            host = _host_of(stream.url)
+            if host and host in hosts:
+                # 同一个主机已经探过：直接抄结论，不再敲上游
+                rep = hosts[host]
+                if rep is not None:
+                    _inherit(stream, rep)
+                else:
+                    stream.ok = False
+                    stream.error = stream.error or "同主机地址已确认不可用"
+                host_done += 1
+                done += 1
+                if on_line:
+                    on_line(stream, None, done, total)
+                continue
+
+            if host_done >= tries:
+                # 探的额度用完了。这里**不能**当备用继承：没真探过就没资格说
+                # 它可用，宁可标成未探明（会被过滤掉），也别让它排到能用的
+                # 线路前面，让播放器在它身上等超时。
+                stream.ok = False
+                stream.error = stream.error or "同台已探够线路，本条未单独探测"
+                host_done += 1
+                done += 1
+                if on_line:
+                    on_line(stream, None, done, total)
+                continue
+
             deadline = time.monotonic() + per_stream_timeout if per_stream_timeout > 0 else None
             started = time.monotonic()
             try:
@@ -678,31 +720,31 @@ def probe_gentle(
                 stream.ok = False
                 stream.error = str(exc) or "探测失败"
             elapsed = time.monotonic() - started
-            probed += 1
+            host_done += 1
             tried += 1
             done += 1
+            if host and host not in hosts:
+                hosts[host] = stream if stream.ok else None
             if on_line:
                 on_line(stream, elapsed, done, total)
 
             if stream.ok:
-                winner = stream
                 streak = 0
-                break
-
-            failed += 1
-            streak = streak + 1 if _looks_timeout(stream) else 0
-            if streak >= timeout_streak:
-                reason = f"连续 {streak} 条超时，判定这条网当前不通，本轮跳过剩余官方源"
-                break
-            if tried >= min_tries and failed / tried > abort_ratio:
-                reason = "失败率过半，判定账号已被限流，本轮跳过剩余官方源"
-                break
-            if probed < min(tries, len(bucket)):
+            else:
+                failed += 1
+                streak = streak + 1 if _looks_timeout(stream) else 0
+                if streak >= timeout_streak:
+                    reason = f"连续 {streak} 条超时，判定这条网当前不通，本轮跳过剩余官方源"
+                    break
+                if tried >= min_tries and failed / tried > abort_ratio:
+                    reason = "失败率过半，判定账号已被限流，本轮跳过剩余官方源"
+                    break
+            if host_done < min(tries, len(bucket)):
                 time.sleep(gap)
 
         if reason:
             # 熔断：本条剩下的、以及后面所有台，一律跳过，别让整轮卡在等超时上
-            rest = list(bucket[probed:])
+            rest = list(bucket[sidx + 1:])
             for later in groups[gidx + 1:]:
                 rest = rest + later
             skip_rest(reason, rest)
@@ -711,21 +753,8 @@ def probe_gentle(
                 on_progress(done, total)
             return reason
 
-        if winner is not None:
-            for backup in bucket[probed:]:
-                _inherit(backup, winner)
-                done += 1
-                if on_line:
-                    on_line(backup, None, done, total)
-        else:
-            skip_rest("同台已探线路均不可用", bucket[probed:])
-            done += len(bucket) - probed
-            if on_line:
-                for rest in bucket[probed:]:
-                    on_line(rest, None, done, total)
-
         if on_progress:
             on_progress(done, total)
-        if done < total and probed:
+        if done < total and host_done:
             time.sleep(gap)
     return ""

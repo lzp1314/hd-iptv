@@ -265,6 +265,7 @@ function fillSettings(s) {
   if ($("setAutoRegion")) $("setAutoRegion").value = s.auto_region === false ? "0" : "1";
   if ($("setRegion")) $("setRegion").value = s.region || "";
   if ($("setIsp")) $("setIsp").value = s.isp || "";
+  if ($("setAutoSwitch")) $("setAutoSwitch").value = s.auto_switch === false ? "0" : "1";
   if ($("setPublicUrl")) $("setPublicUrl").value = s.public_url || "";
   if ($("setInterval")) $("setInterval").value = s.interval_hours != null ? s.interval_hours : "";
   if ($("setTtl")) $("setTtl").value = s.playlist_ttl != null ? s.playlist_ttl : "";
@@ -283,6 +284,7 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     auto_region: $("setAutoRegion") ? $("setAutoRegion").value === "1" : true,
     region: $("setRegion") ? $("setRegion").value : "",
     isp: $("setIsp") ? $("setIsp").value : "",
+    auto_switch: $("setAutoSwitch") ? $("setAutoSwitch").value === "1" : true,
     public_url: $("setPublicUrl").value.trim(),
     interval_hours: Number($("setInterval").value || 0),
     playlist_ttl: Number($("setTtl").value || 1),
@@ -320,7 +322,11 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
         return el && el.selectedOptions && el.selectedOptions[0] ? el.selectedOptions[0].textContent : "自动识别";
       };
       note.textContent = `已保存：自动按省取源${d.settings.auto_region === false ? "关闭" : "开启"}，`
-        + `省份 ${picked("setRegion")}、运营商 ${picked("setIsp")}。`
+        + `省份 ${picked("setRegion")}、运营商 ${picked("setIsp")}、`
+        + `自动换源${d.settings.auto_switch === false ? "关闭（画面固定第一条线路）" : "开启"}。`
+        + (d.settings.auto_switch === false
+          ? "自动换源已关，正在播的台不会再跳线路，重新拉一次播放地址即可生效。"
+          : "")
         + (d.settings.auto_region === false
           ? "开关是关的，这一页的选择暂时不生效。"
           : "下一轮更新按这个组合取源，想立刻看效果就点「立即更新」。");
@@ -1103,7 +1109,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
+  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setAutoSwitch", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });

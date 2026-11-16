@@ -30,15 +30,21 @@ def _probe_ok(stream, *_args, **_kwargs):
 
 
 class SameChannelOnceTest(TestCase):
-    """同一个台的多条地址只探前两条（默认），探通一条就收手。"""
+    """同一个台的多条地址：同一主机只探一条，**不同主机必须各探各的**。
 
-    def test_probes_only_first_line_of_a_channel(self):
+    后者是本轮修的重点：一份「本省源」里经常混进别省的入口（实测湖北清单里
+    出现过上海的 iptvrr.sh.chinamobile.com），那种地址跨省根本连不通。按台名
+    继承会把它盖成「已验证可用」并排到能用的线路前面，播放时就卡在它身上等
+    超时——这才是「本省用户也卡」的真凶。
+    """
+
+    def test_probes_only_first_line_of_same_host(self):
         streams = _streams([
-            ("CCTV-1", "http://a/1.m3u8"),
-            ("CCTV-1", "http://b/1.m3u8"),
-            ("CCTV-1", "http://c/1.m3u8"),
-            ("CCTV-2", "http://a/2.m3u8"),
-            ("CCTV-2", "http://b/2.m3u8"),
+            ("CCTV-1", "http://a/cctv1.m3u8"),
+            ("CCTV-1", "http://a/cctv1-b.m3u8"),
+            ("CCTV-1", "http://a/cctv1-c.m3u8"),
+            ("CCTV-2", "http://a/cctv2.m3u8"),
+            ("CCTV-2", "http://a/cctv2-b.m3u8"),
         ])
         calls = []
 
@@ -49,12 +55,40 @@ class SameChannelOnceTest(TestCase):
         with mock.patch("iptvhd.probe.probe_one", fake):
             self.assertEqual(probe_gentle(streams, client=None, gap=0), "")
 
-        # 两个台各探一条，剩下的当备用线路
-        self.assertEqual(calls, ["http://a/1.m3u8", "http://a/2.m3u8"])
+        # 两个台各探一条，同一主机的剩下几条当备用线路
+        self.assertEqual(calls, ["http://a/cctv1.m3u8", "http://a/cctv2.m3u8"])
+
+    def test_different_host_is_probed_not_inherited(self):
+        """跨省入口（主机不同）不能被继承成「可用」。"""
+        streams = _streams([
+            ("CCTV-1", "http://hb.example.com/cctv1.m3u8"),   # 本省，能通
+            ("CCTV-1", "http://sh.example.com/cctv1.m3u8"),   # 外省，连不通
+        ])
+        calls = []
+
+        def fake(stream, *_args, **_kwargs):
+            calls.append(stream.url)
+            if "hb." in stream.url:
+                return _probe_ok(stream)
+            stream.ok = False
+            stream.error = "探测超时"
+            return stream
+
+        with mock.patch("iptvhd.probe.probe_one", fake):
+            probe_gentle(streams, client=None, gap=0)
+
+        self.assertEqual(calls, ["http://hb.example.com/cctv1.m3u8",
+                                "http://sh.example.com/cctv1.m3u8"])
+        self.assertTrue(streams[0].ok)
+        self.assertFalse(streams[1].ok)                    # 没有继承成可用
+        self.assertNotIn("未单独探测", streams[1].note)
 
     def test_backup_line_inherits_verdict(self):
-        """备用线路不探，但要继承已探通那条的结论，否则就被 _filter 当成死链丢掉。"""
-        streams = _streams([("CCTV-1", "http://a/1.m3u8"), ("CCTV-1", "http://b/1.m3u8")])
+        """同主机的备用线路不探，但要继承结论，否则会被 _filter 当成死链丢掉。"""
+        streams = _streams([
+            ("CCTV-1", "http://a/1.m3u8"),
+            ("CCTV-1", "http://a/2.m3u8"),
+        ])
 
         with mock.patch("iptvhd.probe.probe_one", _probe_ok):
             probe_gentle(streams, client=None, gap=0)
@@ -70,7 +104,7 @@ class SameChannelOnceTest(TestCase):
 
         def fake(stream, *_args, **_kwargs):
             calls.append(stream.url)
-            if stream.url.endswith("/1.m3u8") and "b" in stream.url:
+            if "b" in stream.url:
                 return _probe_ok(stream)
             stream.ok = False
             stream.error = "HTTP 403"
@@ -84,6 +118,7 @@ class SameChannelOnceTest(TestCase):
         self.assertTrue(streams[1].ok)
 
     def test_tries_per_channel_is_respected(self):
+        """同一个主机失败之后，同台后面的同主机地址不再重复敲。"""
         streams = _streams([("CCTV-1", f"http://a/{i}.m3u8") for i in range(5)])
         calls = []
 
@@ -96,8 +131,29 @@ class SameChannelOnceTest(TestCase):
         with mock.patch("iptvhd.probe.probe_one", fake):
             probe_gentle(streams, client=None, gap=0, tries_per_channel=2)
 
-        self.assertEqual(len(calls), 2)  # 一条网全死也不在同一台上耗五次
-        self.assertTrue(all("同台已探线路均不可用" in s.error for s in streams[2:]))
+        self.assertEqual(len(calls), 1)  # 同一主机探一次就够，剩下四条的结论跟着走
+        self.assertTrue(all("同主机地址已确认不可用" in s.error for s in streams[1:]))
+
+    def test_extra_host_beyond_quota_is_not_marked_ok(self):
+        """超过「每个台探几组」额度的其它主机：不探，也不能被当成可用。"""
+        streams = _streams([
+            ("CCTV-1", "http://a/1.m3u8"),
+            ("CCTV-1", "http://b/1.m3u8"),
+            ("CCTV-1", "http://c/1.m3u8"),
+        ])
+        calls = []
+
+        def fake(stream, *_args, **_kwargs):
+            calls.append(stream.url)
+            return _probe_ok(stream)
+
+        with mock.patch("iptvhd.probe.probe_one", fake):
+            probe_gentle(streams, client=None, gap=0, tries_per_channel=2)
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(streams[0].ok and streams[1].ok)
+        self.assertFalse(streams[2].ok)                    # 没探过就不能说能用
+        self.assertIn("未单独探测", streams[2].error)
 
 
 class TimeoutCircuitTest(TestCase):
@@ -160,8 +216,8 @@ class LineLogTest(TestCase):
     def test_reports_every_entry_including_inherited(self):
         streams = _streams([
             ("CCTV-1", "http://a/1.m3u8"),
-            ("CCTV-1", "http://b/1.m3u8"),
-            ("CCTV-2", "http://a/2.m3u8"),
+            ("CCTV-1", "http://a/2.m3u8"),   # 同主机 -> 继承
+            ("CCTV-2", "http://a/3.m3u8"),
         ])
         lines = []
 

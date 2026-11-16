@@ -426,7 +426,7 @@ class _Window:
     免得窗口里的序号和内容错位——那会让播放器直接报错。
     """
 
-    __slots__ = ("head", "segs", "seq0", "at", "moved_at")
+    __slots__ = ("head", "segs", "seq0", "at", "moved_at", "target")
 
     def __init__(self) -> None:
         self.head: list[str] = []
@@ -434,12 +434,38 @@ class _Window:
         self.seq0 = -1
         self.at = 0.0        # 上次并进清单的时间
         self.moved_at = 0.0  # 上次出现新分片的时间（判断上游有没有冻住）
+        # 上游一片有多长（秒）。不同源的差别很大：聚合源常见 3~6 秒，运营商
+        # IPTV 官方源是 10 秒。「多久没滚才算冻住」必须跟着它走，写死就会误判。
+        self.target = 0.0
+
+    @property
+    def frozen_after(self) -> float:
+        """多久没出现新分片才算上游真的冻住了（秒）。
+
+        **不能写死。** 原来固定 10 秒，而湖北移动的官方源一片就是 10 秒——
+        滚动周期和判定阈值一样长，只要哪次取清单差了半拍（预取间隔相位、网络
+        抖动）就会被判成冻住，于是换线路；换过去窗口重来，十秒后又「冻住」，
+        再换回来。播放器看到的就是「一直在自动换源、画面一卡一卡」。
+
+        按「两片再加五秒」算：一片 10 秒的源要 25 秒没滚才算真冻住，一片 4 秒
+        的源 13 秒，既不误判也不会真的等到天荒地老。
+        """
+        if self.target <= 0:
+            return _FROZEN_AFTER
+        return max(_FROZEN_AFTER, self.target * 2.0 + 5.0)
 
     def feed(self, head, seq, segs, now: float) -> bool:
         """并进一份新清单，返回是否出现了新分片。"""
         self.at = now
         if head:
             self.head = head
+        if segs:
+            # 用这一份清单里最长的分片当「一片多长」。上游偶尔混进一片 10 秒的
+            # 广告，用平均会让阈值偏小、更容易误判，取最长更保守。
+            # 放在最前面：下面第一个分支会提前 return，写在那之后永远不生效。
+            longest = max((seg[0] for seg in segs if seg[0] > 0), default=0.0)
+            if longest > 0:
+                self.target = longest
 
         if not self.segs or seq < 0:
             self.segs = list(segs)
@@ -538,6 +564,7 @@ class Relay:
         cache_bytes: int = 96 * 1024 * 1024,
         cache_ttl: float = 300.0,
         mode: str = "direct",
+        auto_switch: bool = True,
         warm: bool = True,
     ):
         self._resolver = resolver
@@ -548,6 +575,9 @@ class Relay:
         except (TypeError, ValueError):
             self._resolver_rotates = False
         self._mode = mode if mode in ("direct", "proxy") else "direct"
+        # 播放中是否允许换到同台的下一条线路。关掉之后只「换票重取同一个地址」，
+        # 不再换线路——线路之间来回跳的时候用面板上那个开关先稳住画面。
+        self._auto_switch = bool(auto_switch)
         # 是否启用后台预取。关掉之后就退回「每次请求同步去上游」，只给测试用。
         self._warm = warm
         self._timeout = timeout
@@ -579,6 +609,7 @@ class Relay:
         self._active: dict[str, float] = {}
         self._ticker: threading.Thread | None = None
         self._stuck_note: dict[str, float] = {}               # slug -> 上次报告冻住的时间
+        self._stuck_streak: dict[str, int] = {}               # slug -> 连续几次判定冻住
         self._reticket_at: dict[str, float] = {}              # slug -> 上次为「冻住」换票的时间
         # 每个台上一次请求时刻。用来判断「真的有播放器在看」：两次请求间隔
         # 落在 (_PLAYING_MIN_GAP, _PLAYING_WINDOW] 才算，扫台碰不到这个区间。
@@ -676,7 +707,13 @@ class Relay:
 
         解析器是构造时从外面塞进来的，老实现只有一个参数。这里先探测签名，
         免得为了一个可选参数把所有调用方（含测试里的假解析器）都改一遍。
+
+        「自动换源」关掉时这里统一把 ``rotate`` 吞掉：换票（``fresh``）照旧，
+        换线路不再发生。收在一处的好处是——上面三条换线入口（上游 403、清单
+        冻住、冻结换票）不会漏掉任何一个，不用逐处再判断开关。
         """
+        if rotate and not self._auto_switch:
+            rotate = False
         if rotate and self._resolver_rotates:
             return self._resolver(slug, rotate=True)  # type: ignore[call-arg]
         return self._resolver(slug)
@@ -698,6 +735,11 @@ class Relay:
         3. 换票预算用完 → 本地直接回错，别把出口 IP 打进限流。
         """
         now = time.time()
+
+        # 「自动换源」关掉时，换线在入口就归一成「换票重取同一个地址」。
+        # 必须在下面清窗口之前处理：否则线路没换、窗口却按「换了线路」清空了，
+        # 播放器手里的清单会突然变短，看起来就像画面断了。
+        rotate = bool(rotate) and self._auto_switch
 
         # 静态源（地址直接编在 slug 里）：没有票要换、没有版权停播要判，也不该
         # 占「换票预算」——直接返回，一个接口请求都不打。放在最前面，是为了让它
@@ -801,6 +843,7 @@ class Relay:
             self._raw.pop(slug, None)
             self._active.pop(slug, None)
             self._stuck_note.pop(slug, None)
+            self._stuck_streak.pop(slug, None)
             self._reticket_at.pop(slug, None)
             self._hits.pop(slug, None)
             self._next_try.pop(slug, None)
@@ -816,17 +859,25 @@ class Relay:
         prefetch_every: float | None = None,
         cache_bytes: int | None = None,
         mode: str | None = None,
+        auto_switch: bool | None = None,
     ) -> None:
         """面板上改了参数后立刻生效，不用重启容器。
 
         预取间隔调小=更实时但更费上游配额；调大=省配额但换台慢半拍。
         切模式要把已缓存的清单清掉，否则播放器还会拿到旧写法。
+
+        ``auto_switch`` 改到「开」时把连续冻住计数清掉：关着的时候可能已经
+        攒了好几次冻住，一开启就立刻换线路，看着像开了就乱跳。
         """
         if prefetch_every is not None:
             self._prefetch_every = max(0.5, float(prefetch_every))
             self._fresh_age = max(_FRESH_AGE, self._prefetch_every + 2.0)
         if cache_bytes is not None:
             self._segments.resize(int(cache_bytes))
+        if auto_switch is not None and bool(auto_switch) != self._auto_switch:
+            self._auto_switch = bool(auto_switch)
+            with self._lock:
+                self._stuck_streak.clear()
         if mode is not None and mode in ("direct", "proxy") and mode != self._mode:
             self._mode = mode
             with self._lock:
@@ -1131,13 +1182,18 @@ class Relay:
             self._next_try.pop(slug, None)
         if not moved:
             self._note_frozen(slug, window, now)
+        else:
+            # 又开始往前滚了，连续冻住计数清零：下次再冻住要从「换票重取」重新
+            # 开始数，不能直接跳到换线路。
+            with self._lock:
+                self._stuck_streak.pop(slug, None)
 
     def _note_frozen(self, slug: str, window: "_Window", now: float) -> None:
         """上游迟迟不往前滚时写一条运行日志，30 秒最多一条。"""
         if not window.segs:
             return
         idle = now - window.moved_at
-        if idle < _FROZEN_AFTER:
+        if idle < window.frozen_after:
             return
         with self._lock:
             last = self._stuck_note.get(slug, 0.0)
@@ -1207,18 +1263,28 @@ class Relay:
         now = time.time()
         with self._lock:
             window = self._windows.get(slug)
-            idle = now - window.moved_at if window is not None and window.segs else 0.0
+            has_window = window is not None and bool(window.segs)
+            idle = now - window.moved_at if has_window and window is not None else 0.0
+            # 冻住阈值跟着「一片多长」走：运营商官方源常常 10 秒一片，写死 10 秒
+            # 等于拿滚动周期当阈值，必然误判成冻住并反复换线路。
+            frozen_after = window.frozen_after if has_window and window is not None else _FROZEN_AFTER
             last_reticket = self._reticket_at.get(slug, 0.0)
 
-        # 序号 10 秒没滚，基本就是这张票据冻住了，换一张重取。换票也吃配额，
-        # 所以 10 秒最多换一次。多线路的台顺便换条路：冻住十有八九是这条线路
-        # 自己的问题，而播放器那边已经停在原地了，换票和换线路的成本一样。
-        fresh = idle >= _FROZEN_AFTER and now - last_reticket >= _FROZEN_AFTER
+        # 序号超过「两片 + 5 秒」没滚，基本就是这张票据冻住了，换一张重取。
+        fresh = idle >= frozen_after and now - last_reticket >= frozen_after
+        rotate = False
         if fresh:
             with self._lock:
                 self._reticket_at[slug] = now
+                streak = self._stuck_streak.get(slug, 0) + 1
+                self._stuck_streak[slug] = streak
+            # 第一次冻住只换票重取同一条线路：10 秒一片的源，滚动周期本来就
+            # 贴着判定阈值，一次没滚不等于这条路坏了。**连续两次**才换线路。
+            # 以前一次就换，换过去窗口又从零开始攒，十秒后再「冻住」再换回来，
+            # 播放器看到的就是一直在换源、画面一卡一卡。
+            rotate = streak >= 2
         try:
-            text, base = self._fetch_raw(slug, fresh=fresh, rotate=fresh)
+            text, base = self._fetch_raw(slug, fresh=fresh, rotate=rotate)
         except RelayError:
             return
         self._absorb(slug, text, base)

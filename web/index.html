@@ -184,12 +184,24 @@
           <option value="">自动识别</option>
         </select>
       </label>
+      <label>自动换源
+        <select id="setAutoSwitch">
+          <option value="1">开启（推荐）</option>
+          <option value="0">关闭</option>
+        </select>
+      </label>
     </div>
     <div class="btn-row">
       <button id="btnProbe" class="btn" type="button">检测这个组合</button>
       <button id="btnScan" class="btn" type="button">扫本省 4 家</button>
     </div>
     <p class="hint result" id="regionProbeNote" hidden></p>
+    <p class="hint">
+      <b>自动换源</b>：一个台挂着好几条线路时，播放中某条被上游拒、或者清单不再往前推进，
+      就自动换到下一条。开着更抗封（一条挂了还有替补）；关掉则固定用第一条，取不到就如实报错。
+      线路之间来回跳、画面一卡一卡的时候，先把它关掉——通常是某条线路本身坏了，关掉能立刻稳下来，
+      也方便你看清到底是哪条在坏。关掉不影响「同一个地址重试」，只是不再换到别的地址。
+    </p>
     <p class="hint" id="regionSaveNote">
       检测和扫描都不改配置，只是查给你看；挑到有源再点右上角「保存」。
       湖北移动、广电会被程序自动跳过（前者已内置运营商源，后者没有公开单播清单）。
