@@ -2,7 +2,7 @@
 
 **自部署的 IPTV 播放列表管理工具：整理、测速、聚合与分发节目清单，供个人与家庭内网使用。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![Version](https://img.shields.io/badge/version-0.9.22-blue.svg)](https://github.com/lzp1314/hd-iptv)
+[![Version](https://img.shields.io/badge/version-0.9.23-blue.svg)](https://github.com/lzp1314/hd-iptv)
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -56,7 +56,7 @@ mkdir -p ~/hd-iptv && cd ~/hd-iptv
 services:
   hd-iptv:
     # 预构建多架构镜像（amd64 / arm64 / armv7），自动匹配你的机器
-    # 想锁死版本写 :0.9.22；想跟着修 bug 写 :latest
+    # 想锁死版本写 :0.9.23；想跟着修 bug 写 :latest
     image: ghcr.io/lzp1314/hd-iptv:latest
     container_name: hd-iptv
     restart: unless-stopped
@@ -223,7 +223,7 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.22`；源码构建版不看这一项 |
+| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.23`；源码构建版不看这一项 |
 | `HOST_PORT` | `9797` | 宿主机端口，容器内始终是 9797 |
 | `CONFIG_DIR` | `./config` | 配置目录，建议写绝对路径 |
 | `OUTPUT_DIR` | `./output` | 结果目录，建议写绝对路径 |
@@ -232,6 +232,9 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 | `HDIPTV_MIN_HEIGHT` / `HDIPTV_MAX_HEIGHT` | `720` / `2160` | 画质区间 |
 | `HDIPTV_SPEED_RATIO` | `0.7` | 实测速率要打到该档画质所需带宽的几成才算可用，0.3~1.0。调低放宽（台更多、更容易卡），调高收紧 |
 | `HDIPTV_FAILOVER` | `true` | 一个台有多条线路时，订阅里只写一个固定地址，线路切换由本机完成。写 `0` 关掉，退回每台一条直连地址 |
+| `HDIPTV_OFFICIAL_TIMEOUT` | `5` | 运营商官方源单条探测时限（秒）。这类源是本省边缘，正常 0.1~0.2 秒就回；调大会让连不通的地址把更新拖成十几分钟 |
+| `HDIPTV_OFFICIAL_TRIES` | `2` | 同一个台最多探几条官方地址。探通一条就算这组可用，其余继承结论当备用线路 |
+| `HDIPTV_OFFICIAL_TIMEOUT_STREAK` | `5` | 连续几条超时就判定「这条网当前不通」，跳过剩余官方源（只认超时，403/404 不算） |
 | `HDIPTV_PLAY_MODE` | `direct` | `direct` 分片直连 CDN；`proxy` 分片经本机转发 |
 | `HDIPTV_RELAY_CACHE_MB` | `96` | 分片缓存（MB），仅 `proxy` 模式 |
 | `HDIPTV_LINES_PER_CHANNEL` | `1` | 订阅里每个台写几行。1 不会出现「重复台」；想手动切备用线路调 2~4（调大后不再自动换线，只能自己在播放器里换行） |
@@ -386,8 +389,12 @@ config/sources.toml -> [[source]] name = "运营商官方源"  type = "local"
 - **只下发 IPv6 边缘。** 这类源一律由本机中转（清单和分片都过 NAS），播放器有没有
   IPv6 都无所谓，`mode = "direct"` 也不用改。
 - **不能并发探测。** 一口气几十条请求会被 CDN 打进「302 无限循环」，之后连单条都
-  取不到。带 `trust` 的源走独立的串行慢探（`probe.official_gap`，默认 1.2 秒一条），
-  失败率过半就整批旁路，等下一轮。
+  取不到。带 `trust` 的源走独立的串行慢探，三道闸控制耗时：**同一个台最多探
+  `probe.official_tries_per_channel` 条**（默认 2，探通一条就算这组可用，其余直接
+  继承结论当备用线路）、**单条时限 `probe.official_timeout`**（默认 5 秒，正常回包
+  只要 0.1~0.2 秒）、**连续 `probe.official_timeout_streak` 条超时就熔断**（默认 5，
+  只认超时，403/404 不算）。日志里每条一行「台名 用时 结果」，卡住时能直接看出是
+  哪个台、什么错。
 - **账号是共享的。** 清单里的账号来自公开列表，别人也在用；对方跑批量任务时这路会
   一起抖。真要紧的话换成自己机顶盒里的账号串。
 
@@ -471,12 +478,12 @@ ARM 板 CPU 弱一点不影响播放：清单由本机整理、分片由播放�
 
 | 位置 | 说明 |
 |---|---|
-| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.22` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
+| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.23` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
 | 本地构建 | `docker compose -f docker-compose.build.yml up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库，但必须有完整源码 |
 
 GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉了 `latest` 想升级就重新
 `docker compose pull && docker compose up -d`；想停在某个版本，在 `.env` 里写
-`HDIPTV_IMAGE_TAG=0.9.22`（或直接把 `image` 的 `latest` 改成 `0.9.22`），之后 pull
+`HDIPTV_IMAGE_TAG=0.9.23`（或直接把 `image` 的 `latest` 改成 `0.9.23`），之后 pull
 也不会动。拉不动 `ghcr.io` 时用「方式二」的源码构建版，效果一样，但要先 clone 源码。
 
 ## 命令行

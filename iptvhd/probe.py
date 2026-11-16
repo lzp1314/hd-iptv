@@ -570,6 +570,34 @@ def probe_many(
     return items
 
 
+# 超时类失败的特征。连不上、来不及、读到一半断了——都算「这条路不通」的信号；
+# 403/404 是「这个台没了」，不是「整条网不通」，不能一视同仁地拿来熔断。
+_TIMEOUT_HINTS = ("超时", "Timeout", "timed out", "长时间读不完")
+
+
+def _looks_timeout(stream: Stream) -> bool:
+    text = f"{stream.error or ''} {stream.note or ''}"
+    return any(hint in text for hint in _TIMEOUT_HINTS)
+
+
+def _inherit(backup: Stream, winner: Stream) -> None:
+    """同台的备用线路：不单独探测，直接继承已探通那条的结论。
+
+    同一个台的多条地址基本都在同一张 CDN、同一个账号下，探一条就等于探了整组；
+    每条都探既慢又白敲上游（143 条串行要半小时，用户看到的就是「卡住不动」）。
+    万一某条备用线其实是死的也不影响可用性——中转层换到它时取不到会再换下一条。
+    """
+    backup.ok = True
+    backup.status = winner.status or 200
+    backup.height = winner.height
+    backup.width = winner.width
+    backup.bandwidth = winner.bandwidth
+    backup.speed_mbps = winner.speed_mbps
+    backup.delay_ms = winner.delay_ms
+    backup.codec = winner.codec
+    backup.note = (backup.note + " " if backup.note else "") + "同台备用线路，未单独探测"
+
+
 def probe_gentle(
     streams: Iterable[Stream],
     client: HttpClient,
@@ -579,16 +607,29 @@ def probe_gentle(
     gap: float = 1.2,
     abort_ratio: float = 0.6,
     min_tries: int = 8,
+    tries_per_channel: int = 2,
+    timeout_streak: int = 5,
     on_progress: Callable[[int, int], None] | None = None,
-) -> bool:
-    """串行、留间隔地探测运营商官方源，返回是否因失败率过高提前收手。
+    on_line: Callable[[Stream, float | None, int, int], None] | None = None,
+) -> str:
+    """串行、留间隔地探测运营商官方源，返回提前收手的原因（空串 = 正常跑完）。
 
     这类源（移动/电信 IPTV 的 ``1700xxxxxx`` 账号）按出口 IP 记账：一口气并发
     几十条清单请求，CDN 不会回 403，而是把本机打进「302 无限循环」——之后连单
     条也取不到，只能等限频自然过期。所以这里一条一条来，中间留 ``gap`` 秒。
 
-    失败率超过 ``abort_ratio``（且已试够 ``min_tries`` 条）就整体收手：那基本
-    上就是整个账号被限了，继续打只会让限频窗口拖得更长。
+    三道省时的闸，都是被「143 条串行半小时、面板看着像卡死」逼出来的：
+
+    1. **同台只探前 ``tries_per_channel`` 条**。一个台常有 2~4 条地址（内置表 +
+       本省自动源各给一条），探通一条就够判断这组可用性，其余继承结论当备用
+       线路。143 条因此通常只探 90 来次。
+    2. **连续 ``timeout_streak`` 条超时就熔断**。整条网不通时，一条条等满时限
+       只是把 30 分钟熬完，一个字都换不回来。403/404 不算超时，不会误触发。
+    3. **失败率超过 ``abort_ratio``**（且已试够 ``min_tries`` 条）也收手：那基本
+       上就是整个账号被限了，继续打只会让限频窗口拖得更长。
+
+    ``on_line(stream, 用时, 已处理, 总数)`` 每条都回调一次（继承的条目用时为
+    ``None``），日志里就能逐条看到「哪个台、多久、什么结果」，不用干等一个百分比。
 
     也不做「清单是否在滚」的二次复核：那要为每条再等一轮分片时长，等于翻倍敲
     上游；真冻住了，中转层自己会发现并换下一路。
@@ -596,27 +637,90 @@ def probe_gentle(
     items = list(streams)
     total = len(items)
     if not total:
-        return False
+        return ""
 
-    tried = failed = 0
-    for idx, stream in enumerate(items, 1):
-        deadline = time.monotonic() + per_stream_timeout if per_stream_timeout > 0 else None
-        try:
-            probe_one(stream, client, sample_bytes, deadline)
-        except Exception as exc:  # 单条探测出意外，不该把整批带下水
-            stream.ok = False
-            stream.error = str(exc) or "探测失败"
-        tried += 1
-        if not stream.ok:
+    # 按台分组但保持原始顺序：内置表的台先探，自动源补进来的同台条目跟在后面。
+    groups: list[list[Stream]] = []
+    index: dict[str, list[Stream]] = {}
+    for stream in items:
+        key = stream.channel or stream.raw_name or stream.url
+        bucket = index.get(key)
+        if bucket is None:
+            bucket = []
+            index[key] = bucket
+            groups.append(bucket)
+        bucket.append(stream)
+
+    tries = max(1, tries_per_channel)
+    tried = failed = done = 0
+    streak = 0
+    reason = ""
+
+    def skip_rest(reason_text: str, from_items: list[Stream]) -> None:
+        for rest in from_items:
+            rest.ok = False
+            rest.error = rest.error or reason_text
+
+    for gidx, bucket in enumerate(groups):
+        winner: Stream | None = None
+        probed = 0
+        for stream in bucket[:tries]:
+            deadline = time.monotonic() + per_stream_timeout if per_stream_timeout > 0 else None
+            started = time.monotonic()
+            try:
+                probe_one(stream, client, sample_bytes, deadline)
+            except Exception as exc:  # 单条探测出意外，不该把整批带下水
+                stream.ok = False
+                stream.error = str(exc) or "探测失败"
+            elapsed = time.monotonic() - started
+            probed += 1
+            tried += 1
+            done += 1
+            if on_line:
+                on_line(stream, elapsed, done, total)
+
+            if stream.ok:
+                winner = stream
+                streak = 0
+                break
+
             failed += 1
-        if on_progress:
-            on_progress(idx, total)
+            streak = streak + 1 if _looks_timeout(stream) else 0
+            if streak >= timeout_streak:
+                reason = f"连续 {streak} 条超时，判定这条网当前不通，本轮跳过剩余官方源"
+                break
+            if tried >= min_tries and failed / tried > abort_ratio:
+                reason = "失败率过半，判定账号已被限流，本轮跳过剩余官方源"
+                break
+            if probed < min(tries, len(bucket)):
+                time.sleep(gap)
 
-        if tried >= min_tries and failed / tried > abort_ratio:
-            for rest in items[idx:]:
-                rest.ok = False
-                rest.error = rest.error or "官方源疑似被限流，本轮跳过"
-            return True
-        if idx < total:
+        if reason:
+            # 熔断：本条剩下的、以及后面所有台，一律跳过，别让整轮卡在等超时上
+            rest = list(bucket[probed:])
+            for later in groups[gidx + 1:]:
+                rest = rest + later
+            skip_rest(reason, rest)
+            done = total
+            if on_progress:
+                on_progress(done, total)
+            return reason
+
+        if winner is not None:
+            for backup in bucket[probed:]:
+                _inherit(backup, winner)
+                done += 1
+                if on_line:
+                    on_line(backup, None, done, total)
+        else:
+            skip_rest("同台已探线路均不可用", bucket[probed:])
+            done += len(bucket) - probed
+            if on_line:
+                for rest in bucket[probed:]:
+                    on_line(rest, None, done, total)
+
+        if on_progress:
+            on_progress(done, total)
+        if done < total and probed:
             time.sleep(gap)
-    return False
+    return ""

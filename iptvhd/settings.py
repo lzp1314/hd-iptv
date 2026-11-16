@@ -78,6 +78,13 @@ timeout = 15
 # 否则加严的代价会变成「排在后面的台根本没探到」。
 budget = 210
 min_speed_mbps = 0.8
+# 运营商官方源单条探测时限（秒）。这类源是本省边缘，正常 0.1~0.2 秒就回；
+# 挂着 10 秒的话，一条连不通的地址就白等 10 秒，上百条串行能拖成半小时。
+official_timeout = 5
+# 同一个台最多探几条官方地址。探通一条就算这组可用，其余直接当备用线路。
+official_tries_per_channel = 2
+# 连续几条超时就判定「这条网不通」，跳过剩余官方源。只认超时，不认 403/404。
+official_timeout_streak = 5
 # 实测速率要达到「该档画质所需带宽」的几成才算可用。0.5 意味着 1080P 只要
 # 2 Mbps 就放行，而 1080P 真要 4 Mbps 才连续播——放进来就是卡一下停一下。
 speed_ratio = 0.7
@@ -303,6 +310,45 @@ class Settings:
     def probe_budget(self) -> float:
         """整批探测的总预算（秒）。到点就用已回来的结果收工。"""
         return float(os.environ.get("HDIPTV_PROBE_BUDGET") or self.get("probe", "budget", 210))
+
+    @property
+    def official_timeout(self) -> float:
+        """运营商官方源单条探测的时限（秒）。
+
+        这类源是本省边缘，实测正常 0.1~0.2 秒就回 200。挂着 10 秒的话，一条连不
+        通的地址就要白等 10 秒；143 条串行排下来是半小时，面板上看着就像卡死。
+        """
+        raw = os.environ.get("HDIPTV_OFFICIAL_TIMEOUT") or self.get("probe", "official_timeout", 5)
+        try:
+            return min(30.0, max(1.0, float(raw)))
+        except (TypeError, ValueError):
+            return 5.0
+
+    @property
+    def official_tries_per_channel(self) -> int:
+        """同一个台最多探几条官方地址。探通一条就算这组可用，其余继承结论当备用。"""
+        raw = os.environ.get("HDIPTV_OFFICIAL_TRIES") or self.get(
+            "probe", "official_tries_per_channel", 2
+        )
+        try:
+            return max(1, min(4, int(raw)))
+        except (TypeError, ValueError):
+            return 2
+
+    @property
+    def official_timeout_streak(self) -> int:
+        """连续几条超时就判定「这条网不通」，跳过剩余官方源。
+
+        只认超时，不认 403/404：后者是「这个台没了」，不是「整条网不通」，
+        拿去熔断会把能用的台一起丢掉。
+        """
+        raw = os.environ.get("HDIPTV_OFFICIAL_TIMEOUT_STREAK") or self.get(
+            "probe", "official_timeout_streak", 5
+        )
+        try:
+            return max(2, min(30, int(raw)))
+        except (TypeError, ValueError):
+            return 5
 
     @property
     def speed_ratio(self) -> float:

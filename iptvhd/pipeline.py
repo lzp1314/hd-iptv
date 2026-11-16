@@ -385,27 +385,48 @@ def _probe_candidates(
             gap = float(settings.get("probe", "official_gap", 1.2))
         except (TypeError, ValueError):
             gap = 1.2
+        tries = settings.official_tries_per_channel
+        per_item = settings.official_timeout
+        streak = settings.official_timeout_streak
         log(
-            f"[探测·官方源] {len(official)} 条串行慢探（每条间隔 {gap:.1f}s）"
+            f"[探测·官方源] {len(official)} 条串行慢探（每条间隔 {gap:.1f}s，"
+            f"单条上限 {per_item:.0f}s，同台最多探 {tries} 条）"
             "——这路一并发就会被 CDN 限成 302 死循环"
         )
 
-        def on_official(done: int, total: int) -> None:
-            if done == total or done % 8 == 0:
-                log(f"[探测·官方源] {done}/{total}")
+        def on_line(stream: Stream, elapsed: float | None, done: int, total: int) -> None:
+            # 每条都留一行：面板上「卡住不动」的时候，唯一能定位问题台的信息就是它。
+            name = stream.channel or stream.raw_name or "?"
+            if elapsed is None:
+                result = "同台备用" if stream.ok else (stream.error or "跳过")
+                log(f"[官方源] {done}/{total} {name} — {result}")
+                return
+            if stream.ok:
+                detail = f"{stream.height}P {stream.speed_mbps:.1f}Mbps" if stream.height else ""
+                log(f"[官方源] {done}/{total} {name} {elapsed:.1f}s 通 {detail}".rstrip())
+            else:
+                log(f"[官方源] {done}/{total} {name} {elapsed:.1f}s 弃 {stream.error or ''}".rstrip())
 
-        aborted = probe_gentle(
+        def on_official(done: int, total: int) -> None:
+            if done == total:
+                log(f"[探测·官方源] 完成 {done}/{total}")
+
+        reason = probe_gentle(
             official,
             client,
             sample_bytes=settings.sample_bytes,
-            # 官方源是本省边缘，正常几毫秒就回；单条上限压到 10 秒，
-            # 免得 50 多个台里混进几条卡住的，把整轮拖成十几分钟
-            per_stream_timeout=min(settings.probe_timeout or 10.0, 10.0),
+            # 官方源是本省边缘，实测正常几毫秒就回（ztecdn 0.1~0.2s）。5 秒已经是
+            # 几十倍余量；再挂着 10 秒，一条死地址就要白等 10 秒，143 条串行能把
+            # 整轮更新拖成半小时——面板上就是「卡死不动」。
+            per_stream_timeout=per_item,
             gap=gap,
+            tries_per_channel=tries,
+            timeout_streak=streak,
             on_progress=on_official,
+            on_line=on_line,
         )
-        if aborted:
-            log("! [探测·官方源] 失败率过半，判定账号已被限流，本轮整批旁路（下一轮再试）")
+        if reason:
+            log(f"! [探测·官方源] {reason}")
 
 
 def _route_official_through_relay(streams: list[Stream]) -> int:

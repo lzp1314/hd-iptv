@@ -185,6 +185,10 @@ def cmd_doctor(root: Path, config: str | None, isp_check: bool = False) -> int:
         f"并发：{settings.concurrency}  单次超时：{settings.timeout}s  "
         f"单条时限：{settings.probe_timeout:g}s  整批预算：{settings.probe_budget:g}s"
     )
+    print(
+        f"官方源慢探：单条 {settings.official_timeout:g}s、同台最多探 "
+        f"{settings.official_tries_per_channel} 条、连续 {settings.official_timeout_streak} 条超时熔断"
+    )
 
     print("\n结论：" + ("配置可用，可以执行 update" if ok else "存在阻塞项，先按上面的 ✗ 修正"))
     return 0 if ok else 1

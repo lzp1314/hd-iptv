@@ -186,30 +186,32 @@ class TrustedOrderTest(unittest.TestCase):
 
 class GentleProbeTest(unittest.TestCase):
     def test_aborts_when_failure_rate_is_high(self):
-        streams = [Stream(url=f"http://x/{i}.m3u8", channel="CCTV-1") for i in range(20)]
+        # 每个台一条：走的是「失败率过半」这道闸，不是同台去重那道
+        streams = [Stream(url=f"http://x/{i}.m3u8", channel=f"CH{i}") for i in range(20)]
         calls = []
 
         def fake_probe(stream, *_args, **_kwargs):
             calls.append(stream)
             stream.ok = False
+            stream.error = "HTTP 403"      # 非超时，不该触发连续超时熔断
             return stream
 
         with mock.patch("iptvhd.probe.probe_one", fake_probe):
-            aborted = probe_gentle(streams, client=None, gap=0)
+            reason = probe_gentle(streams, client=None, gap=0)
 
-        self.assertTrue(aborted)
+        self.assertIn("限流", reason)
         self.assertEqual(len(calls), 8)  # min_tries 一到就收手，不是把 20 条全打完
         self.assertTrue(all("限流" in s.error for s in streams[8:]))
 
     def test_keeps_going_while_mostly_healthy(self):
-        streams = [Stream(url=f"http://x/{i}.m3u8", channel="CCTV-1") for i in range(10)]
+        streams = [Stream(url=f"http://x/{i}.m3u8", channel=f"CH{i}") for i in range(10)]
 
         def fake_probe(stream, *_args, **_kwargs):
             stream.ok = True
             return stream
 
         with mock.patch("iptvhd.probe.probe_one", fake_probe):
-            self.assertFalse(probe_gentle(streams, client=None, gap=0))
+            self.assertEqual(probe_gentle(streams, client=None, gap=0), "")
 
 
 class ShippedListTest(unittest.TestCase):
