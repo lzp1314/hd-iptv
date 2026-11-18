@@ -303,7 +303,8 @@ def _assign_all(streams: list[Stream], matcher: ChannelMatcher, log: Logger) -> 
 
 
 def _module_channels(
-    streams: list[Stream], max_streams: int, log: Logger
+    streams: list[Stream], max_streams: int, log: Logger,
+    template: list | None = None,
 ) -> list[Channel]:
     """按源条目拆成独立模块，模块内再按频道名聚合线路。
 
@@ -320,9 +321,12 @@ def _module_channels(
         name = (s.channel or s.raw_name or s.group or "未命名").strip()
         grouped.setdefault(module, {}).setdefault(name, []).append(s)
 
+    from .normalize import channel_display_key
+    sort_key = channel_display_key(template)
+
     out: list[Channel] = []
     for module in sorted(grouped):
-        for name in sorted(grouped[module]):
+        for name in sorted(grouped[module], key=sort_key):
             ch = Channel(name=name, group=module, streams=grouped[module][name])
             ch.accept(max_streams)
             out.append(ch)
@@ -664,7 +668,7 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
 
     # 按源条目分组输出：每个模块一个 group，模块内同名频道的多条线路聚在一起
     # 走同一条频道级地址，点播失败时只在这个模块内部换线，不串到别的模块。
-    channels = _module_channels(alive, settings.max_per_channel, log)
+    channels = _module_channels(alive, settings.max_per_channel, log, template=template)
     _carry_over(settings, channels, log)
     report.channels_total = len(channels)
     report.channels_matched = len([c for c in channels if c.streams])

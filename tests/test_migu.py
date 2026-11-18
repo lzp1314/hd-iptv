@@ -180,8 +180,9 @@ class TestSettings(unittest.TestCase):
         s = self._settings()
         self.assertTrue(s.migu_enabled)
         self.assertEqual(s.migu_rate, 2)
-        self.assertTrue(s.migu_h265)
-        self.assertTrue(s.migu_client_dispatch)
+        # H.265 与客户端就近取流默认关：浏览器面板开箱即播
+        self.assertFalse(s.migu_h265)
+        self.assertFalse(s.migu_client_dispatch)
         self.assertEqual(s.migu_user_id, "")
 
     def test_panel_over_config(self):
@@ -224,7 +225,8 @@ class TestSettings(unittest.TestCase):
 
         text = (DEFAULTS_DIR / "config.toml").read_text(encoding="utf-8")
         self.assertIn("[migu]", text)
-        self.assertIn("client_dispatch = true", text)
+        self.assertIn("client_dispatch = false", text)
+        self.assertIn("h265 = false", text)
 
     def test_upgrade_adds_migu_to_full_config(self):
         from iptvhd.settings import upgrade_config

@@ -105,6 +105,9 @@ class RelayTest(unittest.TestCase):
         self.assertTrue(allowed("https://hlsliveali-cdn.ysp.cctv.cn/A/1.m3u8"))
         self.assertTrue(allowed("https://live-dtocnc-cdn.ysp.cctv.cn/A/1.m3u8"))
         self.assertTrue(allowed("https://ali-xwl.cztv.com/live/x.m3u8"))
+        # 咪咕最终节点要经本机转发（最终清单无 CORS 头、且是 http）
+        self.assertTrue(allowed("http://hlsztemgsplive.miguvideo.com:8080/x/01.m3u8"))
+        self.assertFalse(allowed("https://miguvideo.com.evil.com/x.ts"))
         self.assertFalse(allowed("https://example.com/a.ts"))
         self.assertFalse(allowed("https://cctv.cn.example.com/a.ts"))
         self.assertFalse(allowed("ftp://hlsliveali-cdn.ysp.cctv.cn/a.ts"))
@@ -128,6 +131,16 @@ class RelayTest(unittest.TestCase):
         self.assertNotIn("/relay/", text)
         self.assertNotIn("\nindex.m3u8", text)  # 相对地址必须换成绝对地址
         self.assertEqual(relay.stats()["mode"], "direct")
+
+    def test_migu_is_forced_through_relay_even_in_direct_mode(self):
+        """咪咕地址无 CORS 头且是 http，direct 模式也必须经本机转发。"""
+        relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)})
+        migu = "http://hlsztemgsplive.miguvideo.com:8080/x/01.m3u8?a=1"
+        # 咪咕：强制 /relay/
+        self.assertIn("/relay/cctv1/p/", relay.target("cctv1", migu, "http://nas"))
+        # 普通 CDN：direct 仍直连
+        plain = "https://hlsliveali-cdn.ysp.cctv.cn/x/01.m3u8"
+        self.assertEqual(relay.target("cctv1", plain, "http://nas"), plain)
 
     def test_proxy_mode_rewrites_everything(self):
         """切成 proxy 才把分片也换成本机地址（给直连放不出来的播放器兜底）。"""

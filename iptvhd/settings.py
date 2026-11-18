@@ -138,10 +138,14 @@ user_id = ""
 token = ""
 # 画质档位：2 标清 / 3 高清 / 4 蓝光 / 7 原画 / 9 4K
 rate = 2
-h265 = true
-# 客户端就近取流：换票后把调度地址交给播放器，由平台按播放器网络就近调度。
-# 跨网部署必开；服务器和播放器同网时可关。
-client_dispatch = true
+# H.265 默认关：面板用浏览器 hls.js，Chrome/Edge 的 MSE 解不了 H.265，
+# 开了会一直转圈。要 H.265 的用户自己打开。
+h265 = false
+# 客户端就近取流默认关：它会把咪咕调度地址 302 给播放器，但咪咕最终节点
+# 清单不带 CORS 头、且是 http，浏览器面板会被 CORS/混合内容拦死、VLC 也取不到。
+# 关掉后改走本机取清单（同央视频），清单同源下发、分片播放器直连，开箱即播。
+# 只在用原生播放器、且确认能取到清单时，才自己打开这个开关。
+client_dispatch = false
 refresh_minutes = 360
 
 [epg]
@@ -739,15 +743,17 @@ class Settings:
 
     @property
     def migu_h265(self) -> bool:
-        raw = self._migu_value("migu_h265", "HDIPTV_MIGU_H265", "h265", True)
+        raw = self._migu_value("migu_h265", "HDIPTV_MIGU_H265", "h265", False)
         return as_bool(raw)
 
     @property
     def migu_client_dispatch(self) -> bool:
-        """客户端就近取流：换票后把未跳转的调度地址交给播放器，由平台按
-        播放器网络就近调度。跨网部署必开，同网可关。"""
+        """客户端就近取流：换票后把未跳转的调度地址 302 给播放器，由平台按
+        播放器网络就近调度。默认关——咪咕最终节点清单不带 CORS 头且是 http，
+        浏览器面板会被拦。关掉时咪咕改走本机取清单（同央视频），开箱即播。
+        只有用原生播放器、且确认能取到清单时才打开。"""
         raw = self._migu_value("migu_client_dispatch", "HDIPTV_MIGU_CLIENT_DISPATCH",
-                               "client_dispatch", True)
+                               "client_dispatch", False)
         return as_bool(raw)
 
     @property
@@ -874,8 +880,8 @@ enabled = true
 user_id = ""
 token = ""
 rate = 2
-h265 = true
-client_dispatch = true
+h265 = false
+client_dispatch = false
 refresh_minutes = 360
 """
     if "playlist_ttl = 2.5" in current:

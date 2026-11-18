@@ -179,3 +179,55 @@ def load_channels(path: Path) -> list[Channel]:
     if not path.exists():
         return []
     return parse_channels(path.read_text(encoding="utf-8", errors="ignore"))
+
+
+# 频道展示排序：央视 → 卫视 → 其它，CCTV 数字按数值。
+_CCTV_NUM = re.compile(r"(?i)cctv\s*[-—]?\s*(\d+)")
+_CCTV_WORD = re.compile(r"(?i)cctv|央视|中央")
+
+
+def _category(name: str) -> int:
+    """0 央视 / 1 卫视 / 2 其它。"""
+    if _CCTV_WORD.search(name):
+        return 0
+    if "卫视" in name:
+        return 1
+    return 2
+
+
+def _natural(name: str) -> tuple[int, int, str]:
+    """CCTV-1 / CCTV-10 按数字大小排，而不是字符串序（1,10,11,2…）。
+
+    第二个元素是「带 + 的派生频道往后放」：CCTV-5 排在 CCTV-5+ 前面，
+    同数字的 5 / 5+ 不会因名字比较把 5+ 顶到前面。
+    """
+    m = _CCTV_NUM.search(name)
+    if m:
+        has_plus = 1 if "+" in name else 0
+        return (int(m.group(1)), has_plus, "")
+    return (0, 0, normalize(name))
+
+
+def channel_display_key(template: list[Channel] | None = None):
+    """返回一个给频道名排序用的 key 函数。
+
+    顺序：央视 → 卫视 → 其它；CCTV 数字按数值；同一类里按 ``channels.txt``
+    模板行号，模板没有的排在同类最后。模块模式下 ``sorted()`` 会把
+    CCTV-1/10/11 和 CGTN、地方台混成一锅，这个函数恢复人看的顺序。
+    """
+    order: dict[str, int] = {}
+    if template:
+        for i, ch in enumerate(template):
+            order.setdefault(normalize(ch.name), i)
+
+    def key(name: str) -> tuple:
+        n = name or ""
+        norm = normalize(n)
+        cat = _category(n)
+        num, plus, tail = _natural(n)
+        # 命中模板的按行号排在最前，没命中的按数字/名字排在其后
+        hit = norm in order
+        pos = order.get(norm, 0)
+        return (cat, 0 if hit else 1, pos, num, plus, tail, norm)
+
+    return key

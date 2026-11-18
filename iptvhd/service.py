@@ -397,6 +397,12 @@ class State:
 
         其它 slug（央视频的 ``cctv1``）：交给原来的解析器，它要现换票。
         """
+        # 裸咪咕 slug（订阅里只有一条线路、没法做频道级 failover 时写的就是
+        # /live/m:<pid>）：没有 c: 线路表可查，直接按 pID 现换票交给 relay 取清单。
+        # 不处理的话会掉进下面的 _ysp_resolver，咪咕台全部解析失败。
+        if migu_pid(slug):
+            return migu_ticket(slug, self.settings), self.settings.user_agent
+
         name = channel_name(slug)
         if not name:
             return _ysp_resolver(slug)
@@ -429,7 +435,9 @@ class State:
             ua = static_ua() if inner.startswith("o:") else self.settings.user_agent
             return url, ua
         if migu_pid(inner):
-            return migu_ticket(inner, self.settings), ""
+            # 走 relay 取清单时用采集验证过的浏览器 UA。咪咕最终节点清单对 UA
+            # 挑剔，空 UA 会落到默认 qqlive、取不到——这里必须显式带浏览器 UA。
+            return migu_ticket(inner, self.settings), self.settings.user_agent
         return _ysp_resolver(inner)
 
     def primary_migu_pid(self, slug: str) -> str:
@@ -752,11 +760,13 @@ def make_handler(state: State):
                 return
             key, name = hit
 
-            # 咪咕「客户端就近」：换票后把未跳转的调度地址直接交给播放器，
-            # 让平台按播放器的网络就近选边缘节点。这样外省用户取到的是本省的
-            # 节点，而不是 NAS 所在网络的节点——这是咪咕流畅的关键。
-            # 只在首选线路就是咪咕时才这么做：咪咕挂在后面当备用时，仍由
-            # 中转层按正常顺序处理（首选挂了才会轮到它）。
+            # 咪咕「客户端就近」：换票后把未跳转的调度地址 302 给播放器，
+            # 让平台按播放器的网络就近选边缘节点。默认关——咪咕最终节点清单
+            # 不带 CORS 头、且是 http，浏览器面板会被 CORS/混合内容拦死。
+            # 关掉时咪咕走下面的 relay：_resolve 现换票、本机取清单改写下发、
+            # 分片播放器直连（同央视频），开箱即播。只有原生播放器且确认能
+            # 取到清单时，用户才会显式打开这个开关。
+            # 只在首选线路就是咪咕时才 302：咪咕当备用时仍走 relay 正常顺序。
             if settings.migu_enabled and settings.migu_client_dispatch:
                 top_pid = state.primary_migu_pid(key)
                 if top_pid:

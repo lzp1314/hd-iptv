@@ -49,8 +49,10 @@ from collections import OrderedDict, deque
 from .net import dns_stats
 
 # 允许中转的域名后缀。只放行上游自己的 CDN，不做通用代理。
+# miguvideo.com：咪咕最终节点的清单不带 CORS 头、且是 http，浏览器面板直连
+# 会被拦，必须让子清单/分片经本机转发（同源下发）。只放行这个域名及其子域。
 ALLOW_SUFFIX = (".cctv.cn", ".cctv.com", ".ysp.cctv.cn", ".cztv.com", ".cztvcloud.com",
-                ".chinamobile.com")
+                ".chinamobile.com", ".miguvideo.com")
 
 # 运营商 IPTV 直播边缘的 IPv6 段（移动 2409 / 联通 2408 / 电信 240e）。这类地址
 # 只能按 IP 放行：302 之后上游给的就是裸 IPv6，没有任何域名可以拿去比后缀。
@@ -1012,7 +1014,15 @@ class Relay:
         地址原样写进清单，播放器连不上就报「格式不支持」。本机有这么一路 IPv6
         出口就够了，让分片从本机过一手，播放端有没有 IPv6 都无所谓。
         """
-        if self._mode == "direct" and not _ipv6_host(url):
+        # 咪咕地址即使 direct 模式也要经本机转发：最终节点清单不带 CORS 头、
+        # 且是 http，浏览器 hls.js 直连会被拦（VLC 也常取不到）。让子清单和
+        # 分片走 /relay/ 同源下发，播放器只连本机，绕开 CORS 和混合内容。
+        try:
+            host = (urllib.parse.urlsplit(url).hostname or "").lower()
+        except ValueError:
+            host = ""
+        is_migu = host.endswith("miguvideo.com")
+        if self._mode == "direct" and not _ipv6_host(url) and not is_migu:
             return url
         return self.wrap(slug, url, prefix)
 
