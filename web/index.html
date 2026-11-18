@@ -225,8 +225,8 @@
         </label>
         <label>画质
           <select id="setMiguRate">
-            <option value="2">标清 540p（游客上限）</option>
-            <option value="3">高清 720p（需登录）</option>
+            <option value="2">标清 540p</option>
+            <option value="3">高清 720p（默认，游客也能看）</option>
             <option value="4">蓝光 1080p（需会员）</option>
             <option value="7">原画（需会员）</option>
             <option value="9">4K 2160p（需会员 / 投屏权益）</option>
@@ -236,9 +236,15 @@
         <label class="chk"><input id="setMiguH265" type="checkbox"> 启用 H.265 原画（可能有兼容问题）
           <span class="hint">部分老播放器不支持 H.265（只有声音没画面），关掉即可回到 H.264。</span>
         </label>
-        <label class="chk"><input id="setMiguDispatch" type="checkbox"> 客户端就近取流（跨运营商观看时开启）
+        <label class="chk"><input id="setMiguEdgeDispatch" type="checkbox"> 服务端解析真实节点（推荐，默认开）
           <span class="hint">
-            服务器和观看设备不在同一家运营商网络时必开：开启后由播放器所在网络就近选 CDN 节点，同网部署可关。
+            服务器只解析一次调度地址，把真实节点交给播放器直连。服务器出口被咪咕拒绝时，
+            这是能播的关键；关掉则改由服务器全程代取。
+          </span>
+        </label>
+        <label class="chk"><input id="setMiguDispatch" type="checkbox"> 旧·客户端就近取流（一般不用开）
+          <span class="hint">
+            把调度地址原样甩给播放器自己跳转，VLC 往往处理不好。改用上面的「服务端解析真实节点」。
           </span>
         </label>
         <label>频道表刷新间隔（分钟）

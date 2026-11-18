@@ -137,14 +137,15 @@ enabled = true
 user_id = ""
 token = ""
 # 画质档位：2 标清 / 3 高清 / 4 蓝光 / 7 原画 / 9 4K
-rate = 2
+# 默认高清 720P：游客走游客专用签名也真能拿到 720P（旧签名，平台才给）。
+rate = 3
 # H.265 默认关：面板用浏览器 hls.js，Chrome/Edge 的 MSE 解不了 H.265，
 # 开了会一直转圈。要 H.265 的用户自己打开。
 h265 = false
-# 客户端就近取流默认关：它会把咪咕调度地址 302 给播放器，但咪咕最终节点
-# 清单不带 CORS 头、且是 http，浏览器面板会被 CORS/混合内容拦死、VLC 也取不到。
-# 关掉后改走本机取清单（同央视频），清单同源下发、分片播放器直连，开箱即播。
-# 只在用原生播放器、且确认能取到清单时，才自己打开这个开关。
+# 服务端解析真实节点默认开：只请求调度域名读一次 302，把真实节点交播放器
+# 直连，清单和分片用播放器网络取——NAS 出口被节点拒绝时这是唯一能播的路。
+edge_dispatch = true
+# 旧的客户端就近取流（甩调度地址给播放器自己跳多层 302），默认关。
 client_dispatch = false
 refresh_minutes = 360
 
@@ -254,6 +255,8 @@ def coerce_panel(raw: dict) -> dict:
         elif key == "migu_h265":
             out[key] = as_bool(value)
         elif key == "migu_client_dispatch":
+            out[key] = as_bool(value)
+        elif key == "migu_edge_dispatch":
             out[key] = as_bool(value)
         elif key == "migu_user_id":
             # 留空 = 清空账号（连同令牌一起，见 apply_settings）
@@ -734,12 +737,12 @@ class Settings:
     @property
     def migu_rate(self) -> int:
         """画质档位：2 标清 / 3 高清 / 4 蓝光 / 7 原画 / 9 4K。"""
-        raw = self._migu_value("migu_rate", "HDIPTV_MIGU_RATE", "rate", 2)
+        raw = self._migu_value("migu_rate", "HDIPTV_MIGU_RATE", "rate", 3)
         try:
             rate = int(raw)
         except (TypeError, ValueError):
-            return 2
-        return rate if rate in (2, 3, 4, 7, 9) else 2
+            return 3
+        return rate if rate in (2, 3, 4, 7, 9) else 3
 
     @property
     def migu_h265(self) -> bool:
@@ -748,12 +751,23 @@ class Settings:
 
     @property
     def migu_client_dispatch(self) -> bool:
-        """客户端就近取流：换票后把未跳转的调度地址 302 给播放器，由平台按
-        播放器网络就近调度。默认关——咪咕最终节点清单不带 CORS 头且是 http，
-        浏览器面板会被拦。关掉时咪咕改走本机取清单（同央视频），开箱即播。
-        只有用原生播放器、且确认能取到清单时才打开。"""
+        """客户端就近取流（旧模式）：换票后把未跳转的调度地址 302 给播放器，
+        由播放器自己跟多层 302 到边缘节点。原生播放器未必处理得好，默认关。
+        """
         raw = self._migu_value("migu_client_dispatch", "HDIPTV_MIGU_CLIENT_DISPATCH",
                                "client_dispatch", False)
+        return as_bool(raw)
+
+    @property
+    def migu_edge_dispatch(self) -> bool:
+        """服务端解析一次 302、把真实节点交给播放器直连（默认开）。
+
+        服务端只请求调度域名读一次 Location（这一步 NAS 出口不会被回 661），
+        真实节点的清单/分片由播放器用自己网络取——这是咪咕在服务部署环境下
+        能播的关键。关掉则回退到本机全程 relay 代取清单。
+        """
+        raw = self._migu_value("migu_edge_dispatch", "HDIPTV_MIGU_EDGE_DISPATCH",
+                               "edge_dispatch", True)
         return as_bool(raw)
 
     @property
@@ -879,8 +893,9 @@ def upgrade_config(path: Path) -> bool:
 enabled = true
 user_id = ""
 token = ""
-rate = 2
+rate = 3
 h265 = false
+edge_dispatch = true
 client_dispatch = false
 refresh_minutes = 360
 """

@@ -140,6 +140,82 @@ class TestProtocol(unittest.TestCase):
             migu.ticket("608807420", 2, client=c, attempts=1, pause=0)
         self.assertIn("无响应", str(cm.exception))
 
+    def test_guest_hd_uses_old_sign_and_seal(self):
+        """游客高清：旧 appVersion 签名 + 旧版 ddCalcu，且不带账号头。"""
+        data = {
+            "rid": "SUCCESS",
+            "body": {
+                "urlInfo": {"url": "http://dispatch.example.com/p?a=1&puData=abcdefghijklmnop", "rateType": 3},
+                "auth": {"logined": False},
+            },
+        }
+        c = FakeClient([json_resp(data)])
+        t = migu.ticket_guest_hd("608807420", client=c, attempts=1)
+        self.assertEqual(t.rate, 3)
+        self.assertFalse(t.logined)
+        req = c.calls[0][0]
+        self.assertIn("rateType=3", req)
+        self.assertIn("&salt=", req)  # 旧版签名用随机 salt
+        headers = c.calls[0][1]["headers"]
+        self.assertEqual(headers["AppVersion"], "2600034600")
+        self.assertIn("99000-201600010010028", headers["X-UP-CLIENT-CHANNEL-ID"])
+        self.assertNotIn("UserId", headers)
+        self.assertIn("&ddCalcu=", t.url)
+        self.assertTrue(t.url.endswith("&sv=10004&ct=android"))
+
+    def test_guest_rate3_routes_to_old_sign(self):
+        """游客请求 rate=3 自动走旧签名（应用新版会静默降标清）。"""
+        data = {
+            "rid": "SUCCESS",
+            "body": {
+                "urlInfo": {"url": "http://dispatch.example.com/p", "rateType": 3},
+                "auth": {"logined": False},
+            },
+        }
+        c = FakeClient([json_resp(data)])
+        migu.ticket("608807420", 3, client=c, attempts=1)
+        self.assertEqual(c.calls[0][1]["headers"]["AppVersion"], "2600034600")
+
+    def test_account_rate3_keeps_new_sign(self):
+        """有账号的 rate=3 仍走新版签名，按账号权益给。"""
+        data = {
+            "rid": "SUCCESS",
+            "body": {
+                "urlInfo": {"url": "http://dispatch.example.com/p", "rateType": 3},
+                "auth": {"logined": True},
+            },
+        }
+        c = FakeClient([json_resp(data)])
+        migu.ticket("608807420", 3, user_id="u1", token="SECRET123", client=c, attempts=1)
+        self.assertIn("AppVersion" , c.calls[0][1]["headers"])
+        self.assertEqual(c.calls[0][1]["headers"]["AppVersion"], 2600037000)
+
+    def test_edge_location_reads_302_location_only(self):
+        """边缘解析：读一次 302 的 Location，不跟随、不读清单。"""
+        resp = Response(status=302, headers={"location": "http://edge.example.com/live/index.m3u8?x=1"})
+        c = FakeClient([resp])
+        node = migu.edge_location("http://gslb.example.com/dispatch", client=c, attempts=1, pause=0)
+        self.assertEqual(node, "http://edge.example.com/live/index.m3u8?x=1")
+        self.assertEqual(len(c.calls), 1)
+        self.assertFalse(c.calls[0][1].get("allow_redirect", True))  # 明确禁止跟随
+
+    def test_edge_location_skips_bofang_placeholder(self):
+        """平台先回占位 bofang 地址时继续试，拿到真节点为止。"""
+        placeholder = Response(status=302, headers={"location": "http://bofang.example.com/x"})
+        real = Response(status=302, headers={"location": "http://edge.example.com/ok"})
+        c = FakeClient([placeholder, real])
+        node = migu.edge_location("http://gslb.example.com/dispatch", client=c, attempts=2, pause=0)
+        self.assertEqual(node, "http://edge.example.com/ok")
+        self.assertEqual(len(c.calls), 2)
+
+    def test_edge_location_empty_on_failure(self):
+        """拿不到 302/Location 时返回空串，调用方据此回落 relay。"""
+        c = FakeClient([Response(status=200, body=b"", headers={})])
+        self.assertEqual(
+            migu.edge_location("http://gslb.example.com/dispatch", client=c, attempts=1, pause=0),
+            "",
+        )
+
 
 class TestChannels(unittest.TestCase):
     def setUp(self):
@@ -179,10 +255,11 @@ class TestSettings(unittest.TestCase):
     def test_defaults(self):
         s = self._settings()
         self.assertTrue(s.migu_enabled)
-        self.assertEqual(s.migu_rate, 2)
-        # H.265 与客户端就近取流默认关：浏览器面板开箱即播
+        self.assertEqual(s.migu_rate, 3)
+        # H.265 与旧客户端就近取流默认关；服务端解析真实节点默认开
         self.assertFalse(s.migu_h265)
         self.assertFalse(s.migu_client_dispatch)
+        self.assertTrue(s.migu_edge_dispatch)
         self.assertEqual(s.migu_user_id, "")
 
     def test_panel_over_config(self):
@@ -191,13 +268,15 @@ class TestSettings(unittest.TestCase):
         )
         s.panel.update({
             "migu_enabled": True,
-            "migu_rate": 3,
+            "migu_rate": 4,
             "migu_h265": True,
+            "migu_edge_dispatch": False,
             "migu_client_dispatch": True,
         })
         self.assertTrue(s.migu_enabled)
-        self.assertEqual(s.migu_rate, 3)
+        self.assertEqual(s.migu_rate, 4)
         self.assertTrue(s.migu_h265)
+        self.assertFalse(s.migu_edge_dispatch)
         self.assertTrue(s.migu_client_dispatch)
 
     def test_env_over_config(self):
@@ -207,7 +286,7 @@ class TestSettings(unittest.TestCase):
 
     def test_bad_rate_falls_back(self):
         s = self._settings("[migu]\nrate = 99\n")
-        self.assertEqual(s.migu_rate, 2)
+        self.assertEqual(s.migu_rate, 3)
 
     def test_coerce_panel_token_empty_kept_out(self):
         out = coerce_panel({"migu_token": "", "migu_user_id": "abc"})
@@ -225,6 +304,7 @@ class TestSettings(unittest.TestCase):
 
         text = (DEFAULTS_DIR / "config.toml").read_text(encoding="utf-8")
         self.assertIn("[migu]", text)
+        self.assertIn("edge_dispatch = true", text)
         self.assertIn("client_dispatch = false", text)
         self.assertIn("h265 = false", text)
 
@@ -344,7 +424,7 @@ class TestServiceAndPanel(unittest.TestCase):
         end = html.index('id="regionPanel"')
         block = html[start:end]
         for eid in ("setMiguEnabled", "setMiguUser", "setMiguToken", "setMiguRate",
-                    "setMiguH265", "setMiguDispatch", "btnMiguSave"):
+                    "setMiguH265", "setMiguEdgeDispatch", "setMiguDispatch", "btnMiguSave"):
             self.assertIn(f'id="{eid}"', block)
 
     def test_view_whitelist_has_every_nav_item(self):
@@ -364,6 +444,9 @@ class TestServiceAndPanel(unittest.TestCase):
         self.assertIn('btnId === "btnMiguSave"', js)
         # 令牌只在非空时提交
         self.assertIn("if (miguToken) payload.migu_token = miguToken", js)
+        # 新开关随咪咕配置一起提交、回填
+        self.assertIn('payload.migu_edge_dispatch = $("setMiguEdgeDispatch").checked', js)
+        self.assertIn('s.migu_edge_dispatch !== false', js)
 
     def test_migu_beats_aggregate_but_not_local(self):
         from iptvhd.models import Stream

@@ -330,6 +330,19 @@ def migu_ticket(slug: str, settings: Settings) -> str:
     ).url
 
 
+def migu_edge_url(slug: str, settings: Settings) -> str:
+    """换票后请求调度地址读一次 302，返回真实节点地址（给播放器直连）。
+
+    读不到可用节点时返回空串，调用方回落到 relay 代取。账号、画质只在这里
+    参与换票，不写进返回的地址。
+    """
+    from . import migu
+    from .net import HttpClient
+
+    client = HttpClient(timeout=6, retries=1)
+    return migu.edge_location(migu_ticket(slug, settings), client=client)
+
+
 def live_target(raw_slug: str) -> tuple[str, str] | None:
     """判断 ``/live/<slug>.m3u8`` 里的 slug 该交给谁，返回 ``(key, 展示名)``。
 
@@ -581,6 +594,7 @@ class State:
             "migu_rate": s.migu_rate,
             "migu_h265": s.migu_h265,
             "migu_client_dispatch": s.migu_client_dispatch,
+            "migu_edge_dispatch": s.migu_edge_dispatch,
             "migu_refresh": s.migu_refresh_minutes,
         }
 
@@ -829,21 +843,33 @@ def make_handler(state: State):
                 return
             key, name = hit
 
-            # 咪咕「客户端就近」：换票后把未跳转的调度地址 302 给播放器，
-            # 让平台按播放器的网络就近选边缘节点。默认关——咪咕最终节点清单
-            # 不带 CORS 头、且是 http，浏览器面板会被 CORS/混合内容拦死。
-            # 关掉时咪咕走下面的 relay：_resolve 现换票、本机取清单改写下发、
-            # 分片播放器直连（同央视频），开箱即播。只有原生播放器且确认能
-            # 取到清单时，用户才会显式打开这个开关。
-            # 只在首选线路就是咪咕时才 302：咪咕当备用时仍走 relay 正常顺序。
-            if settings.migu_enabled and settings.migu_client_dispatch:
+            # 咪咕播放有三条路，优先级从高到低：
+            #  1) edge_dispatch（默认）：服务端只请求调度域名读一次 302，把真实
+            #     节点交给播放器直连，清单/分片走播放器网络。服务端不碰节点清单，
+            #     所以 NAS 出口被节点回 661 时这条路仍能播——这是同机部署的可用路。
+            #  2) client_dispatch（旧）：把未跳转的调度地址甩给播放器自己跳多层
+            #     302，VLC 常常处理不好，保留给确认能用的场合。
+            #  3) 都不开：走下面的 relay，本机取清单改写下发。
+            # 任一路失败都回落到下一条，最后兜底 relay，不让单个源把频道整条搞没。
+            # 只在首选线路就是咪咕时才走这些：咪咕当备用时仍走 relay 正常顺序。
+            if settings.migu_enabled:
                 top_pid = state.primary_migu_pid(key)
                 if top_pid:
-                    try:
-                        self._redirect(migu_ticket(f"m:{top_pid}", settings))
-                        return
-                    except Exception as exc:  # noqa: BLE001 - 换票失败回落其它线路
-                        self.log(f"[咪咕] {name} 换票失败，改用其它源：{exc}")
+                    if settings.migu_edge_dispatch:
+                        try:
+                            node = migu_edge_url(f"m:{top_pid}", settings)
+                            if node:
+                                self._redirect(node)
+                                return
+                            state.log(f"[咪咕] {name} 调度地址没解析出节点，改用其它方式")
+                        except Exception as exc:  # noqa: BLE001 - 换票失败回落其它线路
+                            state.log(f"[咪咕] {name} 解析节点失败，改用其它方式：{exc}")
+                    if settings.migu_client_dispatch:
+                        try:
+                            self._redirect(migu_ticket(f"m:{top_pid}", settings))
+                            return
+                        except Exception as exc:  # noqa: BLE001 - 换票失败回落其它线路
+                            state.log(f"[咪咕] {name} 换票失败，改用其它源：{exc}")
 
             try:
                 text, stale, seq = state.relay.playlist_info(key, self._base())

@@ -65,6 +65,16 @@ _SIGN_SUFFIX = "3ce941cc3cbc40528bfd1c64f9fdf6c0migu0123"
 _SALT = 1230024
 _DD_KEYS = "cdabyzwxkl"
 
+# 游客高清走另一套「旧版」签名：新版签名(appVersion 26000370)请求 rateType=3
+# 时平台会静默按游客给标清；旧版(appVersion 2600034600)才会给真正的 720P。
+_APP_VERSION_HD = "2600034600"
+_CHANNEL_ID_HD = "2600034600-99000-201600010010028"
+_SIGN_SUFFIX_HD = "2cac4f2c6c3346a5b34e085725ef7e33migu"
+
+# 边缘节点解析：只请求调度地址读一次 302，带有限重试。
+_EDGE_ATTEMPTS = 6
+_EDGE_PAUSE = 0.15
+
 # 档位 → (面板文案, 高度)。档位号是平台的约定，不是码率。
 RATES: dict[int, tuple[str, int]] = {
     2: ("标清 540P", 540),
@@ -73,7 +83,7 @@ RATES: dict[int, tuple[str, int]] = {
     7: ("原画", 1080),
     9: ("4K 臻享", 2160),
 }
-DEFAULT_RATE = 2
+DEFAULT_RATE = 3
 
 # 需要账号才可能拿到的档位。游客请求这些档位平台也会回 200，只是静默给标清。
 ACCOUNT_RATES = (3, 4, 7, 9)
@@ -244,6 +254,11 @@ def ticket(
     user_id, token = clean_account(user_id, token)
     rate = int(rate) if int(rate) in RATES else DEFAULT_RATE
     client = client or HttpClient(timeout=12, retries=1)
+    # 游客要高清：新版签名会被平台静默降到标清，走旧版签名才真给 720P。
+    # 有账号的仍按账号权益走下面的新版签名，画质跟着账号档位走。
+    if rate >= 3 and not account_ok(user_id, token):
+        return ticket_guest_hd(pid, h265=h265, hdr=hdr, client=client,
+                               attempts=attempts, pause=pause)
     last = "换票失败"
 
     for round_no in range(max(1, attempts)):
@@ -318,6 +333,147 @@ def ticket(
                       logined=logined, tried=rate)
 
     raise MiguError(last)
+
+
+def _dd_calcu_hd(pu_data: str, pid: str) -> str:
+    """游客高清的校验串：与新版 _dd_calcu 的差别在插入位置和固定字符。
+
+    旧版在 i==2 取的是日期串第 3 位（``YYYYMMDD`` 的 ``[2]``），新版取第 1 位；
+    i==1/i==4 旧版固定塞 ``v``/``a``，新版按账号和档位推导。差一位整条地址就废。
+    """
+    if not pu_data or not pid:
+        return ""
+    day = datetime.now().strftime("%Y%m%d")
+    pid_at = int(pid[6]) if len(pid) > 6 and pid[6].isdigit() else 0
+    day_at = int(day[2]) if len(day) > 2 and day[2].isdigit() else 0
+    out: list[str] = []
+    half = len(pu_data) // 2
+    for i in range(half):
+        out.append(pu_data[len(pu_data) - i - 1])
+        out.append(pu_data[i])
+        if i == 1:
+            out.append("v")
+        elif i == 2:
+            out.append(_DD_KEYS[day_at])
+        elif i == 3:
+            out.append(_DD_KEYS[pid_at])
+        elif i == 4:
+            out.append("a")
+    return "".join(out)
+
+
+def _seal_hd(raw: str, pid: str) -> str:
+    """给游客高清的调度地址补旧版校验串。"""
+    if "&puData=" not in raw:
+        return raw
+    pu = raw.split("&puData=", 1)[1]
+    return f"{raw}&ddCalcu={_dd_calcu_hd(pu, pid)}&sv=10004&ct=android"
+
+
+def ticket_guest_hd(
+    pid: str,
+    *,
+    h265: bool = False,
+    hdr: bool = False,
+    client: HttpClient | None = None,
+    attempts: int = 2,
+    pause: float = 1.0,
+) -> Ticket:
+    """游客换高清票：用旧版 appVersion 签名，平台才会真给 720P。
+
+    新版签名请求 rateType=3 的未登录票，平台会回 SUCCESS 但静默降到 540P；
+    旧版 ``appVersion=2600034600`` 这套才会给真正的 720P（游客上限）。
+    仅在没有账号、且面板选了高清及以上时走这条路；有账号的仍走新版按权益给。
+    """
+    client = client or HttpClient(timeout=12, retries=1)
+    last = "换票失败"
+    for _ in range(max(1, attempts)):
+        if denied():
+            raise MiguError("平台限流中，稍后自动恢复")
+
+        ts = str(round(time.time() * 1000))
+        md5 = _md5(ts + pid + _APP_VERSION_HD[:8])
+        salt = f"{random.randint(0, 999999):06d}25"
+        sign = _md5(md5 + _SIGN_SUFFIX_HD + salt[:4])
+        headers = {
+            "AppVersion": _APP_VERSION_HD,
+            "TerminalId": "android",
+            "X-UP-CLIENT-CHANNEL-ID": _CHANNEL_ID_HD,
+        }
+        if pid not in ("641886683", "641886773"):
+            headers["appCode"] = "miguvideo_default_android"
+        extra = ("&h265N=true" if h265 else "") + (
+            "&4kvivid=true&2Kvivid=true&vivid=2" if hdr else ""
+        )
+        url = (
+            f"{_PLAY_URL}?sign={sign}&rateType=3&contId={pid}"
+            f"&timestamp={ts}&salt={salt}&flvEnable=true&super4k=true{extra}"
+        )
+
+        pace()
+        resp = client.get(url, headers=headers)
+        if resp.status in (403, 429):
+            note_denied()
+        try:
+            data = json.loads(resp.text) if resp.body else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            last = f"接口无响应（{resp.error or resp.status}）"
+            time.sleep(pause)
+            continue
+
+        rid = str(data.get("rid") or "")
+        info = ((data.get("body") or {}).get("urlInfo") or {})
+        raw = str(info.get("url") or "")
+        if rid != "SUCCESS" or not raw:
+            last = _fail_text(data)
+            if rid in ("TIPS_NO_RIGHT", "TIPS_NOT_ONLINE", "TIPS_PLAY_LIMIT"):
+                raise MiguUnavailable(last)
+            note_denied()
+            time.sleep(pause)
+            continue
+
+        note_ok()
+        got = int(info.get("rateType") or 3)
+        return Ticket(url=_seal_hd(raw, pid), rate=got, logined=False, tried=3)
+
+    raise MiguError(last)
+
+
+def edge_location(
+    dispatch_url: str,
+    *,
+    client: HttpClient | None = None,
+    attempts: int = _EDGE_ATTEMPTS,
+    pause: float = _EDGE_PAUSE,
+) -> str:
+    """把调度地址解析成真实 CDN 节点地址：只请求调度域名读一次 302 的 Location。
+
+    这是「服务端解析一次、播放器直连真实节点」那条路的核心。关键点在于服务端
+    只碰调度域名（这一步 NAS 出口不会被平台回 661），读到的 Location 是一台真实
+    边缘节点；把它交给播放器直连，清单和分片都由播放器用自己网络取，绕开 NAS
+    出口被节点拒的问题，也免去了播放器自己跟多层 302 的麻烦（VLC 的弱项）。
+
+    拿不到可用 Location 时返回空串，调用方据此回落到原来的 relay 代取。
+    """
+    if not dispatch_url:
+        return ""
+    client = client or HttpClient(timeout=6, retries=1)
+    for i in range(max(1, attempts)):
+        try:
+            resp = client.get(dispatch_url, allow_redirect=False)
+        except Exception:  # noqa: BLE001 - 网络异常繁多，重试即可
+            resp = None
+        if resp is not None:
+            loc = str((resp.headers or {}).get("location") or "").strip()
+            if resp.status in (301, 302, 303, 307, 308) and loc:
+                # 平台偶尔先回一个占位的 bofang 地址，不是真节点，继续试
+                if not loc.lower().startswith("http://bofang"):
+                    return loc
+        if i + 1 < attempts and pause > 0:
+            time.sleep(pause)
+    return ""
 
 
 # --------------------------------------------------------------------------- #

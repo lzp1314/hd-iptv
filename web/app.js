@@ -280,8 +280,9 @@ function fillSettings(s) {
   if ($("setMiguUser")) $("setMiguUser").value = s.migu_user_id || "";
   // 令牌不回传：框里始终留空，留空 = 不修改
   if ($("setMiguToken")) $("setMiguToken").value = "";
-  if ($("setMiguRate")) $("setMiguRate").value = String(s.migu_rate || 2);
+  if ($("setMiguRate")) $("setMiguRate").value = String(s.migu_rate || 3);
   if ($("setMiguH265")) $("setMiguH265").checked = s.migu_h265 !== false;
+  if ($("setMiguEdgeDispatch")) $("setMiguEdgeDispatch").checked = s.migu_edge_dispatch !== false;
   if ($("setMiguDispatch")) $("setMiguDispatch").checked = s.migu_client_dispatch !== false;
   if ($("setMiguRefresh")) $("setMiguRefresh").value = s.migu_refresh != null ? s.migu_refresh : 360;
   if ($("miguStatus") && s.migu_account_set !== undefined) {
@@ -468,6 +469,7 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     payload.migu_user_id = $("setMiguUser").value.trim();
     payload.migu_rate = Number($("setMiguRate").value);
     payload.migu_h265 = $("setMiguH265").checked;
+    payload.migu_edge_dispatch = $("setMiguEdgeDispatch").checked;
     payload.migu_client_dispatch = $("setMiguDispatch").checked;
     payload.migu_refresh = Number($("setMiguRefresh").value || 360);
     // 令牌留空 = 不修改（后端不回传，前端框每次都是空的）
@@ -1376,7 +1378,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setAutoSwitch", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource", "setMiguEnabled", "setMiguUser", "setMiguToken", "setMiguRate", "setMiguH265", "setMiguDispatch", "setMiguRefresh"].forEach((id) => {
+  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setAutoSwitch", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource", "setMiguEnabled", "setMiguUser", "setMiguToken", "setMiguRate", "setMiguH265", "setMiguEdgeDispatch", "setMiguDispatch", "setMiguRefresh"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });
