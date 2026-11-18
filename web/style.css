@@ -112,7 +112,9 @@ main { min-width: 0; padding: 0; }
   background: var(--bg);
   padding: 14px 0 2px;
 }
-.statbar .cards { margin-bottom: 12px; }
+/* 全屏铺开后若不限宽，四张卡会被拉到整屏宽、状态概览也跟着散开。
+   统一卡在一个舒适宽度，既对齐左侧内容，又不显得空旷。 */
+.statbar .cards { max-width: 960px; margin-bottom: 12px; }
 /* 吸顶时内容在它下面滚，补一条极浅的分隔，避免糊成一片 */
 .statbar::after {
   content: "";
@@ -121,11 +123,12 @@ main { min-width: 0; padding: 0; }
   background: linear-gradient(to right, var(--line), transparent);
 }
 
-/* 状态概览：一行一个键值，窄屏自动两列 */
+/* 状态概览：一行一个键值。固定两列并限宽，全屏下也不会被拉成一长排 */
 .kv {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 2px 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 960px;
+  gap: 2px 28px;
 }
 .kv-row {
   display: flex;
@@ -173,9 +176,10 @@ main { min-width: 0; padding: 0; }
 .panel h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .panel-head h2 { margin: 0; }
-.hint { color: var(--muted); font-size: 12px; margin: -4px 0 12px; }
-/* 紧跟标题栏的说明别再往上收：按钮比标题高，负边距会顶到按钮底下 */
-.panel-head + .hint { margin-top: 0; }
+.hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+/* 说明文字统一用正 margin，负边距会把宽带页那几段说明顶到按钮底下、糊在一起。
+   紧跟标题栏的说明可以贴紧一点，但不再用负值。 */
+.panel-head + .hint { margin-top: 2px; }
 /* 检测 / 扫描结果：多行输出按原样换行，加个浅底跟说明文字区分开 */
 .hint.result {
   white-space: pre-line;
@@ -296,10 +300,11 @@ code {
 .module-row .module-type { font-size: 11px; color: var(--muted); }
 .module-row input[type="checkbox"] { width: 16px; height: 16px; flex: none; }
 
-/* 数据源页：左边模块卡片（限宽，保持原来的卡片尺寸），右边订阅地址常驻 */
+/* 源数据页：左右两栏等宽，左边模块卡片、右边订阅地址常驻。
+   等宽后左侧变窄，模块卡片自然不会越拉越大；minmax(0,1fr) 防止长地址撑破列宽。 */
 .module-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(340px, 30%);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 20px;
   align-items: start;
 }
@@ -368,6 +373,23 @@ code {
   font-size: 11px; padding: 2px 7px; border-radius: 6px;
   border: 1px solid var(--line); background: #fff; color: var(--muted);
 }
+/* 卡片底部操作行：左边「更新此源」，右边「配置 ›」，两个入口对齐不挤在一起 */
+.builtin-actions {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.builtin-update {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.builtin-update:hover:not(:disabled) { background: #dbe7ff; }
+.builtin-update:disabled { opacity: .55; cursor: not-allowed; border-color: var(--line); background: #f3f4f6; color: var(--muted); }
 .builtin-config-btn {
   display: block; margin-left: auto; padding: 2px 0;
   border: 0; background: none; color: #0969da; font-size: 12px; cursor: pointer;
@@ -687,6 +709,10 @@ footer .mono { font-size: 11.5px; }
   .chan-layout { grid-template-columns: 140px minmax(0, 1fr); gap: 10px; }
   .chan-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
   .shell { grid-template-columns: 158px minmax(0, 1fr); gap: 12px; padding: 14px 14px 8px; }
+  /* 屏幕不够宽时两栏叠起来，订阅栏不再吸顶粘在旁边 */
+  .module-layout { grid-template-columns: minmax(0, 1fr); }
+  .subscribe-aside { position: static; }
+  .kv { max-width: none; }
 }
 
 /* 窄屏：侧边栏横过来当标签条，吸在顶栏下面。状态卡在小屏上不吸顶，

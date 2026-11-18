@@ -649,19 +649,22 @@ class State:
             self.log(f"! 节目单构建失败：{exc}")
 
     # ---------------- 更新 ----------------
-    def trigger(self) -> bool:
-        """异步触发一次更新，已有任务在跑时返回 False。"""
+    def trigger(self, module: str = "") -> bool:
+        """异步触发一次更新，已有任务在跑时返回 False。
+
+        ``module`` 非空时只重采这一个模块，其它模块沿用上一轮结果。
+        """
         with self.lock:
             if self.running:
                 return False
             self.running = True
             self.last_started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        threading.Thread(target=self._run, daemon=True).start()
+        threading.Thread(target=self._run, args=(module,), daemon=True).start()
         return True
 
-    def _run(self) -> None:
+    def _run(self, module: str = "") -> None:
         try:
-            report = run_update(self.settings, log=self.log)
+            report = run_update(self.settings, log=self.log, only_module=module)
             with self.lock:
                 self.report = report.as_dict()
                 self.last_error = ""
@@ -1158,8 +1161,16 @@ def make_handler(state: State):
             if path is None:
                 return
             if path == "/api/update":
-                started = state.trigger()
-                self._json({"started": started, "message": "已开始更新" if started else "已有任务在执行"})
+                # 可选 body：{"module": "运营商官方源"} 只重采这一个模块。
+                # 顶栏全量按钮和老客户端 POST 空 body，都按全量处理。
+                values = self._body()
+                module = str((values or {}).get("module") or "").strip()
+                started = state.trigger(module)
+                if started:
+                    message = f"已开始只更新「{module}」" if module else "已开始更新"
+                else:
+                    message = "已有任务在执行"
+                self._json({"started": started, "message": message, "module": module})
             elif path == "/api/settings":
                 values = self._body()
                 if values is None:

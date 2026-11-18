@@ -18,7 +18,13 @@ from .net import build_client
 from .normalize import ChannelMatcher, load_channels
 from .probe import probe_gentle, probe_many
 from .relay import needs_relay, plain_slug, static_slug
-from .settings import Settings, append_public_sources, upgrade_channels, upgrade_sources
+from .settings import (
+    Settings,
+    append_public_sources,
+    display_module,
+    upgrade_channels,
+    upgrade_sources,
+)
 
 Logger = Callable[[str], None]
 
@@ -560,9 +566,94 @@ def _route_through_relay(streams: list[Stream]) -> tuple[int, int]:
     return official, plain
 
 
-def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
+def _rows_to_channels(rows: list[dict]) -> list[Channel]:
+    """把 result.json 的频道条目还原成 Channel，仅用于增量更新回写。
+
+    service._channels_from_result 也有同样的活，但它在 service 层、还丢了
+    grade/source 等只在写盘时用到的字段；这里就地还原一份完整的，避免
+    增量更新把别的模块条目回写后掉字段。缺 slug 又没 url 的条目跳过。
+    """
+    out: list[Channel] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        streams: list[Stream] = []
+        for item in row.get("streams") or []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "")
+            slug = str(item.get("slug") or "")
+            if not url and not slug:
+                continue
+            streams.append(
+                Stream(
+                    url=url,
+                    slug=slug,
+                    tvg_id=str(item.get("tvg_id") or ""),
+                    height=int(item.get("height") or 0),
+                    width=int(item.get("width") or 0),
+                    codec=str(item.get("codec") or ""),
+                    bandwidth=int(item.get("bandwidth_kbps") or 0) * 1000,
+                    speed_mbps=float(item.get("speed_mbps") or 0),
+                    delay_ms=int(item.get("delay_ms") or 0),
+                    segment_duration=float(item.get("segment_duration") or 0),
+                    source=str(item.get("source") or ""),
+                    stale=bool(item.get("stale")),
+                    note=str(item.get("note") or ""),
+                )
+            )
+        name = str(row.get("name") or "")
+        if name and streams:
+            out.append(Channel(name=name, group=str(row.get("group") or "未分组"), streams=streams))
+    return out
+
+
+def _merge_module_result(
+    settings: Settings, fresh: list[Channel], module: str, log: Logger,
+) -> tuple[list[Channel], dict]:
+    """增量更新：只替换目标模块，其它模块原样保留。
+
+    从上一轮 result.json 读回所有频道，丢掉属于 ``module`` 的旧条目，换成这轮
+    新采到的；其余模块一个字段都不动。返回合并后的频道和上一轮的 report，
+    供调用方把统计数字也合并回去（面板的统计卡不能因为只更了一个源就归零）。
+    """
+    prev = load_result(settings) or {}
+    prev_report = prev.get("report") or {}
+    kept = [
+        ch for ch in _rows_to_channels(prev.get("channels") or [])
+        if display_module(ch.group) != module
+    ]
+    if not fresh:
+        log(f"[增量] 模块「{module}」本轮没有采到可用频道，保留上一轮该模块数据")
+        # 新结果为空时整组保留旧的，绝不让点一次更新就把这个模块清空
+        kept = _rows_to_channels(prev.get("channels") or [])
+    else:
+        log(f"[增量] 模块「{module}」替换 {len(fresh)} 个频道，其它模块原样保留")
+    return kept + fresh, prev_report
+
+
+def _merge_module_report(report: RunReport, prev: dict, module: str) -> None:
+    """把增量这一轮的统计并回上一轮：总数/分组数沿用上一轮，来源列表只换目标模块。"""
+    report.scope_module = module
+    report.collected = int(prev.get("collected") or 0) + report.collected
+    report.probed = int(prev.get("probed") or 0) + report.probed
+    report.alive = int(prev.get("alive") or 0) + report.alive
+    report.channels_total = int(prev.get("channels_total") or 0) + report.channels_total
+    report.channels_matched = int(prev.get("channels_matched") or 0) + report.channels_matched
+    old_sources = [
+        row for row in (prev.get("sources") or [])
+        if display_module(str(row.get("name") or "")) != module
+    ]
+    report.sources = old_sources + report.sources
+    report.missing = list(prev.get("missing") or []) + report.missing
+
+
+def run_update(settings: Settings, log: Logger | None = None, *, only_module: str = "") -> RunReport:
+    """跑一轮更新。``only_module`` 指定时只重采这一个模块，其它模块沿用上一轮结果。"""
     log = log or _noop
     report = RunReport(started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if only_module:
+        report.scope_module = only_module
     started = time.monotonic()
 
     # 容器里挂着的旧默认模板不会随镜像更新，这里补一刀（用户改过的不动）
@@ -590,6 +681,21 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     log(f"[模板] 载入 {len(template)} 个频道（只用于归一化名字，不再裁台）")
 
     sources = load_sources(settings, log)
+    if only_module:
+        # 只保留属于目标模块的源：内置模块按展示名归一后比对，单源模块名字相等即命中。
+        # 注意这一步在 disabled 标记之前，面板刚打开开关就会写进 settings，所以
+        # 新打开的模块此时 enabled=True，会正常被采进来。
+        sources = [s for s in sources if display_module(str(s.get("name") or "").strip()) == only_module]
+        if not sources:
+            log(f"[增量] 模块「{only_module}」没有可用采集源，本轮什么都没动")
+            report.published = _previous_published(settings)
+            # 统计沿用上一轮，别让面板因为一次空更新把全局数字清零
+            prev = (load_result(settings) or {}).get("report") or {}
+            for key in ("collected", "probed", "alive", "channels_total", "channels_matched"):
+                setattr(report, key, int(prev.get(key) or 0))
+            report.sources = list(prev.get("sources") or [])
+            report.missing = list(prev.get("missing") or [])
+            return report
     measure_round = _is_measure_round(settings)
     if measure_round:
         # 抽测轮：主源临时打开 resolve + verify_segment，去取真实地址并测速。
@@ -606,6 +712,18 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     report.collected = len(raw_streams)
     if not raw_streams:
         report.published = _previous_published(settings)
+        if only_module:
+            # 目标模块一条都没采到：列表不覆盖（其它模块原样在盘上），
+            # 统计也沿用上一轮，避免面板把全局数字清零。
+            prev = (load_result(settings) or {}).get("report") or {}
+            for key in ("probed", "alive", "channels_total", "channels_matched"):
+                setattr(report, key, int(prev.get(key) or 0))
+            old_sources = [
+                row for row in (prev.get("sources") or [])
+                if display_module(str(row.get("name") or "")) != only_module
+            ]
+            report.sources = old_sources + source_stats
+            report.missing = list(prev.get("missing") or [])
         log("! 采集结果为空，保留上一次的列表，终止")
         return report
 
@@ -670,8 +788,13 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     # 走同一条频道级地址，点播失败时只在这个模块内部换线，不串到别的模块。
     channels = _module_channels(alive, settings.max_per_channel, log, template=template)
     _carry_over(settings, channels, log)
+    # 统计先按「本轮新采到的」记，增量模式下面再和上一轮合并成面板要的全局数
     report.channels_total = len(channels)
     report.channels_matched = len([c for c in channels if c.streams])
+
+    prev_report: dict = {}
+    if only_module:
+        channels, prev_report = _merge_module_result(settings, channels, only_module, log)
 
     out_dir = settings.data_dir
     m3u_path = out_dir / "result.m3u"
@@ -687,6 +810,13 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
         # 上游集体抽风或被限流时也会走到这里。宁可留着上一轮能用的列表，
         # 也不能把它覆盖成空文件——那会让正在播的客户端当场全断。
         report.published = prev_published
+        if report.scope_module:
+            report.collected = 0
+            report.probed = 0
+            report.alive = 0
+            report.channels_total = 0
+            report.channels_matched = 0
+            report.sources = []
         log("! 本轮 0 条可用流，保留上一次的列表不覆盖，下一轮再试")
         return report
 
@@ -702,6 +832,9 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     writers.write_txt(channels, txt_path, relay_base=settings.public_url,
                       lines_per_channel=settings.lines_per_channel,
                       failover=settings.failover)
+    if only_module:
+        # published 上面已按合并后的完整列表算好，不再叠加；其余统计项才合并
+        _merge_module_report(report, prev_report, only_module)
     writers.write_json(channels, json_path, report)
     writers.write_json(channels, out_dir / "latest.json", report)
     log(

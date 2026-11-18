@@ -247,6 +247,8 @@ class RunReport:
     sources: list[dict] = field(default_factory=list)
     # 模板里有、这轮却拿不到的台；reason 说明是上游没有还是被限流
     missing: list[dict] = field(default_factory=list)
+    # 增量更新：本次只刷新了哪个模块（空 = 全量）。面板据此提示"其它模块保持不动"。
+    scope_module: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -261,4 +263,5 @@ class RunReport:
             "channels_matched": self.channels_matched,
             "sources": self.sources,
             "missing": self.missing,
+            "scope_module": self.scope_module,
         }

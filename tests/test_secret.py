@@ -218,6 +218,32 @@ class TestWithoutSecret(_ServerCase):
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)["settings"]["secret"], "")
 
+    def test_update_passes_module_to_trigger(self):
+        """增量更新：POST 带 module 时原样传给 trigger，空 body 仍走全量。"""
+        captured: list[str] = []
+        original = self.state.trigger
+
+        def fake_trigger(module: str = "") -> bool:
+            captured.append(module)
+            return True
+
+        self.state.trigger = fake_trigger  # type: ignore[method-assign]
+        self.addCleanup(setattr, self.state, "trigger", original)
+
+        code, body = self.post("/api/update", {"module": "运营商官方源"})
+        self.assertEqual(code, 200)
+        data = json.loads(body)
+        self.assertTrue(data["started"])
+        self.assertEqual(data["module"], "运营商官方源")
+        self.assertIn("运营商官方源", data["message"])
+        self.assertEqual(captured, ["运营商官方源"])
+
+        # 顶栏全量按钮：空 body，module 为空字符串
+        code, body = self.post("/api/update")
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["module"], "")
+        self.assertEqual(captured, ["运营商官方源", ""])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -199,9 +199,35 @@ class TestPanel(unittest.TestCase):
         self.assertNotIn("max-width: 1280px", css)
 
         js = (WEB / "app.js").read_text(encoding="utf-8")
-        # 同一批地址填两处：原订阅页 + 数据源页内联栏
+        # 订阅地址只剩模块页内联栏这一处
         for eid in ("subUrlM3u", "subUrlTxt", "subUrlEpg", "subUrlJson"):
             self.assertIn(f'{eid}:', js)
+
+    def test_standalone_subscribe_page_removed_and_nav_renamed(self):
+        """独立订阅页合并进「源数据与订阅地址」，导航与白名单都不再留 subscribe。"""
+        html = (WEB / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn('id="subscribePanel"', html)
+        self.assertNotIn('data-view="subscribe"', html)
+        self.assertIn('data-view="modules">源数据与订阅地址</button>', html)
+        # 状态页「复制订阅地址」按钮改跳合并后的模块页
+        self.assertIn('data-goto="modules">复制订阅地址</button>', html)
+        # .m3u 结尾的说明搬进了合并页的订阅栏
+        self.assertIn("地址要以 <code>.m3u</code> 结尾", html)
+
+        js = (WEB / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn('"subscribe"', js)
+        self.assertNotIn('urlM3u:', js)
+
+    def test_module_card_has_update_source_button(self):
+        """每个模块卡片有「更新此源」，关闭的模块禁用并提示先开开关。"""
+        js = (WEB / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-update=', js)
+        self.assertIn('class="builtin-update"', js)
+        self.assertIn('disabled title="先打开开关再更新"', js)
+        self.assertIn("async function updateOneModule", js)
+        # 一步到位：先保存开关，再带模块名触发增量更新
+        self.assertIn('saveSettings("btnModuleSave", "moduleNote")', js)
+        self.assertIn("JSON.stringify({ module: name })", js)
         self.assertIn('$("subEpgNote")', js)
 
 

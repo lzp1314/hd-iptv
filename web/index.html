@@ -26,8 +26,7 @@
     <nav class="nav" aria-label="分区导航">
       <button class="nav-item is-on" type="button" data-view="status">状态</button>
       <button class="nav-item" type="button" data-view="channels">我的频道</button>
-      <button class="nav-item" type="button" data-view="subscribe">订阅地址</button>
-      <button class="nav-item" type="button" data-view="modules">数据源</button>
+      <button class="nav-item" type="button" data-view="modules">源数据与订阅地址</button>
       <button class="nav-item" type="button" data-view="region">宽带与省份</button>
       <button class="nav-item" type="button" data-view="settings">运行设置</button>
       <button class="nav-item" type="button" data-view="logs">运行日志</button>
@@ -63,7 +62,7 @@
       </div>
       <div class="kv-actions">
         <button class="btn" type="button" data-goto="channels">去我的频道</button>
-        <button class="btn" type="button" data-goto="subscribe">复制订阅地址</button>
+        <button class="btn" type="button" data-goto="modules">复制订阅地址</button>
         <button class="btn" type="button" data-goto="region">看宽带与省份</button>
         <button class="btn" type="button" data-goto="settings">去运行设置</button>
       </div>
@@ -83,36 +82,6 @@
         <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
       </div>
     </section>
-
-  <section class="panel view" id="subscribePanel" data-view="subscribe" hidden>
-    <h2>订阅地址</h2>
-    <p class="hint">
-      填进播放器（观屿TV / TiviMate / 影视 / Kodi / PotPlayer 均可）。
-      地址要以 <code>.m3u</code> 结尾——播放器把 <code>.m3u8</code> 当成「单个直播流」解析，
-      拿去当订阅就会提示「播放格式不受支持」。这里列出的地址已排除你隐藏的台。
-    </p>
-    <div class="url-row">
-      <span class="tag">M3U</span>
-      <input id="urlM3u" readonly value="/playlist.m3u">
-      <button class="btn" data-copy="urlM3u">复制</button>
-    </div>
-    <div class="url-row">
-      <span class="tag">TXT</span>
-      <input id="urlTxt" readonly value="/txt">
-      <button class="btn" data-copy="urlTxt">复制</button>
-    </div>
-    <div class="url-row">
-      <span class="tag">EPG</span>
-      <input id="urlEpg" readonly value="/epg.xml">
-      <button class="btn" data-copy="urlEpg">复制</button>
-    </div>
-    <div class="url-row">
-      <span class="tag">JSON</span>
-      <input id="urlJson" readonly value="/json">
-      <button class="btn" data-copy="urlJson">复制</button>
-    </div>
-    <p class="hint" id="epgNote">节目单：等待首轮更新</p>
-  </section>
 
   <section class="panel view" id="settingsPanel" data-view="settings" hidden>
     <div class="panel-head">
@@ -163,7 +132,7 @@
     <div class="module-layout">
       <div class="module-main">
         <div class="panel-head">
-          <h2>数据源 <span class="count">模块开关</span></h2>
+          <h2>源数据与订阅地址 <span class="count">模块开关</span></h2>
           <button id="btnModuleSave" class="btn primary">保存配置</button>
         </div>
         <p class="hint">
@@ -171,6 +140,7 @@
           订阅里也立刻消失，不用等下一轮更新。想让订阅里只有咪咕，就只打开「咪咕视频」。
         </p>
         <p class="hint result" id="moduleStatus" hidden></p>
+        <p class="hint result" id="moduleUpdateNote" hidden></p>
         <div id="builtinModules" class="builtin-modules"></div>
         <details class="more-sources" id="moreSourcesBox">
           <summary>更多源 <span class="hint">（sources.toml 里的其它条目，各自独立开关）</span></summary>
@@ -186,8 +156,10 @@
           <h2>订阅地址 <span class="count">改动即时生效</span></h2>
         </div>
         <p class="hint">
-          填进播放器即可（地址以 <code>.m3u</code> 结尾）。上面改模块开关、点「保存配置」后，
-          订阅内容即时按新组合输出，这里不用重新更新。
+          填进播放器（观屿TV / TiviMate / 影视 / Kodi / PotPlayer 均可）。
+          地址要以 <code>.m3u</code> 结尾——播放器把 <code>.m3u8</code> 当成「单个直播流」解析，
+          拿去当订阅就会提示「播放格式不受支持」。列出的地址已排除你隐藏的台。
+          改模块开关、点「保存配置」后即时按新组合输出，不用重新更新。
         </p>
         <div class="url-row">
           <span class="tag">M3U</span>

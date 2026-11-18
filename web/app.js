@@ -43,12 +43,8 @@ function esc(text) {
 }
 
 function fillUrls() {
+  // 订阅地址已并入「源数据与订阅地址」页右侧常驻栏，这里只填那一组输入框
   const map = {
-    urlM3u: "/playlist.m3u",
-    urlTxt: "/txt",
-    urlEpg: "/epg.xml",
-    urlJson: "/json",
-    // 数据源页右侧常驻的订阅栏：和「订阅地址」页是同一批地址，两个地方都要填
     subUrlM3u: "/playlist.m3u",
     subUrlTxt: "/txt",
     subUrlEpg: "/epg.xml",
@@ -69,10 +65,11 @@ function setDot(state) {
 }
 
 // ---------------- 分区切换 ----------------
-// 一页一个分区：状态 / 我的频道 / 订阅地址 / 数据源 / 宽带与省份 / 运行设置 / 运行日志。
+// 一页一个分区：状态 / 我的频道 / 源数据与订阅地址 / 宽带与省份 / 运行设置 / 运行日志。
+// 原来的「订阅地址」单独页已合并进「源数据与订阅地址」页，不再是一个分区。
 // 状态卡在 .statbar 里，不参与切换，所以切到哪个分区都还看得见。
 // 新加分区必须同步登记到这里，否则 setView 会把名字当无效值退回状态页。
-const VIEWS = ["status", "channels", "subscribe", "modules", "region", "settings", "logs"];
+const VIEWS = ["status", "channels", "modules", "region", "settings", "logs"];
 
 function setView(name, syncHash = true) {
   if (!VIEWS.includes(name)) name = "status";
@@ -253,7 +250,6 @@ async function loadStatus() {
     fillOverview(d);
 
     const epgNoteText = epgText(d.epg);
-    if ($("epgNote")) $("epgNote").textContent = epgNoteText;
     if ($("subEpgNote")) $("subEpgNote").textContent = epgNoteText;
     fillSettings(d.settings || {});
 
@@ -294,7 +290,7 @@ function fillSettings(s) {
       ? "已绑定咪咕账号：换票会按账号权益给画质。令牌不再显示，留空表示不修改。"
       : "当前为游客模式：最高标清 540P。要提画质请在上面填账号 ID 和令牌。";
   }
-  // 数据源模块：四个内置大类置顶（点开看说明/配置），其余源收进「更多源」。
+  // 源数据模块：四个内置大类置顶（点开看说明/配置），其余源收进「更多源」。
   // 清单由后端从 sources.toml + 注入源实时生成，前端不写死模块名字。
   const catalog = s.modules || {};
   const builtins = Array.isArray(catalog.builtins) ? catalog.builtins : [];
@@ -324,6 +320,10 @@ function fillSettings(s) {
       const detail = members.length
         ? `包含底层源：${members.map(esc).join("、")}`
         : "当前配置里没有这一组的底层源，打开后下一轮才会采集。";
+      // 关闭的模块不给「更新此源」：开关关着时订阅也会把它过滤掉，更新了看不到
+      const updateBtn = m.enabled
+        ? `<button type="button" class="builtin-update" data-update="${esc(name)}">更新此源</button>`
+        : `<button type="button" class="builtin-update" disabled title="先打开开关再更新">更新此源</button>`;
       return `<div class="builtin-module" data-module="${esc(name)}">`
         + `<div class="builtin-head">`
         + `<label class="builtin-toggle">`
@@ -334,7 +334,10 @@ function fillSettings(s) {
         + `</div>`
         + `<p class="builtin-status ${statusCls}">${esc(statusTxt)}</p>`
         + (chips ? `<div class="builtin-chips">${chips}</div>` : `<p class="hint">${detail}</p>`)
+        + `<div class="builtin-actions">`
+        + updateBtn
         + `<button type="button" class="builtin-config-btn" data-config="${esc(name)}">配置 ›</button>`
+        + `</div>`
         + `</div>`;
     }).join("");
   }
@@ -431,7 +434,7 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     // 空字符串是有意义的：表示把密码关掉
     secret: $("setSecret") ? $("setSecret").value.trim() : "",
   };
-  // 模块开关只在「数据源」页保存时提交，别的页不碰它。
+  // 模块开关只在「源数据与订阅地址」页保存时提交，别的页不碰它。
   // 内置卡片(.builtin-toggle)和更多源(.module-row)的开关都带 data-module，
   // 统一往上找这个属性，不写死某一层容器。
   if (btnId === "btnModuleSave") {
@@ -897,6 +900,46 @@ async function triggerUpdate() {
   setTimeout(refresh, 600);
 }
 
+// 模块卡片「更新此源」：一步到位。
+// 先把当前所有开关（用户刚打开/关掉的）保存下去，再带模块名触发增量更新——
+// 这样新打开的模块此刻是 enabled 状态，后端才采得到；顺序反了会漏采。
+// 分开两个请求而不是塞进一个接口，是为了复用已有的设置保存逻辑（含密码校验）。
+async function updateOneModule(name) {
+  // 专用提示条：moduleStatus 会被 5 秒轮询的 fillSettings 改写，进度/结果放这里才留得住
+  const note = $("moduleUpdateNote");
+  const setNote = (text, cls) => {
+    if (!note) return;
+    note.hidden = false;
+    note.textContent = text;
+    note.className = "hint result" + (cls ? " " + cls : "");
+  };
+  // 找到这张卡片上的按钮并临时禁用，避免连点触发两次
+  const card = document.querySelector(`.builtin-module[data-module="${CSS.escape(name)}"]`);
+  const btn = card ? card.querySelector("[data-update]") : null;
+  if (btn) btn.disabled = true;
+  try {
+    await saveSettings("btnModuleSave", "moduleNote");
+    setNote(`已保存开关，正在只更新「${name}」…`);
+    const r = await fetch("api/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ module: name }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    setNote(
+      d.started
+        ? `已开始只更新「${name}」，其它源保持不动。完成后订阅会包含所有已启用的源。`
+        : (d.message || "已有任务在执行，稍后再试。")
+    );
+  } catch (e) {
+    setNote("更新失败：" + e.message, "err");
+  } finally {
+    // 更新是异步的，稍等再拉一次状态；之后 5 秒轮询会继续跟进进度
+    setTimeout(refresh, 600);
+  }
+}
+
 async function checkUpdate() {
   const btn = $("btnCheckUpdate");
   const out = $("updateResult");
@@ -1244,6 +1287,11 @@ document.addEventListener("DOMContentLoaded", () => {
   // 动态渲染，用事件委托绑在容器上。
   if ($("builtinModules")) {
     $("builtinModules").addEventListener("click", (e) => {
+      const updBtn = e.target.closest("[data-update]");
+      if (updBtn) {
+        if (!updBtn.disabled) updateOneModule(updBtn.dataset.update);
+        return;
+      }
       const cfgBtn = e.target.closest("[data-config]");
       if (!cfgBtn) return;
       const card = cfgBtn.closest(".builtin-module");
