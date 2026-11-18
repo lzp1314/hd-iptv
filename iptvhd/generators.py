@@ -409,11 +409,69 @@ def _ysp_group(slug: str) -> str:
     return "央视" if slug.startswith(("cctv", "cgtn")) else "卫视"
 
 
+class MiguCollector(Collector):
+    """咪咕视频公开频道。
+
+    采集阶段只拉频道表拿到「名字 → 数字编号」，不换票、不带账号——这是唯一
+    能保证一轮更新不把出口打进平台限流的做法（参见 migu 模块说明）。播放时
+    才用编号换当前有效的调度地址，并由播放器就近取流。
+
+    这些流有两条去处：给模板里已有的台补一条官方线路，以及按原始频道名单独
+    成「咪咕视频」分组全量输出（由 pipeline 负责）。
+
+    配置项：refresh_minutes 频道表缓存分钟数；groups 只取这些分组，空 = 全部。
+    """
+
+    kind = "migu"
+
+    def collect(self, client: HttpClient) -> list[Stream]:
+        from pathlib import Path
+
+        from . import migu
+
+        refresh = float(self.config.get("refresh_minutes", 360) or 360)
+        data_dir = Path(str(self.config.get("data_dir", "") or ""))
+        if not str(data_dir) or not data_dir.is_absolute():
+            data_dir = Path(__file__).resolve().parent.parent / "output"
+        rows = migu.fetch_channels(client, timeout_minutes=refresh, data_dir=data_dir)
+
+        want = {str(x).strip() for x in (self.config.get("groups") or []) if str(x).strip()}
+        rate = int(self.config.get("rate", 2) or 2)
+        height = migu.RATES.get(rate, migu.RATES[migu.DEFAULT_RATE])[1]
+
+        streams: list[Stream] = []
+        for row in rows:
+            if want and row.group not in want:
+                continue
+            streams.append(
+                Stream(
+                    url="",
+                    raw_name=row.name,
+                    group=row.group or "咪咕",
+                    logo=row.logo,
+                    slug=f"m:{row.pid}",
+                    trusted=True,
+                    hint_height=height,
+                    height=height,
+                    playlist_only=True,
+                    ok=True,
+                )
+            )
+        self.notes = []
+        tagged = self._tag(streams)
+        # _tag() 用 config["trust"] 覆盖 trusted，而咪咕源是代码注入的，
+        # 配置里没有这个键——不补回来的话 127 条全变成第三方源，排序丢官方加权。
+        for s in tagged:
+            s.trusted = True
+        return tagged
+
+
 GENERATORS = {
     YangshipinCollector.kind: YangshipinCollector,
     CctvCollector.kind: CctvCollector,
     ZhejiangCollector.kind: ZhejiangCollector,
     TemplateCollector.kind: TemplateCollector,
+    MiguCollector.kind: MiguCollector,
 }
 
 __all__ = [
@@ -422,4 +480,5 @@ __all__ = [
     "CctvCollector",
     "ZhejiangCollector",
     "TemplateCollector",
+    "MiguCollector",
 ]

@@ -209,18 +209,32 @@ def slug_ua(slug: str) -> str:
 # 就换下一路，播放器这边看到的永远是同一个地址，不需要重新拉订阅。等于把
 # 「这个台有好几条源」这件事从列表里挪到了服务端。
 CHANNEL_PREFIX = "c:"
+# 模块名与频道名的分隔符。选控制字符是因为它不可能出现在配置里的频道名中，
+# 也不需要转义；旧 slug 没有这个字符，解析时按「整个都是频道名」兼容。
+_MODULE_SEP = "\x1f"
 
 
-def channel_slug(name: str) -> str:
-    """为频道生成频道级 slug。"""
-    return CHANNEL_PREFIX + encode(name)
+def channel_slug(name: str, module: str = "") -> str:
+    """为频道生成频道级 slug。
+
+    ``module`` 是源条目的名字（如「咪咕视频」「运营商官方源」）。同一个台在
+    不同模块里各自成组，必须各自用一个地址——否则两条线共用一个 ``c:``
+    地址，用户在某个分组里点播却换到了另一个模块的线路，模块隔离就破了。
+    """
+    key = f"{module}{_MODULE_SEP}{name}" if module else name
+    return CHANNEL_PREFIX + encode(key)
 
 
 def channel_name(slug: str) -> str:
-    """从频道级 slug 还原频道名；不是频道级 slug 返回空串。"""
+    """从频道级 slug 还原频道名；不是频道级 slug 返回空串。
+
+    带模块前缀的新 slug 只返回频道名部分，模块信息仍完整保留在 ``slug`` 本身
+    （线路表按完整 slug 建索引），这里剥掉只是给日志和展示用。
+    """
     if not slug.startswith(CHANNEL_PREFIX):
         return ""
-    return decode(slug[len(CHANNEL_PREFIX):])
+    raw = decode(slug[len(CHANNEL_PREFIX):])
+    return raw.split(_MODULE_SEP, 1)[-1] if _MODULE_SEP in raw else raw
 
 
 

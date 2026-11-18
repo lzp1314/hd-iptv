@@ -272,6 +272,36 @@ function fillSettings(s) {
   if ($("setCache")) $("setCache").value = s.cache_mb != null ? s.cache_mb : "";
   if ($("setEpgSource")) $("setEpgSource").value = s.epg_source || "";
   if ($("setSecret")) $("setSecret").value = s.secret || "";
+  if ($("setMiguEnabled")) $("setMiguEnabled").value = s.migu_enabled === false ? "0" : "1";
+  if ($("setMiguUser")) $("setMiguUser").value = s.migu_user_id || "";
+  // 令牌不回传：框里始终留空，留空 = 不修改
+  if ($("setMiguToken")) $("setMiguToken").value = "";
+  if ($("setMiguRate")) $("setMiguRate").value = String(s.migu_rate || 2);
+  if ($("setMiguH265")) $("setMiguH265").checked = s.migu_h265 !== false;
+  if ($("setMiguDispatch")) $("setMiguDispatch").checked = s.migu_client_dispatch !== false;
+  if ($("setMiguRefresh")) $("setMiguRefresh").value = s.migu_refresh != null ? s.migu_refresh : 360;
+  if ($("miguStatus") && s.migu_account_set !== undefined) {
+    $("miguStatus").hidden = false;
+    $("miguStatus").textContent = s.migu_account_set
+      ? "已绑定咪咕账号：换票会按账号权益给画质。令牌不再显示，留空表示不修改。"
+      : "当前为游客模式：最高标清 540P。要提画质请在上面填账号 ID 和令牌。";
+  }
+  // 数据源模块清单由后端从 sources.toml + 注入源实时生成，前端不写死名字
+  if ($("moduleList") && Array.isArray(s.modules)) {
+    $("moduleList").innerHTML = s.modules.map((m) => {
+      const name = String(m.name || "");
+      return `<label class="module-row" data-module="${esc(name)}">`
+        + `<input type="checkbox" class="module-switch"${m.enabled ? " checked" : ""}>`
+        + `<span class="module-name">${esc(name)}</span>`
+        + `<span class="module-type">${esc(String(m.type || ""))}</span>`
+        + "</label>";
+    }).join("") || '<p class="hint">暂无数据源，请检查 config/sources.toml。</p>';
+    if ($("moduleStatus")) {
+      $("moduleStatus").hidden = false;
+      const on = s.modules.filter((m) => m.enabled).length;
+      $("moduleStatus").textContent = `共 ${s.modules.length} 个模块，已启用 ${on} 个。`;
+    }
+  }
 }
 
 // 两个分区各有一颗「保存」，都提交同一份设置（表单控件在 DOM 里始终存在，
@@ -293,6 +323,25 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     // 空字符串是有意义的：表示把密码关掉
     secret: $("setSecret") ? $("setSecret").value.trim() : "",
   };
+  // 模块开关只在「数据源」页保存时提交，别的页不碰它
+  if (btnId === "btnModuleSave") {
+    payload.disabled_modules = Array.from(document.querySelectorAll(".module-switch"))
+      .filter((el) => !el.checked)
+      .map((el) => el.closest(".module-row").dataset.module);
+  }
+  // 咪咕字段只在咪咕页自己保存时提交。别的页共用一个 saveSettings，
+  // 它们的表单控件虽在 DOM 里、但用户没填过，误提交会把账号清空。
+  if (btnId === "btnMiguSave") {
+    payload.migu_enabled = $("setMiguEnabled").value === "1";
+    payload.migu_user_id = $("setMiguUser").value.trim();
+    payload.migu_rate = Number($("setMiguRate").value);
+    payload.migu_h265 = $("setMiguH265").checked;
+    payload.migu_client_dispatch = $("setMiguDispatch").checked;
+    payload.migu_refresh = Number($("setMiguRefresh").value || 360);
+    // 令牌留空 = 不修改（后端不回传，前端框每次都是空的）
+    const miguToken = $("setMiguToken").value.trim();
+    if (miguToken) payload.migu_token = miguToken;
+  }
   btn.disabled = true;
   try {
     const r = await fetch("api/settings", {
@@ -315,7 +364,25 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
       setTimeout(() => { location.href = home; }, 500);
       return;
     }
-    if (btnId === "btnRegionSave") {
+    if (btnId === "btnModuleSave") {
+      const st = d.settings || {};
+      const mods = st.modules || [];
+      const on = mods.filter((m) => m.enabled).map((m) => m.name);
+      const off = mods.filter((m) => !m.enabled).map((m) => m.name);
+      note.textContent = `已保存：启用 ${on.length} 个模块（${on.join("、") || "无"}），`
+        + `关闭 ${off.length} 个（${off.join("、") || "无"}）。`
+        + "订阅链接立即按这个组合输出；关掉的模块下一轮也不再采集。";
+      fillSettings(st);
+    } else if (btnId === "btnMiguSave") {
+      const st = d.settings || {};
+      $("miguNote").textContent = `已保存：咪咕${st.migu_enabled === false ? "已关闭" : "已启用"}、`
+        + `画质 ${({2: "标清 540p", 3: "高清 720p", 4: "蓝光 1080p", 7: "原画", 9: "4K"})[st.migu_rate] || "标清"}、`
+        + `H.265 ${st.migu_h265 === false ? "关" : "开"}、`
+        + `客户端就近取流 ${st.migu_client_dispatch === false ? "关" : "开"}。`
+        + (st.migu_account_set ? "账号已绑定。" : "当前游客模式。")
+        + "画质与开关立即生效；频道有变动时点一次「立即更新」。";
+      fillSettings(st);
+    } else if (btnId === "btnRegionSave") {
       // 宽带与省份页：只报这一页关心的三样，别把间隔/缓存也塞进来
       const picked = (id) => {
         const el = $(id);
@@ -1051,6 +1118,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btnCheckUpdate").addEventListener("click", checkUpdate);
   $("btnSaveSettings").addEventListener("click", () => saveSettings());
   if ($("btnRegionSave")) $("btnRegionSave").addEventListener("click", () => saveSettings("btnRegionSave", "regionSaveNote"));
+  if ($("btnMiguSave")) $("btnMiguSave").addEventListener("click", () => saveSettings("btnMiguSave", "miguNote"));
+  if ($("btnModuleSave")) $("btnModuleSave").addEventListener("click", () => saveSettings("btnModuleSave", "moduleNote"));
+  // 模块开关是动态渲染的，用事件委托标脏，避免被轮询覆盖
+  if ($("moduleList")) $("moduleList").addEventListener("change", () => { settingsDirty = true; });
   if ($("btnProbe")) $("btnProbe").addEventListener("click", probeRegion);
   if ($("btnScan")) $("btnScan").addEventListener("click", scanProvince);
   loadRegionOptions().then(() => {
@@ -1109,7 +1180,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setAutoSwitch", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource"].forEach((id) => {
+  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setAutoSwitch", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource", "setMiguEnabled", "setMiguUser", "setMiguToken", "setMiguRate", "setMiguH265", "setMiguDispatch", "setMiguRefresh"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });

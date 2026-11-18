@@ -103,6 +103,21 @@ mode = "direct"
 # 「到底哪条线路有问题」、或者线路之间来回跳的时候用。
 auto_switch = true
 
+[migu]
+# 咪咕视频：央视/卫视等公开频道，播放时按 pID 现换票。
+# 账号留空 = 游客（最高标清）；填了按账号权益给高清及以上。
+# 账号与令牌只在本机参与换票，不写进播放地址、日志或订阅列表。
+enabled = true
+user_id = ""
+token = ""
+# 画质档位：2 标清 / 3 高清 / 4 蓝光 / 7 原画 / 9 4K
+rate = 2
+h265 = true
+# 客户端就近取流：换票后把调度地址交给播放器，由平台按播放器网络就近调度。
+# 跨网部署必开；服务器和播放器同网时可关。
+client_dispatch = true
+refresh_minutes = 360
+
 [epg]
 source = "https://epg.pw/xmltv/epg_CN.xml"
 ttl_hours = 6
@@ -179,6 +194,15 @@ def coerce_panel(raw: dict) -> dict:
     for key, value in (raw or {}).items():
         if key == "hidden":
             out[key] = clean_names(value)
+        elif key == "disabled_modules":
+            # 面板关掉的源模块。存名字而不是下标：sources.toml 增删条目后
+            # 下标会错位，名字才能稳稳对上同一个模块。
+            raw_list = value if isinstance(value, list) else str(value or "").split(",")
+            names = {
+                str(x).strip()[:128] for x in raw_list
+                if isinstance(x, str) and x.strip()
+            }
+            out[key] = sorted(names)
         elif key == "secret":
             # 只去掉两头的空白和斜杠，字符是否合法由 apply_settings 判定（那边能回 400）
             out[key] = str(value or "").strip().strip("/")
@@ -193,6 +217,35 @@ def coerce_panel(raw: dict) -> dict:
             out[key] = as_bool(value)
         elif key == "auto_switch":
             out[key] = as_bool(value)
+        elif key == "migu_enabled":
+            out[key] = as_bool(value)
+        elif key == "migu_h265":
+            out[key] = as_bool(value)
+        elif key == "migu_client_dispatch":
+            out[key] = as_bool(value)
+        elif key == "migu_user_id":
+            # 留空 = 清空账号（连同令牌一起，见 apply_settings）
+            out[key] = str(value or "").strip()[:256]
+        elif key == "migu_token":
+            # 留空 = 不修改（令牌不回传给面板，前端框始终是空的）。
+            # 要清空账号就把 migu_user_id 留空，那边会连同令牌一起清掉。
+            text = str(value or "").strip()[:256]
+            if text:
+                out[key] = text
+        elif key == "migu_rate":
+            try:
+                rate = int(value)
+            except (TypeError, ValueError):
+                continue
+            if rate in (2, 3, 4, 7, 9):
+                out[key] = rate
+        elif key == "migu_refresh":
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            if num == num:
+                out[key] = min(1440.0, max(1.0, num))
         elif key in ("region", "isp"):
             # 空串是有效值：表示「回到自动识别」。非空则归一化成拼音代码，
             # 认不出来就丢掉这一项（别把半截输入写进 panel.json 让采集去猜）。
@@ -261,6 +314,23 @@ class Settings:
 
     def panel_get(self, key: str):
         return self.panel.get(key)
+
+    @property
+    def disabled_modules(self) -> list[str]:
+        """面板上关掉的源模块名字。"""
+        raw = self.panel_get("disabled_modules")
+        if not isinstance(raw, list):
+            return []
+        return [str(x).strip() for x in raw if str(x).strip()]
+
+    def module_disabled(self, name: str) -> bool:
+        """这个源模块是不是被面板关掉了。
+
+        一处判断同时管采集和订阅输出：关掉的模块既不向它发请求，也不出现在
+        订阅里，两个动作不会各走各的、出现「不采集了但列表里还在」的错位。
+        """
+        text = str(name or "").strip()
+        return bool(text) and text in set(self.disabled_modules)
 
     # ---- 常用项 ----
     @property
@@ -588,6 +658,76 @@ class Settings:
         text = str(raw or "").strip().lower()
         return text if text in ("direct", "proxy") else "direct"
 
+    # ---- 咪咕视频 ----
+    @property
+    def has_migu_section(self) -> bool:
+        """配置文件里有没有 [migu] 段。新模板自带，旧配置由升级补上。
+
+        自建的最小配置（测试、精简部署）没有这一段，就不会凭空多一路网络采集。
+        """
+        return "migu" in self.data
+
+    @property
+    def migu_enabled(self) -> bool:
+        """是否启用咪咕线路。面板开关优先，其次环境变量，最后配置文件。"""
+        panel = self.panel_get("migu_enabled")
+        if panel is not None:
+            return as_bool(panel)
+        raw = os.environ.get("HDIPTV_MIGU_ENABLED")
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("migu", "enabled", True))
+
+    def _migu_value(self, panel_key: str, env_key: str, section_key: str, default):
+        panel = self.panel_get(panel_key)
+        if panel is not None:
+            return panel
+        raw = os.environ.get(env_key)
+        if raw is not None and str(raw).strip():
+            return raw
+        return self.get("migu", section_key, default)
+
+    @property
+    def migu_user_id(self) -> str:
+        """咪咕账号 ID。只在本机参与换票，绝不进播放地址或日志。"""
+        return str(self._migu_value("migu_user_id", "HDIPTV_MIGU_USER_ID", "user_id", "") or "").strip()
+
+    @property
+    def migu_token(self) -> str:
+        return str(self._migu_value("migu_token", "HDIPTV_MIGU_TOKEN", "token", "") or "").strip()
+
+    @property
+    def migu_rate(self) -> int:
+        """画质档位：2 标清 / 3 高清 / 4 蓝光 / 7 原画 / 9 4K。"""
+        raw = self._migu_value("migu_rate", "HDIPTV_MIGU_RATE", "rate", 2)
+        try:
+            rate = int(raw)
+        except (TypeError, ValueError):
+            return 2
+        return rate if rate in (2, 3, 4, 7, 9) else 2
+
+    @property
+    def migu_h265(self) -> bool:
+        raw = self._migu_value("migu_h265", "HDIPTV_MIGU_H265", "h265", True)
+        return as_bool(raw)
+
+    @property
+    def migu_client_dispatch(self) -> bool:
+        """客户端就近取流：换票后把未跳转的调度地址交给播放器，由平台按
+        播放器网络就近调度。跨网部署必开，同网可关。"""
+        raw = self._migu_value("migu_client_dispatch", "HDIPTV_MIGU_CLIENT_DISPATCH",
+                               "client_dispatch", True)
+        return as_bool(raw)
+
+    @property
+    def migu_refresh_minutes(self) -> float:
+        """频道表刷新间隔（分钟）。播放地址是点播时现换的，与它无关。"""
+        raw = self._migu_value("migu_refresh", "HDIPTV_MIGU_REFRESH", "refresh_minutes", 360)
+        try:
+            return min(1440.0, max(1.0, float(raw)))
+        except (TypeError, ValueError):
+            return 360.0
+
     @property
     def interval_hours(self) -> float:
         panel = self.panel_get("interval_hours")
@@ -691,6 +831,22 @@ def upgrade_config(path: Path) -> bool:
             "                             # 卡在 1080 会把唯一可用的地址整条丢掉",
             1,
         )
+    # 旧配置没有 [migu] 段：补一段默认值。这样升级后咪咕源会被注入，
+    # 而自建的最小配置（本来就刻意不写这段）保持原样。
+    # 用 [output] 作为「这是完整项目配置」的标记：最小测试/精简配置没有它。
+    if "[output]" in current and "[migu]" not in current:
+        current = current.rstrip() + """\n
+[migu]
+# 咪咕视频：央视/卫视等公开频道，播放时现换票，由播放器就近取流。
+# 账号留空 = 游客（最高标清）；填了按账号权益给高清及以上。
+enabled = true
+user_id = ""
+token = ""
+rate = 2
+h265 = true
+client_dispatch = true
+refresh_minutes = 360
+"""
     if "playlist_ttl = 2.5" in current:
         current = current.replace(
             "# 上游清单只有 3 个分片，服务端会把它们攒成 8 片的窗口再发出去。\n",

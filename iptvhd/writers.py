@@ -36,7 +36,9 @@ def failover_key(channel: Channel, lines_per_channel: int = 1) -> str:
         return ""
     if not any(str(s.url).lower().startswith("http") for s in usable):
         return ""
-    return channel_slug(channel.name)
+    # 模块名进 slug：同一个台在「咪咕视频」和「运营商官方源」里各有一组线路，
+    # 必须各用各的换线地址，不能在某个分组里点到另一个模块的源。
+    return channel_slug(channel.name, channel.group)
 
 
 def _play_url(stream: Stream, relay_base: str, channel_key: str = "") -> str:

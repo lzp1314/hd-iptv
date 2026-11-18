@@ -47,7 +47,7 @@ class TestFailoverKey(unittest.TestCase):
         self.assertEqual(writers.failover_key(_channel("A", 1)), "")
 
     def test_two_lines_switch_to_channel_address(self):
-        self.assertEqual(writers.failover_key(_channel("A", 2)), channel_slug("A"))
+        self.assertEqual(writers.failover_key(_channel("A", 2)), channel_slug("A", "测试"))
 
     def test_manual_lines_disables_failover(self):
         # 用户主动要「手动切线路」时不能把多行塌缩成同一个地址
@@ -59,7 +59,7 @@ class TestFailoverKey(unittest.TestCase):
 
     def test_mixed_lines_ok(self):
         # 一条真地址 + 一条换票源：真地址那条能跑，就值得挂上去
-        self.assertEqual(writers.failover_key(_channel("A", 1, n_slug=1)), channel_slug("A"))
+        self.assertEqual(writers.failover_key(_channel("A", 1, n_slug=1)), channel_slug("A", "测试"))
 
 
 class TestRenderUsesChannelAddress(unittest.TestCase):
@@ -67,7 +67,7 @@ class TestRenderUsesChannelAddress(unittest.TestCase):
         ch = _channel("CCTV-1", 3)
         text, count = writers.render_m3u([ch], relay_base="http://h")
         self.assertEqual(count, 1)
-        self.assertIn(f"/live/{channel_slug('CCTV-1')}.m3u8", text)
+        self.assertIn(f"/live/{channel_slug('CCTV-1', '测试')}.m3u8", text)
         # 地址不随更新变化：这一行写死，播放器收藏的一直有效
         again, _ = writers.render_m3u([ch], relay_base="http://h")
         self.assertEqual(text, again)
@@ -81,7 +81,7 @@ class TestRenderUsesChannelAddress(unittest.TestCase):
     def test_txt_uses_same_address(self):
         ch = _channel("CCTV-1", 2)
         text, _ = writers.render_txt([ch], relay_base="http://h")
-        self.assertIn(f"CCTV-1,http://h/live/{channel_slug('CCTV-1')}.m3u8", text)
+        self.assertIn(f"CCTV-1,http://h/live/{channel_slug('CCTV-1', '测试')}.m3u8", text)
 
 
 class TestLiveTarget(unittest.TestCase):

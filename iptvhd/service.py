@@ -15,7 +15,7 @@ from . import __version__, writers
 from .epg import Epg
 from .logos import Logos
 from .models import Channel, Stream
-from .pipeline import load_result, run_update
+from .pipeline import load_result, load_sources, run_update
 from .relay import Relay, RelayError, channel_name, channel_slug, static_ua
 from .region import detect
 from .settings import Settings, clean_secret, coerce_panel, write_panel
@@ -166,6 +166,39 @@ def _visible(channels: list[Channel], hidden: list[str]) -> list[Channel]:
     return [c for c in channels if c.name not in blocked]
 
 
+def _module_catalog(settings: Settings) -> list[dict]:
+    """面板「数据源」页要列的模块清单。
+
+    直接复用 load_sources：它已经把 sources.toml、程序注入的咪咕、本省自动源
+    汇到一起，并把面板关掉的标成 enabled=False。这里只读本地配置，不发网络。
+    """
+    try:
+        sources = load_sources(settings)
+    except Exception:  # noqa: BLE001 - 面板不该因为一份写坏的 sources.toml 打不开
+        sources = []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in sources:
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append({
+            "name": name,
+            "type": str(item.get("type") or ""),
+            "enabled": bool(item.get("enabled", True)),
+        })
+    return out
+
+
+def _module_visible(channels: list[Channel], settings: Settings) -> list[Channel]:
+    """订阅输出按启用的模块过滤：关掉的分组立刻消失，不用重新采集。"""
+    disabled = set(settings.disabled_modules)
+    if not disabled:
+        return channels
+    return [c for c in channels if c.group not in disabled]
+
+
 def _ysp_resolver(slug: str) -> tuple[str, str]:
     """中转层拿不到频道表之外的地址，这里的解析器只认 ysp 里的台。"""
     from . import ysp
@@ -175,6 +208,34 @@ def _ysp_resolver(slug: str) -> tuple[str, str]:
         raise RelayError(f"未知频道: {slug}")
     url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=2)
     return url, ysp.UA
+
+
+def migu_pid(slug: str) -> str:
+    """``m:<pid>`` → pid。不是咪咕 slug 返回空串。"""
+    return slug[2:] if slug.startswith("m:") and slug[2:].isdigit() else ""
+
+
+def migu_ticket(slug: str, settings: Settings) -> str:
+    """给咪咕频道换一张当前有效的调度地址。
+
+    账号、画质、H.265 都只在这里参与换票，不写进地址、日志或订阅。
+    返回的是**未请求过**的调度地址——交给播放器后，由平台按播放器的
+    网络就近调度，这一步是外省流畅的关键（见 migu 模块说明）。
+    """
+    from . import migu
+    from .net import HttpClient
+
+    pid = migu_pid(slug)
+    if not pid:
+        raise RelayError(f"不是咪咕频道: {slug}")
+    return migu.ticket(
+        pid,
+        settings.migu_rate,
+        user_id=settings.migu_user_id,
+        token=settings.migu_token,
+        h265=settings.migu_h265,
+        client=HttpClient(timeout=12, retries=1),
+    ).url
 
 
 def live_target(raw_slug: str) -> tuple[str, str] | None:
@@ -195,6 +256,12 @@ def live_target(raw_slug: str) -> tuple[str, str] | None:
     from .relay import static_url
 
     key = unquote(raw_slug)
+    if migu_pid(key):
+        # 咪咕频道按 pID 现换票，名字从频道表拿（拿不到就用编号，不影响播放）
+        from . import migu
+
+        label = migu.name_of(key[2:]) or f"咪咕-{key[2:]}"
+        return key, label
     row = ysp.CHANNEL_BY_SLUG.get(key.lower())
     if row is not None:
         return key.lower(), row[1]
@@ -289,7 +356,8 @@ class State:
                     items.append((url, slug))
                 if items:
                     # 顺序就是更新时算好的质量排序，第一条最该用
-                    lines[channel_slug(name)] = items
+                    group = str(row.get("group") or "")
+                    lines[channel_slug(name, group)] = items
             self._lines = lines
             self._lines_mtime = mtime
             self._line_at.clear()
@@ -334,7 +402,28 @@ class State:
             # 浏览器 UA —— 采集阶段就是用它取到清单的，说明上游认。
             ua = static_ua() if inner.startswith("o:") else self.settings.user_agent
             return url, ua
+        if migu_pid(inner):
+            return migu_ticket(inner, self.settings), ""
         return _ysp_resolver(inner)
+
+    def primary_migu_pid(self, slug: str) -> str:
+        """这个台的首选线路是不是咪咕，是就返回它的 pID。
+
+        只在咪咕排在第一条时才让播放器就近取流。咪咕排后面当备用时返回空，
+        交给中转层按正常顺序处理——那种情况下它只是兜底，不该抢首选的位置。
+        """
+        # 直接访问 /live/m:<pid>.m3u8 的，本身就是咪咕
+        if migu_pid(slug):
+            return migu_pid(slug)
+        name = channel_name(slug)
+        if not name:
+            return ""
+        self._ensure_lines()
+        items = self._lines.get(slug) or []
+        if not items:
+            return ""
+        _url, inner = items[0]
+        return migu_pid(inner)
 
     # ---------------- 这条宽带是哪里的 ----------------
     def refresh_region(self, force: bool = False) -> dict:
@@ -382,6 +471,17 @@ class State:
             "epg_url": s.epg_url,
             "epg_source": s.epg_source,
             "hidden": s.hidden,
+            # 「数据源」页：所有源模块 + 面板关掉的名字（只读，改走 btnModuleSave）
+            "modules": _module_catalog(s),
+            "disabled_modules": s.disabled_modules,
+            "migu_enabled": s.migu_enabled,
+            # 账号非零即可：令牌本身绝不回传给面板，防止被截图/代理日志带走。
+            "migu_account_set": bool(s.migu_user_id and s.migu_token),
+            "migu_user_id": s.migu_user_id,
+            "migu_rate": s.migu_rate,
+            "migu_h265": s.migu_h265,
+            "migu_client_dispatch": s.migu_client_dispatch,
+            "migu_refresh": s.migu_refresh_minutes,
         }
 
     def set_hidden(self, names: list[str], hidden: bool) -> list[str]:
@@ -412,6 +512,9 @@ class State:
         clean = coerce_panel(values)
         if "secret" in clean:
             clean["secret"] = clean_secret(clean["secret"])
+        # 账号 ID 留空 = 清空账号，令牌也一起清掉（避免留下孤立的无效令牌）
+        if "migu_user_id" in clean and not clean["migu_user_id"]:
+            clean["migu_token"] = ""
         if clean:
             write_panel(self.settings.panel_path, clean)
             self.settings.panel.update(clean)
@@ -622,6 +725,21 @@ def make_handler(state: State):
                 self._json({"error": f"未知频道: {slug}", "hint": "/api/live 可列出全部"}, 404)
                 return
             key, name = hit
+
+            # 咪咕「客户端就近」：换票后把未跳转的调度地址直接交给播放器，
+            # 让平台按播放器的网络就近选边缘节点。这样外省用户取到的是本省的
+            # 节点，而不是 NAS 所在网络的节点——这是咪咕流畅的关键。
+            # 只在首选线路就是咪咕时才这么做：咪咕挂在后面当备用时，仍由
+            # 中转层按正常顺序处理（首选挂了才会轮到它）。
+            if settings.migu_enabled and settings.migu_client_dispatch:
+                top_pid = state.primary_migu_pid(key)
+                if top_pid:
+                    try:
+                        self._redirect(migu_ticket(f"m:{top_pid}", settings))
+                        return
+                    except Exception as exc:  # noqa: BLE001 - 换票失败回落其它线路
+                        self.log(f"[咪咕] {name} 换票失败，改用其它源：{exc}")
+
             try:
                 text, stale, seq = state.relay.playlist_info(key, self._base())
             except RelayError as exc:
@@ -663,6 +781,8 @@ def make_handler(state: State):
                 return
             # 面板上隐藏掉的台不出现在订阅里（原始数据还在，随时能恢复）
             channels = _visible(channels, settings.hidden)
+            # 关掉的源模块整组摘掉。这一步按请求现做，改开关不用等下一轮更新。
+            channels = _module_visible(channels, settings)
 
             base = self._base()
             logo_base = settings.logo_base or (f"{base}/logo" if base else "")
@@ -791,7 +911,9 @@ def make_handler(state: State):
                     self._playlist()
             elif path in ("/txt", "/playlist.txt", "/result.txt"):
                 result = load_result(settings) or {}
-                channels = _visible(_channels_from_result(result), settings.hidden)
+                channels = _module_visible(
+                    _visible(_channels_from_result(result), settings.hidden), settings
+                )
                 if not channels:
                     self._json({"error": "结果尚未生成，请先更新一次"}, 404)
                     return
@@ -964,7 +1086,10 @@ def make_handler(state: State):
                     self._json({"error": str(exc)}, 400)
                     return
                 # 密码不进日志：面板日志会显示在页面上，也可能被人截图发出去
-                shown = {k: ("***" if k == "secret" and v else v) for k, v in updated.items()}
+                shown = {
+                    k: ("***" if k in ("secret", "migu_token", "migu_user_id") and v else v)
+                    for k, v in updated.items()
+                }
                 state.log(f"[设置] 已更新 {', '.join(f'{k}={v}' for k, v in shown.items())}")
                 self._json({"ok": True, "settings": updated})
             elif path == "/api/region/probe":

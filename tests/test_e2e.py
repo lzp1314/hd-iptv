@@ -207,7 +207,8 @@ enabled = true
             self.assertIn("tvg-name=\"演示A\"", m3u)
 
             txt = (root / "output" / "result.txt").read_text(encoding="utf-8")
-            self.assertIn("演示,#genre#", txt)
+            # 输出按源模块分组，不再是频道模板里的「演示」分组
+            self.assertIn("fixture,#genre#", txt)
             self.assertEqual(self._targets(txt), targets)
 
             # 分辨率来自主播放列表的 RESOLUTION，不是靠猜

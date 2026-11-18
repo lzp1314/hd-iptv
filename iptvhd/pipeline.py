@@ -67,12 +67,38 @@ def load_sources(settings: Settings, log: Logger | None = None) -> list[dict]:
             log(f"[源] 按 HDIPTV_SKIP_SOURCES 跳过 {dropped} 个源")
         sources = kept
 
+    # 咪咕：按配置段注入，不写死在 sources.toml。这样面板上开关、改画质、
+    # 改刷新间隔都立刻生效，宿主机上挂着的旧 sources.toml 也照样有这条源；
+    # 账号和令牌只在播放时从 settings 读，不经过这里、不落盘到源配置。
+    # 只有配置文件里显式带 [migu] 段（新模板自带、旧配置由升级补上）才注入：
+    # 自建的最小配置（例如测试工程）不含这一段，就不会凭空多出一路网络采集。
+    if settings.has_migu_section and settings.migu_enabled and not any(
+        str(x.get("type", "")).lower() == "migu" for x in sources
+    ):
+        sources.append(
+            {
+                "name": "咪咕视频",
+                "type": "migu",
+                "enabled": True,
+                "rate": settings.migu_rate,
+                "refresh_minutes": settings.migu_refresh_minutes,
+                "data_dir": str(settings.data_dir),
+            }
+        )
+
     # 本地源的相对路径统一按项目根目录解析，避免受工作目录影响
     for item in sources:
         if str(item.get("type", "")).lower() == "local" and item.get("path"):
             p = Path(str(item["path"]))
             if not p.is_absolute():
                 item["path"] = str(settings.root / p)
+
+    # 面板关掉的模块就地标成 disabled：build_collectors 会跳过它，不采集；
+    # 列表仍保留这条（只是 enabled=False），面板才能列出并让用户重新打开。
+    for item in sources:
+        name = str(item.get("name") or "").strip()
+        if name and settings.module_disabled(name):
+            item["enabled"] = False
     return sources
 
 
@@ -244,6 +270,61 @@ def _dedupe(streams: list[Stream]) -> list[Stream]:
     return out
 
 
+def _migu_pid(slug: str) -> str:
+    """咪咕现换票源的编号。不从 service 导入，避免模块回路。"""
+    return slug[2:] if slug.startswith("m:") and slug[2:].isdigit() else ""
+
+
+def _assign_all(streams: list[Stream], matcher: ChannelMatcher, log: Logger) -> int:
+    """给每条流填归一化频道名；模板里没有的台也保留原名。
+
+    模块模式下 channels.txt 不再是「输出白名单」，只用来把各源对同一个台的
+    不同叫法统一成一个名字（EPG、收藏、面板隐藏都靠它）。匹配不上的用原始
+    名字，这样咪咕的 127 台、聚合源里的地方台不会被模板裁掉。
+    """
+    matched = 0
+    for s in streams:
+        if not s.raw_name and s.group:
+            s.raw_name = s.group
+        result = matcher.match(s.raw_name)
+        if result.channel is None and s.alt_name:
+            result = matcher.match(s.alt_name)
+        if result.channel is not None:
+            s.channel = result.channel.name
+            matched += 1
+        else:
+            s.channel = (s.raw_name or "").strip()
+        s.channel_group = result.channel.group if result.channel else (s.group or "未分组")
+    log(f"[归一化] {matched}/{len(streams)} 条命中频道模板，其余保留原名")
+    return matched
+
+
+def _module_channels(
+    streams: list[Stream], max_streams: int, log: Logger
+) -> list[Channel]:
+    """按源条目拆成独立模块，模块内再按频道名聚合线路。
+
+    ``Stream.source`` 是采集器写入的源名字（如「咪咕视频」「运营商官方源」），
+    直接拿它当 group —— 订阅里看到的分组就是这个模块，开关关闭时服务端按
+    同样的名字把整组摘掉，两边天然对得上。
+    """
+    grouped: dict[str, dict[str, list[Stream]]] = {}
+    for s in streams:
+        module = (s.source or "").strip() or "未分组"
+        name = (s.channel or s.raw_name or s.group or "未命名").strip()
+        grouped.setdefault(module, {}).setdefault(name, []).append(s)
+
+    out: list[Channel] = []
+    for module in sorted(grouped):
+        for name in sorted(grouped[module]):
+            ch = Channel(name=name, group=module, streams=grouped[module][name])
+            ch.accept(max_streams)
+            out.append(ch)
+    names = "、".join(sorted(grouped)[:8])
+    log(f"[分组] {len(out)} 个频道分布在 {len(grouped)} 个源模块：{names}")
+    return out
+
+
 def _assign(streams: list[Stream], channels: list[Channel], matcher: ChannelMatcher, log: Logger) -> tuple[dict[str, list[Stream]], int]:
     by_channel: dict[str, list[Stream]] = {ch.name: [] for ch in channels}
     unmatched = 0
@@ -273,6 +354,13 @@ def _filter(streams: list[Stream], settings: Settings) -> list[Stream]:
     kept: list[Stream] = []
     for s in streams:
         if not s.ok:
+            continue
+        if _migu_pid(s.slug):
+            # 官方现换票源：游客档只有 540P，套 720P 门槛会被整批筛掉。
+            # 门槛是给第三方聚合源设的——一条稳的官方 540P 比标 720P 却
+            # 一直等分片的聚合源流畅得多；排序里的官方加权会保证本省
+            # 运营商源仍然排在它前面。
+            kept.append(s)
             continue
         if s.height:
             if s.height < min_h:
@@ -485,12 +573,11 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     # 面板、CLI 调 load_sources() 时保持零网络。
     autoregion.refresh(settings, log)
 
-    channels = load_channels(settings.channels_file)
-    report.channels_total = len(channels)
-    if not channels:
+    template = load_channels(settings.channels_file)
+    if not template:
         log(f"! 频道模板为空：{settings.channels_file}")
         return report
-    log(f"[模板] 载入 {len(channels)} 个频道")
+    log(f"[模板] 载入 {len(template)} 个频道（只用于归一化名字，不再裁台）")
 
     sources = load_sources(settings, log)
     measure_round = _is_measure_round(settings)
@@ -516,10 +603,11 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
     report.collected = len(streams)
     log(f"[去重] {len(raw_streams)} → {len(streams)} 条")
 
-    matcher = ChannelMatcher(channels)
-    by_channel, _ = _assign(streams, channels, matcher, log)
+    matcher = ChannelMatcher(template)
+    _assign_all(streams, matcher, log)
 
-    candidates = [s for group in by_channel.values() for s in group]
+    # 模块模式下所有采集到的流都是输出候选，不再按模板裁掉「没写过名字的台」。
+    candidates = streams
     report.probed = len(candidates)
     if candidates and bool(settings.get("probe", "enabled", True)):
         client = build_client(
@@ -561,33 +649,19 @@ def run_update(settings: Settings, log: Logger | None = None) -> RunReport:
         f"速率门槛为该档画质的 70%、最低 {settings.min_speed_mbps}Mbps）"
     )
 
-    kept_by_channel: dict[str, list[Stream]] = {}
     routed_official, routed_plain = _route_through_relay(alive)
     if routed_plain:
         log(
             f"[中转] {routed_official} 条官方源 + {routed_plain} 条聚合源改由本机取清单"
             "（播放器只连分片，不再自己带 UA 去要被拒的清单）"
         )
-    for s in alive:
-        kept_by_channel.setdefault(s.channel, []).append(s)
 
-    matched = 0
-    for ch in channels:
-        ch.streams = kept_by_channel.get(ch.name, [])
-        if ch.streams:
-            ch.accept(settings.max_per_channel)
-            matched += 1
-    report.channels_matched = matched
-
-    # 这一轮被上游 403 打下来的台，只要上一轮还是好的就别让它消失
-    carried = _carry_over(settings, channels, log)
-    if carried:
-        report.channels_matched = matched + carried
-
-    report.missing = _missing(channels)
-    if report.missing:
-        names = "、".join(row["name"] for row in report.missing[:10])
-        log(f"[缺失] {len(report.missing)} 个台没有流：{names}" + ("…" if len(report.missing) > 10 else ""))
+    # 按源条目分组输出：每个模块一个 group，模块内同名频道的多条线路聚在一起
+    # 走同一条频道级地址，点播失败时只在这个模块内部换线，不串到别的模块。
+    channels = _module_channels(alive, settings.max_per_channel, log)
+    _carry_over(settings, channels, log)
+    report.channels_total = len(channels)
+    report.channels_matched = len([c for c in channels if c.streams])
 
     out_dir = settings.data_dir
     m3u_path = out_dir / "result.m3u"
@@ -663,13 +737,18 @@ def _carry_over(settings: Settings, channels: list[Channel], log: Logger) -> int
         log(f"[继承] 上一轮结果已是 {age_h:.1f} 小时前，地址大概率失效，跳过")
         return 0
 
-    old = {str(c.get("name") or ""): c for c in old_rows}
+    # 模块模式下同一个台名可能属于好几个源，必须连模块名一起认，
+    # 否则「咪咕视频」的空台会继承到「运营商官方源」的地址上。
+    old = {
+        (str(c.get("group") or ""), str(c.get("name") or "")): c
+        for c in old_rows
+    }
     limit = settings.max_per_channel
     filled: list[str] = []
     for ch in channels:
         if ch.streams:
             continue
-        row = old.get(ch.name)
+        row = old.get((ch.group, ch.name))
         if not row:
             continue
         streams: list[Stream] = []

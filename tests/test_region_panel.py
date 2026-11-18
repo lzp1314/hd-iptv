@@ -137,7 +137,9 @@ class TestPanelMarkup(unittest.TestCase):
         nav = html[html.index("<nav"):html.index("</nav>")]
         items = re.findall(r'data-view="(\w+)">([^<]+)</button>', nav)
         self.assertIn(("region", "宽带与省份"), items)
-        self.assertEqual(len(items), 6, "导航项数量变了，检查是否漏了分区")
+        self.assertIn(("migu", "咪咕视频"), items)
+        self.assertIn(("modules", "数据源"), items)
+        self.assertEqual(len(items), 8, "导航项数量变了，检查是否漏了分区")
 
     def test_every_nav_item_has_view_and_vice_versa(self):
         import re

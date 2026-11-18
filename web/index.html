@@ -27,7 +27,9 @@
       <button class="nav-item is-on" type="button" data-view="status">状态</button>
       <button class="nav-item" type="button" data-view="channels">我的频道</button>
       <button class="nav-item" type="button" data-view="subscribe">订阅地址</button>
+      <button class="nav-item" type="button" data-view="modules">数据源</button>
       <button class="nav-item" type="button" data-view="region">宽带与省份</button>
+      <button class="nav-item" type="button" data-view="migu">咪咕视频</button>
       <button class="nav-item" type="button" data-view="settings">运行设置</button>
       <button class="nav-item" type="button" data-view="logs">运行日志</button>
     </nav>
@@ -158,6 +160,23 @@
     </p>
   </section>
 
+  <section class="panel view" id="modulePanel" data-view="modules" hidden>
+    <div class="panel-head">
+      <h2>数据源 <span class="count">模块开关</span></h2>
+      <button id="btnModuleSave" class="btn primary">保存配置</button>
+    </div>
+    <p class="hint">
+      每个源是一个独立模块：单独采集、单独成组。关掉的模块不再向它发请求，
+      订阅里也立刻消失，不用等下一轮更新。
+    </p>
+    <p class="hint result" id="moduleStatus" hidden></p>
+    <div id="moduleList" class="module-list"></div>
+    <p class="hint" id="moduleNote">
+      想让订阅里只有咪咕视频，就只打开「咪咕视频」；打开的模块越多，订阅里的分组越多。
+      咪咕账号和画质在「咪咕视频」页单独设置。
+    </p>
+  </section>
+
   <section class="panel view" id="regionPanel" data-view="region" hidden>
     <div class="panel-head">
       <h2>宽带与省份</h2>
@@ -206,6 +225,72 @@
       检测和扫描都不改配置，只是查给你看；挑到有源再点右上角「保存」。
       湖北移动、广电会被程序自动跳过（前者已内置运营商源，后者没有公开单播清单）。
       选的省份或运营商跟你实际出口对不上时，探测会大面积超时或报错——那是运营商源按省隔离的正常表现，不是装坏了。
+    </p>
+  </section>
+
+  <section class="panel view" id="miguPanel" data-view="migu" hidden>
+    <div class="panel-head">
+      <h2>咪咕视频 <span class="count">账号相关</span></h2>
+      <button id="btnMiguSave" class="btn primary">保存配置</button>
+    </div>
+    <p class="hint">
+      央视 / 卫视等公开频道，播放时现换一张有效地址，由播放器按自己所在网络就近取流。
+      这一页的账号只存在本机、只用于换票，不会写进播放地址、订阅链接或运行日志。
+    </p>
+    <p class="hint result" id="miguStatus" hidden></p>
+    <div class="form">
+      <label>启用咪咕视频
+        <select id="setMiguEnabled">
+          <option value="1">启用（推荐）</option>
+          <option value="0">关闭</option>
+        </select>
+        <span class="hint">
+          关掉后「咪咕视频」模块不再采集，订阅里这一整组也消失。打开时按咪咕频道表全量成组，
+          不受央视/卫视模板限制。
+        </span>
+      </label>
+      <label>咪咕账号 ID（可选，决定画质上限）
+        <input id="setMiguUser" type="text" autocomplete="off" spellcheck="false"
+               placeholder="留空 = 游客模式">
+        <span class="hint">
+          游客最高标清 540P；免费账号登录后可到高清 720P；会员按权益给蓝光 / 原画 / 4K。
+          实际画质还受账号订购内容和平台限制，填了不一定每档都能拿到。
+        </span>
+      </label>
+      <label>咪咕 Token（可选）
+        <input id="setMiguToken" type="password" autocomplete="off" spellcheck="false"
+               placeholder="已设置请留空，表示不修改">
+        <span class="hint">
+          这里只保存，不再显示。留空表示不改原来的令牌；要清除账号，把上面的账号 ID 清空再保存。
+        </span>
+      </label>
+      <label>画质
+        <select id="setMiguRate">
+          <option value="2">标清 540p（游客上限）</option>
+          <option value="3">高清 720p（需登录）</option>
+          <option value="4">蓝光 1080p（需会员）</option>
+          <option value="7">原画（需会员）</option>
+          <option value="9">4K 2160p（需会员 / 投屏权益）</option>
+        </select>
+        <span class="hint">账号权益不够时平台会给较低档，播放不受影响，只是画质降一档。</span>
+      </label>
+      <label class="chk"><input id="setMiguH265" type="checkbox"> 启用 H.265 原画（可能有兼容问题）
+        <span class="hint">部分老播放器不支持 H.265（只有声音没画面），关掉即可回到 H.264。</span>
+      </label>
+      <label class="chk"><input id="setMiguDispatch" type="checkbox"> 客户端就近取流（跨运营商观看时开启）
+        <span class="hint">
+          服务器和观看设备不在同一家运营商网络时必开：开启后由播放器所在网络就近选 CDN 节点，
+          同网部署可关。
+        </span>
+      </label>
+      <label>频道表刷新间隔（分钟）
+        <input id="setMiguRefresh" type="number" min="1" max="1440" step="1">
+        <span class="hint">只影响「有哪些咪咕频道」的更新频率；播放地址每次点播都是现换的，和它无关。</span>
+      </label>
+    </div>
+    <p class="hint" id="miguNote">
+      账号令牌失效时平台不会报错，只会静默按游客给流。换票发现账号不被认可时，
+      运行日志会提示重新获取，播放会自动按游客继续，不会中断。
     </p>
   </section>
 

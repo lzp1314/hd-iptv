@@ -169,10 +169,16 @@ class Stream:
         分档只区分「历史不稳」和「其余」，稳与未知之间不设卡：画质仍然优先，
         刚加的源不会因为没攒够样本就被挤到后面。
         """
-        direct = 0 if self.url else 1
+        # 官方现换票源（咪咕 m:）没有 url，但播放时现换成有效票并由播放器
+        # 就近取流，属于「可直连」——不当成需要中转的空地址。
+        direct = 0 if (self.url or self.slug.startswith("m:")) else 1
         need = need_mbps(self.height)
         if self.speed_mbps <= 0:
-            fit = 1          # 没测到速率：放在「够快」之后、「不够快」之前
+            # 官方现换票源（咪咕 m:）没有本轮测速值，不是「撑不住」：它压根
+            # 没走探测，播放时才换票、由播放器就近取流。给它 fit=0 才能排在
+            # 同画质的第三方聚合地址前面——流畅正是它的价值。本省运营商源
+            # 有真实测速且画质更高，仍靠后面的画质项赢过它，本省用户不受影响。
+            fit = 0 if (self.trusted and not self.url) else 1
         elif self.speed_mbps >= need:
             fit = 0          # 撑得住这一档画质
         else:
@@ -213,9 +219,12 @@ class Channel:
         seen: set[str] = set()
         ordered: list[Stream] = []
         for s in sorted(self.streams, key=lambda x: x.sort_key()):
-            if s.url in seen:
+            # 播放时现换票的源没有 url，靠 slug 区分不同台；只按 url 去重会把
+            # 同一个模块里的咪咕台全塌成一条。
+            key = s.url or (f"slug:{s.slug}" if s.slug else "")
+            if not key or key in seen:
                 continue
-            seen.add(s.url)
+            seen.add(key)
             ordered.append(s)
             if len(ordered) >= max_streams:
                 break

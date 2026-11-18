@@ -176,7 +176,8 @@ class TestRenderM3u(unittest.TestCase):
         text, count = writers.render_m3u([channel], relay_base="http://h")
         self.assertEqual(count, 1)
         self.assertEqual(text.count("#EXTINF"), 1)
-        self.assertIn("/live/c:Q0NUVi0x.m3u8", text)
+        from iptvhd.relay import channel_slug
+        self.assertIn(f"/live/{channel_slug('CCTV-1', '央视')}.m3u8", text)
         # 只剩一行时不该再带「·1080P」这种区分后缀
         self.assertNotIn("·1080P", text)
 
