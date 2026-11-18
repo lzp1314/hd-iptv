@@ -72,8 +72,11 @@ def load_sources(settings: Settings, log: Logger | None = None) -> list[dict]:
     # 账号和令牌只在播放时从 settings 读，不经过这里、不落盘到源配置。
     # 只有配置文件里显式带 [migu] 段（新模板自带、旧配置由升级补上）才注入：
     # 自建的最小配置（例如测试工程）不含这一段，就不会凭空多出一路网络采集。
-    if settings.has_migu_section and settings.migu_enabled and not any(
-        str(x.get("type", "")).lower() == "migu" for x in sources
+    if (
+        settings.has_migu_section
+        and settings.migu_enabled
+        and not settings.module_disabled("咪咕视频")
+        and not any(str(x.get("type", "")).lower() == "migu" for x in sources)
     ):
         sources.append(
             {
@@ -304,13 +307,16 @@ def _module_channels(
 ) -> list[Channel]:
     """按源条目拆成独立模块，模块内再按频道名聚合线路。
 
-    ``Stream.source`` 是采集器写入的源名字（如「咪咕视频」「运营商官方源」），
-    直接拿它当 group —— 订阅里看到的分组就是这个模块，开关关闭时服务端按
-    同样的名字把整组摘掉，两边天然对得上。
+    ``Stream.source`` 是采集器写入的底层源名（如「官方直连」「综合频道」）。
+    先归一到展示模块名再分 group：官方直连 + 运营商官方源并成一组、央视频的
+    两个源并成一组、三个聚合源并成一组。面板开关和服务端订阅过滤都用同一个
+    展示名，关一个开关整组一起消失，不会出现「显示合并了过滤却按老名字」。
     """
+    from .settings import display_module
+
     grouped: dict[str, dict[str, list[Stream]]] = {}
     for s in streams:
-        module = (s.source or "").strip() or "未分组"
+        module = display_module((s.source or "").strip()) or "未分组"
         name = (s.channel or s.raw_name or s.group or "未命名").strip()
         grouped.setdefault(module, {}).setdefault(name, []).append(s)
 

@@ -64,9 +64,10 @@ function setDot(state) {
 }
 
 // ---------------- 分区切换 ----------------
-// 一页一个分区：状态 / 我的频道 / 订阅地址 / 宽带与省份 / 运行设置 / 运行日志。
+// 一页一个分区：状态 / 我的频道 / 订阅地址 / 数据源 / 宽带与省份 / 运行设置 / 运行日志。
 // 状态卡在 .statbar 里，不参与切换，所以切到哪个分区都还看得见。
-const VIEWS = ["status", "channels", "subscribe", "region", "settings", "logs"];
+// 新加分区必须同步登记到这里，否则 setView 会把名字当无效值退回状态页。
+const VIEWS = ["status", "channels", "subscribe", "modules", "region", "settings", "logs"];
 
 function setView(name, syncHash = true) {
   if (!VIEWS.includes(name)) name = "status";
@@ -286,21 +287,56 @@ function fillSettings(s) {
       ? "已绑定咪咕账号：换票会按账号权益给画质。令牌不再显示，留空表示不修改。"
       : "当前为游客模式：最高标清 540P。要提画质请在上面填账号 ID 和令牌。";
   }
-  // 数据源模块清单由后端从 sources.toml + 注入源实时生成，前端不写死名字
-  if ($("moduleList") && Array.isArray(s.modules)) {
-    $("moduleList").innerHTML = s.modules.map((m) => {
+  // 数据源模块：四个内置大类置顶（点开看说明/配置），其余源收进「更多源」。
+  // 清单由后端从 sources.toml + 注入源实时生成，前端不写死模块名字。
+  const catalog = s.modules || {};
+  const builtins = Array.isArray(catalog.builtins) ? catalog.builtins : [];
+  const others = Array.isArray(catalog.others) ? catalog.others : [];
+  if ($("builtinModules")) {
+    $("builtinModules").innerHTML = builtins.map((m) => {
+      const name = String(m.name || "");
+      const members = Array.isArray(m.members) ? m.members : [];
+      const types = Array.isArray(m.types) ? m.types : [];
+      const configurable = m.configurable ? " configurable" : "";
+      const detail = members.length
+        ? `包含底层源：${members.map(esc).join("、")}`
+        : "当前配置里没有这一组的底层源，打开后下一轮才会采集。";
+      return `<div class="builtin-module${configurable}" data-module="${esc(name)}">`
+        + `<div class="builtin-head">`
+        + `<label class="builtin-toggle">`
+        + `<input type="checkbox" class="module-switch"${m.enabled ? " checked" : ""}>`
+        + `</label>`
+        + `<button type="button" class="builtin-name" data-expand="${esc(name)}">`
+        + `${esc(name)} <span class="builtin-arrow">▾</span></button>`
+        + `<span class="module-type">${types.map(esc).join(" / ")}</span>`
+        + `</div>`
+        + `<div class="builtin-detail" hidden>`
+        + `<p class="hint">${detail}</p>`
+        + `${m.configurable ? '<button type="button" class="btn mini" data-config="migu">展开账号与画质配置</button>' : ""}`
+        + `</div>`
+        + `</div>`;
+    }).join("");
+  }
+  if ($("moduleList")) {
+    $("moduleList").innerHTML = others.map((m) => {
       const name = String(m.name || "");
       return `<label class="module-row" data-module="${esc(name)}">`
         + `<input type="checkbox" class="module-switch"${m.enabled ? " checked" : ""}>`
         + `<span class="module-name">${esc(name)}</span>`
         + `<span class="module-type">${esc(String(m.type || ""))}</span>`
         + "</label>";
-    }).join("") || '<p class="hint">暂无数据源，请检查 config/sources.toml。</p>';
-    if ($("moduleStatus")) {
-      $("moduleStatus").hidden = false;
-      const on = s.modules.filter((m) => m.enabled).length;
-      $("moduleStatus").textContent = `共 ${s.modules.length} 个模块，已启用 ${on} 个。`;
-    }
+    }).join("") || '<p class="hint">没有其它源。</p>';
+  }
+  if ($("moduleStatus")) {
+    $("moduleStatus").hidden = false;
+    const all = builtins.concat(others);
+    const on = all.filter((m) => m.enabled).length;
+    $("moduleStatus").textContent = `共 ${all.length} 个模块，已启用 ${on} 个。`;
+  }
+  // 咪咕启用以内置卡片开关为准，回填到配置块里的下拉，两者保持同步
+  const miguBuiltin = builtins.find((m) => m.name === "咪咕视频");
+  if ($("setMiguEnabled") && miguBuiltin) {
+    $("setMiguEnabled").value = miguBuiltin.enabled ? "1" : "0";
   }
 }
 
@@ -323,13 +359,22 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     // 空字符串是有意义的：表示把密码关掉
     secret: $("setSecret") ? $("setSecret").value.trim() : "",
   };
-  // 模块开关只在「数据源」页保存时提交，别的页不碰它
+  // 模块开关只在「数据源」页保存时提交，别的页不碰它。
+  // 内置卡片(.builtin-toggle)和更多源(.module-row)的开关都带 data-module，
+  // 统一往上找这个属性，不写死某一层容器。
   if (btnId === "btnModuleSave") {
     payload.disabled_modules = Array.from(document.querySelectorAll(".module-switch"))
       .filter((el) => !el.checked)
-      .map((el) => el.closest(".module-row").dataset.module);
+      .map((el) => el.closest("[data-module]")?.dataset.module)
+      .filter(Boolean);
+    // 咪咕的启用以卡片开关为准，同时同步给配置块的下拉与后端 migu_enabled
+    const miguSwitch = document.querySelector('.builtin-module[data-module="咪咕视频"] .module-switch');
+    if (miguSwitch) {
+      payload.migu_enabled = miguSwitch.checked;
+      if ($("setMiguEnabled")) $("setMiguEnabled").value = miguSwitch.checked ? "1" : "0";
+    }
   }
-  // 咪咕字段只在咪咕页自己保存时提交。别的页共用一个 saveSettings，
+  // 咪咕账号/画质只在咪咕配置块自己的保存按钮提交。别的页共用一个 saveSettings，
   // 它们的表单控件虽在 DOM 里、但用户没填过，误提交会把账号清空。
   if (btnId === "btnMiguSave") {
     payload.migu_enabled = $("setMiguEnabled").value === "1";
@@ -366,7 +411,8 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     }
     if (btnId === "btnModuleSave") {
       const st = d.settings || {};
-      const mods = st.modules || [];
+      const cat = st.modules || {};
+      const mods = (cat.builtins || []).concat(cat.others || []);
       const on = mods.filter((m) => m.enabled).map((m) => m.name);
       const off = mods.filter((m) => !m.enabled).map((m) => m.name);
       note.textContent = `已保存：启用 ${on.length} 个模块（${on.join("、") || "无"}），`
@@ -1122,6 +1168,25 @@ document.addEventListener("DOMContentLoaded", () => {
   if ($("btnModuleSave")) $("btnModuleSave").addEventListener("click", () => saveSettings("btnModuleSave", "moduleNote"));
   // 模块开关是动态渲染的，用事件委托标脏，避免被轮询覆盖
   if ($("moduleList")) $("moduleList").addEventListener("change", () => { settingsDirty = true; });
+  // 内置模块卡片：点名字展开/收起说明；「咪咕视频」额外展开账号配置块。
+  // 动态渲染，用事件委托绑在容器上。
+  if ($("builtinModules")) {
+    $("builtinModules").addEventListener("click", (e) => {
+      const expandBtn = e.target.closest("[data-expand]");
+      if (!expandBtn) return;
+      const card = expandBtn.closest(".builtin-module");
+      if (!card) return;
+      const detail = card.querySelector(".builtin-detail");
+      if (detail) detail.hidden = !detail.hidden;
+      const miguCfg = $("miguConfig");
+      if (miguCfg) {
+        // 同一时刻只展开一个配置块；咪咕卡片展开时显示它的账号配置
+        const wantMigu = card.dataset.module === "咪咕视频" && detail && !detail.hidden;
+        miguCfg.hidden = !wantMigu;
+      }
+    });
+    $("builtinModules").addEventListener("change", () => { settingsDirty = true; });
+  }
   if ($("btnProbe")) $("btnProbe").addEventListener("click", probeRegion);
   if ($("btnScan")) $("btnScan").addEventListener("click", scanProvince);
   loadRegionOptions().then(() => {

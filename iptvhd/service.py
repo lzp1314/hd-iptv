@@ -18,7 +18,7 @@ from .models import Channel, Stream
 from .pipeline import load_result, load_sources, run_update
 from .relay import Relay, RelayError, channel_name, channel_slug, static_ua
 from .region import detect
-from .settings import Settings, clean_secret, coerce_panel, write_panel
+from .settings import Settings, clean_secret, coerce_panel, display_module, write_panel
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -166,37 +166,63 @@ def _visible(channels: list[Channel], hidden: list[str]) -> list[Channel]:
     return [c for c in channels if c.name not in blocked]
 
 
-def _module_catalog(settings: Settings) -> list[dict]:
-    """面板「数据源」页要列的模块清单。
+def _module_catalog(settings: Settings) -> dict:
+    """面板「数据源」页的模块清单：内置大类 + 更多源。
 
-    直接复用 load_sources：它已经把 sources.toml、程序注入的咪咕、本省自动源
-    汇到一起，并把面板关掉的标成 enabled=False。这里只读本地配置，不发网络。
+    内置大类（咪咕视频 / 央视频 / 第三方聚合源 / 运营商官方源）置顶，点开可展开
+    各自的配置；sources.toml 里其余源收进「更多源」折叠区，仍各自一个开关。
+    复用 load_sources：它已经把 sources.toml、注入的咪咕、本省自动源汇到一起，
+    并把面板关掉的标成 enabled=False。这里只读本地配置，不发网络。
     """
+    from .settings import BUILTIN_MODULES, display_module
+
     try:
         sources = load_sources(settings)
     except Exception:  # noqa: BLE001 - 面板不该因为一份写坏的 sources.toml 打不开
         sources = []
-    out: list[dict] = []
-    seen: set[str] = set()
-    for item in sources:
-        name = str(item.get("name") or "").strip()
-        if not name or name in seen:
+
+    by_name = {
+        str(x.get("name") or "").strip(): x
+        for x in sources
+        if str(x.get("name") or "").strip()
+    }
+    builtins: list[dict] = []
+    for module, members in BUILTIN_MODULES.items():
+        # 模块只要有任意一个底层源在、且没被面板关，就算开着
+        present = [m for m in members if m in by_name]
+        enabled = any(bool(by_name[m].get("enabled", True)) for m in present)
+        builtins.append({
+            "name": module,
+            "members": list(members),
+            "types": sorted({str(by_name[m].get("type") or "") for m in present if by_name[m].get("type")}),
+            "enabled": enabled,
+            "configurable": module == "咪咕视频",
+        })
+
+    covered = {m for members in BUILTIN_MODULES.values() for m in members}
+    others: list[dict] = []
+    for name, item in by_name.items():
+        if name in covered:
             continue
-        seen.add(name)
-        out.append({
+        others.append({
             "name": name,
             "type": str(item.get("type") or ""),
             "enabled": bool(item.get("enabled", True)),
         })
-    return out
+    return {"builtins": builtins, "others": others}
 
 
 def _module_visible(channels: list[Channel], settings: Settings) -> list[Channel]:
-    """订阅输出按启用的模块过滤：关掉的分组立刻消失，不用重新采集。"""
-    disabled = set(settings.disabled_modules)
+    """订阅输出按启用的模块过滤：关掉的分组立刻消失，不用重新采集。
+
+    频道的 group 已经是展示模块名（pipeline 分组时归一过），这里直接用展示名
+    比对；旧配置里若存的是底层源名，也先用 display_module 归一，保证升级后
+    原先关掉的模块仍然关着。
+    """
+    disabled = {display_module(x) for x in settings.disabled_modules}
     if not disabled:
         return channels
-    return [c for c in channels if c.group not in disabled]
+    return [c for c in channels if display_module(c.group) not in disabled]
 
 
 def _ysp_resolver(slug: str) -> tuple[str, str]:

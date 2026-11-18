@@ -295,6 +295,54 @@ code {
 .module-row .module-type { font-size: 11px; color: var(--muted); }
 .module-row input[type="checkbox"] { width: 16px; height: 16px; flex: none; }
 
+/* 内置模块：置顶的四个大类，点名字展开说明，咪咕额外展开账号配置 */
+.builtin-modules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.builtin-module {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfcfd;
+  padding: 11px 13px;
+  min-width: 0;
+}
+.builtin-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.builtin-toggle { flex: none; display: flex; }
+.builtin-toggle input[type="checkbox"] { width: 17px; height: 17px; cursor: pointer; }
+.builtin-name {
+  flex: 1; min-width: 0;
+  border: 0; background: none; padding: 0;
+  font-size: 14px; font-weight: 600; color: var(--text);
+  text-align: left; cursor: pointer;
+}
+.builtin-arrow { font-size: 11px; color: var(--muted); margin-left: 4px; }
+.builtin-module .module-type { font-size: 11px; color: var(--muted); flex: none; }
+.builtin-detail { margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.builtin-detail .hint { margin: 0 0 6px; }
+.more-sources {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 13px;
+  margin-bottom: 10px;
+  background: #fbfcfd;
+}
+.more-sources > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.more-sources > summary .hint { font-weight: 400; }
+.more-sources .module-list { margin-top: 12px; }
+.module-config {
+  margin-top: 14px; padding: 14px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: #f8fafc;
+}
+.module-config-head h3 { margin: 0 0 4px; font-size: 14px; }
+
 .chan-side {
   display: flex;
   flex-direction: column;

@@ -28,6 +28,32 @@ PANEL_BOUNDS = {
 
 _FALSE_WORDS = {"0", "false", "off", "no", "关", "关闭", ""}
 
+# 面板上的「内置模块」到它包含的底层源名。
+# 一层映射给三处共用：面板开关、采集跳过、订阅分组，都认展示名，关一个开关
+# 就把它下面所有源一起关掉/摘掉，不会出现「列表合并了开关还是两个」的错位。
+# 官方直连并入运营商官方源：两者都是国内官方 CDN 的直连地址，用户没必要分开管。
+BUILTIN_MODULES: dict[str, tuple[str, ...]] = {
+    "运营商官方源": ("运营商官方源", "官方直连", "移动IPTV-本省专用", "本省自动源"),
+    "第三方聚合源": ("聚合源-多线路", "聚合源-公开转播", "聚合源-精简线路"),
+    "央视频": ("综合频道", "央视官方"),
+    "咪咕视频": ("咪咕视频",),
+}
+
+
+def display_module(source_name: str) -> str:
+    """底层源名 → 面板展示的模块名。不在内置模块里的源原样返回。"""
+    name = str(source_name or "").strip()
+    for module, members in BUILTIN_MODULES.items():
+        if name == module or name in members:
+            return module
+    return name
+
+
+def module_members(module: str) -> tuple[str, ...]:
+    """展示模块名 → 它包含的底层源名；非内置模块返回它自己。"""
+    name = str(module or "").strip()
+    return BUILTIN_MODULES.get(name, (name,))
+
 
 def as_bool(value, default: bool = True) -> bool:
     """面板 checkbox / 环境变量 / TOML 三处来的开关统一收敛成布尔。"""
@@ -198,8 +224,10 @@ def coerce_panel(raw: dict) -> dict:
             # 面板关掉的源模块。存名字而不是下标：sources.toml 增删条目后
             # 下标会错位，名字才能稳稳对上同一个模块。
             raw_list = value if isinstance(value, list) else str(value or "").split(",")
+            # 归一到展示模块名：旧配置里存的「官方直连」「综合频道」等底层名，
+            # 升级后要和合并后的内置模块对上，不能因为改了名字就失效。
             names = {
-                str(x).strip()[:128] for x in raw_list
+                display_module(str(x).strip()[:128]) for x in raw_list
                 if isinstance(x, str) and x.strip()
             }
             out[key] = sorted(names)
@@ -324,13 +352,16 @@ class Settings:
         return [str(x).strip() for x in raw if str(x).strip()]
 
     def module_disabled(self, name: str) -> bool:
-        """这个源模块是不是被面板关掉了。
+        """这个源（或它所属的内置模块）是不是被面板关掉了。
 
-        一处判断同时管采集和订阅输出：关掉的模块既不向它发请求，也不出现在
-        订阅里，两个动作不会各走各的、出现「不采集了但列表里还在」的错位。
+        传进来的可以是底层源名（「官方直连」）也可以是展示模块名（「运营商官方源」），
+        统一归一到展示名再判断：关掉一个内置模块，它下面所有源一起算关。
+        一处判断同时管采集和订阅输出，不会出现「不采集了但列表里还在」的错位。
         """
         text = str(name or "").strip()
-        return bool(text) and text in set(self.disabled_modules)
+        if not text:
+            return False
+        return display_module(text) in set(self.disabled_modules)
 
     # ---- 常用项 ----
     @property

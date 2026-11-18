@@ -260,8 +260,8 @@ class TestStandalone(unittest.TestCase):
         ], 2, lambda _: None)
         self.assertEqual(
             {(c.group, c.name) for c in rows},
-            {("咪咕视频", "CCTV-1"), ("咪咕视频", "湖南卫视"),
-             ("运营商官方源", "CCTV-1"), ("聚合源-多线路", "浙江卫视")},
+        {("咪咕视频", "CCTV-1"), ("咪咕视频", "湖南卫视"),
+         ("运营商官方源", "CCTV-1"), ("第三方聚合源", "浙江卫视")},
         )
         local = [c for c in rows if c.group == "运营商官方源"][0]
         self.assertEqual(len(local.streams), 2)  # 同模块同台聚合成两条线路
@@ -333,10 +333,29 @@ class TestServiceAndPanel(unittest.TestCase):
 
     def test_panel_has_migu_view_and_controls(self):
         html = (WEB / "index.html").read_text(encoding="utf-8")
-        self.assertIn('data-view="migu"', html)
+        # 咪咕不再单独占一个导航页，配置块嵌在「数据源」页里，点咪咕模块展开
+        self.assertNotIn('data-view="migu"', html)
+        self.assertIn('id="builtinModules"', html)
+        self.assertIn('id="miguConfig"', html)
+        # 配置块必须位于 modulePanel 内部，否则切到数据源页也看不到
+        start = html.index('id="modulePanel"')
+        end = html.index('id="regionPanel"')
+        block = html[start:end]
         for eid in ("setMiguEnabled", "setMiguUser", "setMiguToken", "setMiguRate",
                     "setMiguH265", "setMiguDispatch", "btnMiguSave"):
-            self.assertIn(f'id="{eid}"', html)
+            self.assertIn(f'id="{eid}"', block)
+
+    def test_view_whitelist_has_every_nav_item(self):
+        # 回归点咪咕/数据源却跳回状态页的 bug：白名单必须覆盖所有导航项
+        import re
+        js = (WEB / "app.js").read_text(encoding="utf-8")
+        html = (WEB / "index.html").read_text(encoding="utf-8")
+        nav = html[html.index("<nav"):html.index("</nav>")]
+        navs = set(re.findall(r'data-view="(\w+)"', nav))
+        m = re.search(r'const VIEWS = \[([^\]]+)\]', js)
+        self.assertIsNotNone(m, "找不到视图白名单常量")
+        views = set(re.findall(r'"(\w+)"', m.group(1)))
+        self.assertEqual(navs - views, set(), "有导航项没进白名单，点了会退回状态页")
 
     def test_app_only_submits_migu_fields_on_migu_save(self):
         js = (WEB / "app.js").read_text(encoding="utf-8")

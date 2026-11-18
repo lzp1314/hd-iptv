@@ -63,10 +63,51 @@ class TestModuleSettings(unittest.TestCase):
     def test_catalog_lists_disabled_module_as_off(self):
         from iptvhd.service import _module_catalog
 
-        rows = {x["name"]: x for x in _module_catalog(project(["源B"]))}
+        catalog = _module_catalog(project(["源B"]))
+        rows = {x["name"]: x for x in catalog["others"]}
         self.assertEqual(set(rows), {"源A", "源B"})
         self.assertTrue(rows["源A"]["enabled"])
         self.assertFalse(rows["源B"]["enabled"])
+
+    def test_builtin_module_members_are_folded_into_one_switch(self):
+        from iptvhd.settings import BUILTIN_MODULES, display_module, module_members
+
+        # 官方直连与运营商官方源归到同一个展示模块
+        self.assertEqual(display_module("官方直连"), "运营商官方源")
+        self.assertEqual(display_module("运营商官方源"), "运营商官方源")
+        # 三个聚合源、央视频两个源同理
+        self.assertEqual(display_module("聚合源-精简线路"), "第三方聚合源")
+        self.assertEqual(display_module("央视官方"), "央视频")
+        self.assertEqual(display_module("咪咕视频"), "咪咕视频")
+        # 非内置源原样返回
+        self.assertEqual(display_module("浙江广电"), "浙江广电")
+        self.assertIn("官方直连", module_members("运营商官方源"))
+        self.assertEqual(set(BUILTIN_MODULES), {
+            "运营商官方源", "第三方聚合源", "央视频", "咪咕视频",
+        })
+
+    def test_catalog_exposes_four_builtins_and_folds_members(self):
+        from iptvhd.service import _module_catalog
+
+        # 最小工程没有内置模块的底层源，内置卡片仍要列出（关着），
+        # 脚本里注入的源按展示名归组，不重复出现在「更多源」。
+        catalog = _module_catalog(project())
+        self.assertEqual(
+            [b["name"] for b in catalog["builtins"]],
+            ["运营商官方源", "第三方聚合源", "央视频", "咪咕视频"],
+        )
+        names = {o["name"] for o in catalog["others"]}
+        self.assertNotIn("源A", {m for b in catalog["builtins"] for m in b["members"]})
+
+    def test_builtin_switch_disables_all_its_members(self):
+        # 关掉展示模块名，它下面所有底层源在采集层都算关
+        s = project(["运营商官方源"])
+        self.assertTrue(s.module_disabled("官方直连"))
+        self.assertTrue(s.module_disabled("运营商官方源"))
+        self.assertFalse(s.module_disabled("聚合源-多线路"))
+        # 旧配置只写了底层名，归一后同样命中展示模块
+        s2 = project(["官方直连"])
+        self.assertTrue(s2.module_disabled("运营商官方源"))
 
 
 class TestSubscriptionFilter(unittest.TestCase):
