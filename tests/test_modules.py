@@ -179,6 +179,31 @@ class TestPanel(unittest.TestCase):
         js = (WEB / "app.js").read_text(encoding="utf-8")
         self.assertIn("modal.hidden = true", js)
 
+    def test_datasource_layout_full_width_with_inline_subscribe(self):
+        """数据源页全屏铺开，订阅地址常驻右侧，与原订阅页是同一批地址。"""
+        html = (WEB / "index.html").read_text(encoding="utf-8")
+        # 数据源页有左右分栏：模块区 + 订阅栏
+        self.assertIn('class="module-layout"', html)
+        self.assertIn('class="module-main"', html)
+        self.assertIn('class="subscribe-aside"', html)
+        for eid in ("subUrlM3u", "subUrlTxt", "subUrlEpg", "subUrlJson", "subEpgNote"):
+            self.assertIn(f'id="{eid}"', html)
+        # 复制按钮指向新地址栏
+        for cid in ("subUrlM3u", "subUrlTxt", "subUrlEpg", "subUrlJson"):
+            self.assertIn(f'data-copy="{cid}"', html)
+
+        css = (WEB / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".module-layout", css)
+        self.assertIn(".subscribe-aside", css)
+        # 内容区不再限宽 1280：全屏铺开
+        self.assertNotIn("max-width: 1280px", css)
+
+        js = (WEB / "app.js").read_text(encoding="utf-8")
+        # 同一批地址填两处：原订阅页 + 数据源页内联栏
+        for eid in ("subUrlM3u", "subUrlTxt", "subUrlEpg", "subUrlJson"):
+            self.assertIn(f'{eid}:', js)
+        self.assertIn('$("subEpgNote")', js)
+
 
 class TestModuleChannelSummary(unittest.TestCase):
     def test_channels_grouped_by_module_and_category(self):

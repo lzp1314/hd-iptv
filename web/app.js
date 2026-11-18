@@ -48,6 +48,11 @@ function fillUrls() {
     urlTxt: "/txt",
     urlEpg: "/epg.xml",
     urlJson: "/json",
+    // 数据源页右侧常驻的订阅栏：和「订阅地址」页是同一批地址，两个地方都要填
+    subUrlM3u: "/playlist.m3u",
+    subUrlTxt: "/txt",
+    subUrlEpg: "/epg.xml",
+    subUrlJson: "/json",
   };
   for (const [id, path] of Object.entries(map)) {
     const el = $(id);
@@ -247,7 +252,9 @@ async function loadStatus() {
     renderRegion(d.region || {});
     fillOverview(d);
 
-    if ($("epgNote")) $("epgNote").textContent = epgText(d.epg);
+    const epgNoteText = epgText(d.epg);
+    if ($("epgNote")) $("epgNote").textContent = epgNoteText;
+    if ($("subEpgNote")) $("subEpgNote").textContent = epgNoteText;
     fillSettings(d.settings || {});
 
     const logs = (d.logs || []).join("\n");

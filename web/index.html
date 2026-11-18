@@ -160,24 +160,58 @@
   </section>
 
   <section class="panel view" id="modulePanel" data-view="modules" hidden>
-    <div class="panel-head">
-      <h2>数据源 <span class="count">模块开关</span></h2>
-      <button id="btnModuleSave" class="btn primary">保存配置</button>
+    <div class="module-layout">
+      <div class="module-main">
+        <div class="panel-head">
+          <h2>数据源 <span class="count">模块开关</span></h2>
+          <button id="btnModuleSave" class="btn primary">保存配置</button>
+        </div>
+        <p class="hint">
+          点开一个模块看说明、改配置，用模块名右边的开关决定它参不参与。关掉的模块不再采集，
+          订阅里也立刻消失，不用等下一轮更新。想让订阅里只有咪咕，就只打开「咪咕视频」。
+        </p>
+        <p class="hint result" id="moduleStatus" hidden></p>
+        <div id="builtinModules" class="builtin-modules"></div>
+        <details class="more-sources" id="moreSourcesBox">
+          <summary>更多源 <span class="hint">（sources.toml 里的其它条目，各自独立开关）</span></summary>
+          <div id="moduleList" class="module-list"></div>
+        </details>
+        <p class="hint" id="moduleNote">
+          四个内置模块把 sources.toml 里相关的源归到一组管理：官方直连已并入「运营商官方源」，
+          聚合源三条并入「第三方聚合源」，央视频的两条接口并入「央视频」。
+        </p>
+      </div>
+      <aside class="subscribe-aside">
+        <div class="panel-head">
+          <h2>订阅地址 <span class="count">改动即时生效</span></h2>
+        </div>
+        <p class="hint">
+          填进播放器即可（地址以 <code>.m3u</code> 结尾）。上面改模块开关、点「保存配置」后，
+          订阅内容即时按新组合输出，这里不用重新更新。
+        </p>
+        <div class="url-row">
+          <span class="tag">M3U</span>
+          <input id="subUrlM3u" readonly value="/playlist.m3u" title="播放器订阅地址（M3U）">
+          <button class="btn" data-copy="subUrlM3u">复制</button>
+        </div>
+        <div class="url-row">
+          <span class="tag">TXT</span>
+          <input id="subUrlTxt" readonly value="/txt" title="频道列表（TXT）">
+          <button class="btn" data-copy="subUrlTxt">复制</button>
+        </div>
+        <div class="url-row">
+          <span class="tag">EPG</span>
+          <input id="subUrlEpg" readonly value="/epg.xml" title="节目单（EPG XML）">
+          <button class="btn" data-copy="subUrlEpg">复制</button>
+        </div>
+        <div class="url-row">
+          <span class="tag">JSON</span>
+          <input id="subUrlJson" readonly value="/json" title="频道列表（JSON）">
+          <button class="btn" data-copy="subUrlJson">复制</button>
+        </div>
+        <p class="hint" id="subEpgNote">节目单：等待首轮更新</p>
+      </aside>
     </div>
-    <p class="hint">
-      点开一个模块看说明、改配置，用模块名右边的开关决定它参不参与。关掉的模块不再采集，
-      订阅里也立刻消失，不用等下一轮更新。想让订阅里只有咪咕，就只打开「咪咕视频」。
-    </p>
-    <p class="hint result" id="moduleStatus" hidden></p>
-    <div id="builtinModules" class="builtin-modules"></div>
-    <details class="more-sources" id="moreSourcesBox">
-      <summary>更多源 <span class="hint">（sources.toml 里的其它条目，各自独立开关）</span></summary>
-      <div id="moduleList" class="module-list"></div>
-    </details>
-    <p class="hint" id="moduleNote">
-      四个内置模块把 sources.toml 里相关的源归到一组管理：官方直连已并入「运营商官方源」，
-      聚合源三条并入「第三方聚合源」，央视频的两条接口并入「央视频」。
-    </p>
 
     <!-- 点模块卡片的「配置 ›」弹出：账号只存本机、只用于换票 -->
     <div id="moduleModal" class="module-modal" hidden>
