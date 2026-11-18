@@ -223,6 +223,29 @@ def _extract_measure(streams: list, settings: Settings) -> None:
     _save_measure(settings, cache)
 
 
+def _official_log_line(stream: Stream, elapsed: float | None, done: int, total: int) -> str:
+    """官方源串行探测的逐条日志。
+
+    咪咕/央视频这类「播放时才换票」的源，采集阶段只登记频道（playlist_only
+    且 url 为空），探测时直接判通、不发请求也不下载。此时 speed=0、elapsed≈0
+    是「压根没测」，不是「测出来 0」——照原样打成 0.0Mbps 会让人以为限流或
+    故障。这里对它们改标「播放时测速」，和真正测过速率的本省源区分开。
+    """
+    name = stream.channel or stream.raw_name or "?"
+    prefix = f"[官方源] {done}/{total} {name}"
+    if elapsed is None:
+        result = "同台备用" if stream.ok else (stream.error or "跳过")
+        return f"{prefix} — {result}"
+    deferred = stream.playlist_only and not stream.url
+    if stream.ok:
+        if deferred:
+            detail = f"{stream.height}P（播放时测速）" if stream.height else "播放时测速"
+            return f"{prefix} 通 {detail}"
+        detail = f"{stream.height}P {stream.speed_mbps:.1f}Mbps" if stream.height else ""
+        return f"{prefix} {elapsed:.1f}s 通 {detail}".rstrip()
+    return f"{prefix} {elapsed:.1f}s 弃 {stream.error or ''}".rstrip()
+
+
 def _collect(settings: Settings, collectors: list[Collector], log: Logger) -> tuple[list[Stream], list[dict]]:
     client = build_client(
         user_agent=settings.user_agent,
@@ -500,16 +523,7 @@ def _probe_candidates(
 
         def on_line(stream: Stream, elapsed: float | None, done: int, total: int) -> None:
             # 每条都留一行：面板上「卡住不动」的时候，唯一能定位问题台的信息就是它。
-            name = stream.channel or stream.raw_name or "?"
-            if elapsed is None:
-                result = "同台备用" if stream.ok else (stream.error or "跳过")
-                log(f"[官方源] {done}/{total} {name} — {result}")
-                return
-            if stream.ok:
-                detail = f"{stream.height}P {stream.speed_mbps:.1f}Mbps" if stream.height else ""
-                log(f"[官方源] {done}/{total} {name} {elapsed:.1f}s 通 {detail}".rstrip())
-            else:
-                log(f"[官方源] {done}/{total} {name} {elapsed:.1f}s 弃 {stream.error or ''}".rstrip())
+            log(_official_log_line(stream, elapsed, done, total))
 
         def on_official(done: int, total: int) -> None:
             if done == total:
