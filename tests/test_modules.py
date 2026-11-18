@@ -159,6 +159,70 @@ class TestPanel(unittest.TestCase):
         self.assertIn('btnId === "btnModuleSave"', js)
         self.assertIn("payload.disabled_modules", js)
 
+    def test_module_card_has_status_channels_and_config_button(self):
+        js = (WEB / "app.js").read_text(encoding="utf-8")
+        self.assertIn("builtin-status", js)
+        self.assertIn("builtin-chip", js)
+        self.assertIn('data-config=', js)
+        self.assertIn("openModuleModal", js)
+
+    def test_module_modal_and_channel_list_exist(self):
+        html = (WEB / "index.html").read_text(encoding="utf-8")
+        for eid in ("moduleModal", "moduleChannels", "moduleModalTitle", "btnModuleModalClose"):
+            self.assertIn(f'id="{eid}"', html)
+        css = (WEB / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".module-modal", css)
+        self.assertIn(".chan-chip", css)
+
+
+class TestModuleChannelSummary(unittest.TestCase):
+    def test_channels_grouped_by_module_and_category(self):
+        from iptvhd.service import _module_channels
+
+        result = {"channels": [
+            {"name": "CCTV-1 综合", "group": "央视频"},
+            {"name": "湖南卫视", "group": "综合频道"},
+            {"name": "CCTV-5 体育", "group": "咪咕视频"},
+            {"name": "湖北卫视", "group": "运营商官方源"},
+            {"name": "电影频道", "group": "咪咕视频"},
+        ]}
+        found = _module_channels(result)
+        # 底层源名「综合频道」也是央视频的一员，归并到同一模块
+        cctv = found["央视频"]
+        self.assertEqual(cctv["total"], 2)
+        self.assertEqual(cctv["groups"]["央视"], ["CCTV-1 综合"])
+        self.assertEqual(cctv["groups"]["卫视"], ["湖南卫视"])
+        self.assertEqual(found["咪咕视频"]["groups"]["央视"], ["CCTV-5 体育"])
+        self.assertEqual(found["咪咕视频"]["groups"]["其它"], ["电影频道"])
+
+    def test_channel_summary_survives_bad_result(self):
+        from iptvhd.service import _module_channels, _module_catalog
+
+        self.assertEqual(_module_channels(None), {})
+        self.assertEqual(_module_channels({"channels": "坏数据"}), {})
+        # 传了坏 result 的 catalog 仍要给四张卡片，字段齐全
+        catalog = _module_catalog(project(), {"channels": "坏数据"})
+        for m in catalog["builtins"]:
+            self.assertEqual(m["channels"], {})
+            self.assertEqual(m["count"], 0)
+
+    def test_catalog_exposes_channel_fields(self):
+        from iptvhd.service import _module_catalog
+
+        result = {
+            "channels": [{"name": "CCTV-1", "group": "央视频"}],
+            "report": {"sources": [
+                {"name": "综合频道", "count": 61},
+                {"name": "咪咕视频", "count": 127},
+            ]},
+        }
+        rows = {m["name"]: m for m in _module_catalog(project(), result)["builtins"]}
+        self.assertEqual(rows["央视频"]["count"], 1)
+        self.assertEqual(rows["央视频"]["collected"], 61)
+        self.assertTrue(rows["央视频"]["configurable"])
+        self.assertTrue(rows["咪咕视频"]["configurable"])
+        self.assertFalse(rows["第三方聚合源"]["configurable"])
+
 
 if __name__ == "__main__":
     unittest.main()

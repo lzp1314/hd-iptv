@@ -166,13 +166,50 @@ def _visible(channels: list[Channel], hidden: list[str]) -> list[Channel]:
     return [c for c in channels if c.name not in blocked]
 
 
-def _module_catalog(settings: Settings) -> dict:
+def _module_channels(result: dict | None) -> dict[str, dict]:
+    """从最近一次结果里按展示模块汇总「抓到了哪些频道」。
+
+    只做本地汇总、不发网络。返回 ``{模块名: {"total": N, "groups": {分类: [频道名]}}}``，
+    分类用央视 / 卫视 / 其它三档，供面板模块卡片顶部显示。result 可能是旧文件或缺
+    字段，一律按空处理，绝不让面板因为一份坏结果打不开。
+    """
+    if not result:
+        return {}
+    channels = result.get("channels")
+    if not isinstance(channels, list):
+        return {}
+    out: dict[str, dict] = {}
+    for ch in channels:
+        if not isinstance(ch, dict):
+            continue
+        module = display_module(str(ch.get("group") or "").strip()) or "未分组"
+        name = str(ch.get("name") or "").strip()
+        if not name:
+            continue
+        bucket = out.setdefault(module, {"total": 0, "groups": {}})
+        bucket["total"] += 1
+        upper = name.upper()
+        if "央视" in name or "CCTV" in upper or "CGTN" in upper or "CETV" in upper:
+            cat = "央视"
+        elif "卫视" in name:
+            cat = "卫视"
+        else:
+            cat = "其它"
+        bucket["groups"].setdefault(cat, []).append(name)
+    for bucket in out.values():
+        for names in bucket["groups"].values():
+            names.sort()
+    return out
+
+
+def _module_catalog(settings: Settings, result: dict | None = None) -> dict:
     """面板「数据源」页的模块清单：内置大类 + 更多源。
 
     内置大类（咪咕视频 / 央视频 / 第三方聚合源 / 运营商官方源）置顶，点开可展开
     各自的配置；sources.toml 里其余源收进「更多源」折叠区，仍各自一个开关。
     复用 load_sources：它已经把 sources.toml、注入的咪咕、本省自动源汇到一起，
     并把面板关掉的标成 enabled=False。这里只读本地配置，不发网络。
+    ``result`` 传入时，每个模块额外带上最近一次抓到的频道（分类 + 频道名）。
     """
     from .settings import BUILTIN_MODULES, display_module
 
@@ -186,17 +223,30 @@ def _module_catalog(settings: Settings) -> dict:
         for x in sources
         if str(x.get("name") or "").strip()
     }
+    found = _module_channels(result)
+    # 采集统计：底层源名 → 抓取条数。模块关掉时 result 里可能没有它的频道，
+    # 这时用采集条数兜底，卡片上仍能显示「上次抓到 N 条」。
+    stats = {
+        str(row.get("name") or "").strip(): row
+        for row in (((result or {}).get("report", {}) or {}).get("sources", []) or [])
+        if str(row.get("name") or "").strip()
+    }
     builtins: list[dict] = []
     for module, members in BUILTIN_MODULES.items():
         # 模块只要有任意一个底层源在、且没被面板关，就算开着
         present = [m for m in members if m in by_name]
         enabled = any(bool(by_name[m].get("enabled", True)) for m in present)
+        ch = found.get(module, {"total": 0, "groups": {}})
+        collected = sum(int(stats.get(m, {}).get("count") or 0) for m in members)
         builtins.append({
             "name": module,
             "members": list(members),
             "types": sorted({str(by_name[m].get("type") or "") for m in present if by_name[m].get("type")}),
             "enabled": enabled,
-            "configurable": module == "咪咕视频",
+            "configurable": module in {"咪咕视频", "央视频"},
+            "channels": ch["groups"],
+            "count": ch["total"],
+            "collected": collected,
         })
 
     covered = {m for members in BUILTIN_MODULES.values() for m in members}
@@ -488,7 +538,7 @@ class State:
         return info
 
     # ---------------- 设置 ----------------
-    def current_settings(self) -> dict:
+    def current_settings(self, result: dict | None = None) -> dict:
         s = self.settings
         return {
             "interval_hours": s.interval_hours,
@@ -506,7 +556,7 @@ class State:
             "epg_source": s.epg_source,
             "hidden": s.hidden,
             # 「数据源」页：所有源模块 + 面板关掉的名字（只读，改走 btnModuleSave）
-            "modules": _module_catalog(s),
+            "modules": _module_catalog(s, result),
             "disabled_modules": s.disabled_modules,
             "migu_enabled": s.migu_enabled,
             # 账号非零即可：令牌本身绝不回传给面板，防止被截图/代理日志带走。
@@ -985,7 +1035,7 @@ def make_handler(state: State):
                         "generated_at": result.get("generated_at", ""),
                         "report": result.get("report", {}),
                         "logs": state.logs[-40:],
-                        "settings": state.current_settings(),
+                        "settings": state.current_settings(result),
                         "base": self._base(),
                         # 这条宽带是哪里的。只用于面板提示，采集流程不看它。
                         "region": state.region or {},
@@ -1018,7 +1068,7 @@ def make_handler(state: State):
                     }
                 )
             elif path == "/api/settings":
-                self._json({"settings": state.current_settings(), "epg": state.epg.stats()})
+                self._json({"settings": state.current_settings(load_result(settings) or {}), "epg": state.epg.stats()})
             elif path == "/api/region/options":
                 from .region import ISP_NAMES, PROVINCES
 

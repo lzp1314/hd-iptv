@@ -179,12 +179,20 @@
       聚合源三条并入「第三方聚合源」，央视频的两条接口并入「央视频」。
     </p>
 
-    <!-- 点开「咪咕视频」模块时展开：账号只存本机、只用于换票 -->
-    <div id="miguConfig" class="module-config" hidden>
-      <div class="module-config-head">
-        <h3>咪咕视频 · 账号与画质</h3>
-        <span class="hint">央视 / 卫视等公开频道播放时现换一张有效地址，由播放器按自己网络就近取流。</span>
-      </div>
+    <!-- 点模块卡片的「配置 ›」弹出：账号只存本机、只用于换票 -->
+    <div id="moduleModal" class="module-modal" hidden>
+      <div class="module-modal-panel">
+        <div class="module-modal-head">
+          <h3 id="moduleModalTitle">模块配置</h3>
+          <button id="btnModuleModalClose" class="btn" type="button">关闭</button>
+        </div>
+        <div id="moduleChannels" class="module-channels"></div>
+        <div id="moduleOtherConfig" class="module-other-config" hidden></div>
+        <div id="miguConfig" class="module-config" hidden>
+          <div class="module-config-head">
+            <h3>咪咕视频 · 账号与画质</h3>
+            <span class="hint">央视 / 卫视等公开频道播放时现换一张有效地址，由播放器按自己网络就近取流。</span>
+          </div>
       <p class="hint result" id="miguStatus" hidden></p>
       <div class="form">
         <label>启用咪咕视频
@@ -239,6 +247,8 @@
         账号令牌只存本机，不进播放地址、订阅链接或日志。令牌失效时平台不会报错，
         只会按游客给流，播放不中断，日志会提示重新获取。
       </p>
+        </div>
+      </div>
     </div>
   </section>
 

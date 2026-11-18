@@ -297,23 +297,37 @@ function fillSettings(s) {
       const name = String(m.name || "");
       const members = Array.isArray(m.members) ? m.members : [];
       const types = Array.isArray(m.types) ? m.types : [];
-      const configurable = m.configurable ? " configurable" : "";
+      const channels = m.channels && typeof m.channels === "object" ? m.channels : {};
+      const count = Number(m.count) || 0;
+      const collected = Number(m.collected) || 0;
+      // 卡片顶部状态：抓到的频道数优先，旧结果没有时用采集条数兜底
+      const shown = count || collected;
+      const statusCls = m.enabled ? "on" : "off";
+      const statusTxt = m.enabled
+        ? `● 正常 · 抓到 ${shown} 个频道`
+        : `○ 已关闭 · 上次抓到 ${shown} 个频道`;
+      // 分类频道名标签：央视 / 卫视 / 其它，每类显示前若干个名
+      const cats = ["央视", "卫视", "其它"].filter((c) => Array.isArray(channels[c]) && channels[c].length);
+      const chips = cats.map((c) => {
+        const names = channels[c];
+        const preview = names.slice(0, 4).map(esc).join("、");
+        const more = names.length > 4 ? ` 等 ${names.length} 个` : `（${names.length}）`;
+        return `<span class="builtin-chip" title="${esc(names.join("、"))}">${esc(c)} ${esc(preview)}${esc(more)}</span>`;
+      }).join("");
       const detail = members.length
         ? `包含底层源：${members.map(esc).join("、")}`
         : "当前配置里没有这一组的底层源，打开后下一轮才会采集。";
-      return `<div class="builtin-module${configurable}" data-module="${esc(name)}">`
+      return `<div class="builtin-module" data-module="${esc(name)}">`
         + `<div class="builtin-head">`
         + `<label class="builtin-toggle">`
         + `<input type="checkbox" class="module-switch"${m.enabled ? " checked" : ""}>`
         + `</label>`
-        + `<button type="button" class="builtin-name" data-expand="${esc(name)}">`
-        + `${esc(name)} <span class="builtin-arrow">▾</span></button>`
+        + `<button type="button" class="builtin-name">${esc(name)}</button>`
         + `<span class="module-type">${types.map(esc).join(" / ")}</span>`
         + `</div>`
-        + `<div class="builtin-detail" hidden>`
-        + `<p class="hint">${detail}</p>`
-        + `${m.configurable ? '<button type="button" class="btn mini" data-config="migu">展开账号与画质配置</button>' : ""}`
-        + `</div>`
+        + `<p class="builtin-status ${statusCls}">${esc(statusTxt)}</p>`
+        + (chips ? `<div class="builtin-chips">${chips}</div>` : `<p class="hint">${detail}</p>`)
+        + `<button type="button" class="builtin-config-btn" data-config="${esc(name)}">配置 ›</button>`
         + `</div>`;
     }).join("");
   }
@@ -338,6 +352,57 @@ function fillSettings(s) {
   if ($("setMiguEnabled") && miguBuiltin) {
     $("setMiguEnabled").value = miguBuiltin.enabled ? "1" : "0";
   }
+}
+
+// 模块「配置 ›」弹窗：每个模块单独看它抓到的频道和自己的配置。
+// 只有咪咕有账号/画质表单（沿用现有 miguConfig 节点，不新建 id）；央视频与
+// 其它模块展示说明文字。后面要给某模块加配置项，在这里按名字加一支即可。
+const MODULE_INFO = {
+  "咪咕视频": "央视 / 卫视 / 体育等频道，播放时现换一张有效地址。账号与画质在下面单独保存。",
+  "央视频": "央视与卫视的官方公开频道，匿名取流。会员频道登录暂未内置。",
+  "第三方聚合源": "多条公开转播线路聚合，按 latency 自动选最快的。没有单独账号配置。",
+  "运营商官方源": "本省运营商的官方单播/组播源，按省份和运营商自动匹配。省份在「宽带与省份」页设置。",
+};
+
+function openModuleModal(name) {
+  const modal = $("moduleModal");
+  if (!modal) return;
+  const builtin = ((settings && settings.modules && settings.modules.builtins) || [])
+    .find((m) => m.name === name) || {};
+  const channels = builtin.channels || {};
+  if ($("moduleModalTitle")) $("moduleModalTitle").textContent = name + " · 配置";
+  // 抓到的频道：按分类列频道名
+  const box = $("moduleChannels");
+  if (box) {
+    const cats = ["央视", "卫视", "其它"].filter((c) => Array.isArray(channels[c]) && channels[c].length);
+    const total = Number(builtin.count) || 0;
+    if (!cats.length) {
+      box.innerHTML = `<p class="chan-empty">还没有抓到频道。打开这个模块并更新一次后，这里会列出它抓到的频道。</p>`;
+    } else {
+      box.innerHTML = `<p class="chan-empty">抓到的频道 · ${total} 个</p>` + cats.map((c) => {
+        const names = channels[c];
+        return `<div class="chan-group">`
+          + `<div class="chan-group-name">${esc(c)}（${names.length}）</div>`
+          + `<div class="chan-chips">${names.map((n) => `<span class="chan-chip" title="${esc(n)}">${esc(n)}</span>`).join("")}</div>`
+          + `</div>`;
+      }).join("");
+    }
+  }
+  // 配置区：咪咕显示账号表单，其它模块显示说明
+  const miguCfg = $("miguConfig");
+  const other = $("moduleOtherConfig");
+  const isMigu = name === "咪咕视频";
+  if (miguCfg) miguCfg.hidden = !isMigu;
+  if (other) {
+    other.hidden = isMigu;
+    if (!isMigu) other.textContent = MODULE_INFO[name] || "这个模块没有单独配置项，开关即可控制是否参与。";
+  }
+  modal.hidden = false;
+}
+
+function closeModuleModal() {
+  const modal = $("moduleModal");
+  if (modal) modal.hidden = true;
 }
 
 // 两个分区各有一颗「保存」，都提交同一份设置（表单控件在 DOM 里始终存在，
@@ -1168,24 +1233,23 @@ document.addEventListener("DOMContentLoaded", () => {
   if ($("btnModuleSave")) $("btnModuleSave").addEventListener("click", () => saveSettings("btnModuleSave", "moduleNote"));
   // 模块开关是动态渲染的，用事件委托标脏，避免被轮询覆盖
   if ($("moduleList")) $("moduleList").addEventListener("change", () => { settingsDirty = true; });
-  // 内置模块卡片：点名字展开/收起说明；「咪咕视频」额外展开账号配置块。
+  // 内置模块卡片：点「配置 ›」打开该模块的独立弹窗；开关变化标脏。
   // 动态渲染，用事件委托绑在容器上。
   if ($("builtinModules")) {
     $("builtinModules").addEventListener("click", (e) => {
-      const expandBtn = e.target.closest("[data-expand]");
-      if (!expandBtn) return;
-      const card = expandBtn.closest(".builtin-module");
-      if (!card) return;
-      const detail = card.querySelector(".builtin-detail");
-      if (detail) detail.hidden = !detail.hidden;
-      const miguCfg = $("miguConfig");
-      if (miguCfg) {
-        // 同一时刻只展开一个配置块；咪咕卡片展开时显示它的账号配置
-        const wantMigu = card.dataset.module === "咪咕视频" && detail && !detail.hidden;
-        miguCfg.hidden = !wantMigu;
-      }
+      const cfgBtn = e.target.closest("[data-config]");
+      if (!cfgBtn) return;
+      const card = cfgBtn.closest(".builtin-module");
+      if (card) openModuleModal(card.dataset.module || cfgBtn.dataset.config);
     });
     $("builtinModules").addEventListener("change", () => { settingsDirty = true; });
+  }
+  if ($("btnModuleModalClose")) $("btnModuleModalClose").addEventListener("click", closeModuleModal);
+  if ($("moduleModal")) {
+    // 点弹窗外的遮罩关闭（点到面板本身不关）
+    $("moduleModal").addEventListener("click", (e) => {
+      if (e.target === $("moduleModal")) closeModuleModal();
+    });
   }
   if ($("btnProbe")) $("btnProbe").addEventListener("click", probeRegion);
   if ($("btnScan")) $("btnScan").addEventListener("click", scanProvince);
