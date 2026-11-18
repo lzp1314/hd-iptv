@@ -173,6 +173,11 @@ class TestPanel(unittest.TestCase):
         css = (WEB / "style.css").read_text(encoding="utf-8")
         self.assertIn(".module-modal", css)
         self.assertIn(".chan-chip", css)
+        # display:flex 会盖掉浏览器默认的 [hidden]{display:none}，
+        # 必须有显式规则，否则点「关闭」设了 hidden 却仍显示。
+        self.assertIn(".module-modal[hidden]", css)
+        js = (WEB / "app.js").read_text(encoding="utf-8")
+        self.assertIn("modal.hidden = true", js)
 
 
 class TestModuleChannelSummary(unittest.TestCase):
