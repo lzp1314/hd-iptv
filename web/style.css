@@ -318,20 +318,18 @@ code {
   background: #fbfcfd;
   padding: 14px 16px;
 }
-.subscribe-aside .url-row { flex-wrap: wrap; gap: 6px; }
-.subscribe-aside .url-row .tag { flex: none; }
-.subscribe-aside .url-row .btn { flex: none; }
-/* 地址输入框占满整行：长地址不被「标签+复制按钮」挤到看不见，可完整显示并选中复制 */
+/* 标签 / 地址 / 复制按钮同一行：复制按钮紧跟在输入框后面，不再掉到下一行 */
+.subscribe-aside .url-row { flex-wrap: nowrap; gap: 8px; }
+.subscribe-aside .url-row .tag { flex: none; order: 1; }
 .subscribe-aside .url-row input {
-  flex: 1 1 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   order: 2;
-  width: 100%;
+  width: auto;
   font-size: 12px;
-  word-break: break-all;
   cursor: text;
 }
-.subscribe-aside .url-row .tag { order: 1; }
-.subscribe-aside .url-row .btn { order: 3; }
+.subscribe-aside .url-row .btn { flex: none; order: 3; }
 
 /* 内置模块：置顶的四个大类，点名字展开说明，咪咕额外展开账号配置 */
 .builtin-modules {
@@ -402,11 +400,15 @@ code {
 }
 /* display:flex 会盖掉浏览器默认的 [hidden]{display:none}，必须显式压回去 */
 .module-modal[hidden] { display: none; }
+/* 弹窗做大、内边距放宽：咪咕配置项多，560px 挤成三四行说明，读起来累 */
 .module-modal-panel {
-  width: min(560px, 100%); max-height: 84vh; overflow: auto;
-  background: #fff; border-radius: 12px; padding: 18px 20px;
+  width: min(880px, 100%); max-height: 90vh; overflow: auto;
+  background: #fff; border-radius: 14px; padding: 24px 30px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, .2);
 }
+.module-modal-panel .form { gap: 16px 24px; }
+/* 弹窗里的字段说明给足行高，别让文字叠在一起 */
+.module-modal-panel .form label { gap: 7px; line-height: 1.65; }
 .module-modal-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: 12px; margin-bottom: 12px;

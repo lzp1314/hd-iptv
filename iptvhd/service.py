@@ -262,17 +262,33 @@ def _module_catalog(settings: Settings, result: dict | None = None) -> dict:
     return {"builtins": builtins, "others": others}
 
 
-def _module_visible(channels: list[Channel], settings: Settings) -> list[Channel]:
-    """订阅输出按启用的模块过滤：关掉的分组立刻消失，不用重新采集。
+def _module_disabled_names(settings: Settings) -> set[str]:
+    """把关闭的模块开关归一成展示模块名，供订阅和「我的频道」共用一套判断。
 
-    频道的 group 已经是展示模块名（pipeline 分组时归一过），这里直接用展示名
-    比对；旧配置里若存的是底层源名，也先用 display_module 归一，保证升级后
-    原先关掉的模块仍然关着。
+    旧配置里关的可能是底层源名或展示名，统一经 display_module 归一，升级后
+    原先关掉的模块仍然关着。两个出口都读这里，避免规则漂移——以前订阅过滤
+    了、「我的频道」没过滤，才会出现"关掉的源还在列表里"的不一致。
     """
-    disabled = {display_module(x) for x in settings.disabled_modules}
+    return {display_module(x) for x in settings.disabled_modules}
+
+
+def _module_visible(channels: list[Channel], settings: Settings) -> list[Channel]:
+    """订阅输出按启用的模块过滤：关掉的分组立刻消失，不用重新采集。"""
+    disabled = _module_disabled_names(settings)
     if not disabled:
         return channels
     return [c for c in channels if display_module(c.group) not in disabled]
+
+
+def _row_module_visible(row: dict, disabled: set[str]) -> bool:
+    """「我的频道」的 result.json 行按模块过滤，规则与订阅 _module_visible 一致。
+
+    result.json 里每行是 dict（group 为展示模块名），不是 Channel 对象，所以单独
+    走这一层，但判断逻辑一样：group 归一后不在关闭集合里就留下。
+    """
+    if not disabled:
+        return True
+    return display_module(str(row.get("group") or "")) not in disabled
 
 
 def _ysp_resolver(slug: str) -> tuple[str, str]:
@@ -1082,14 +1098,16 @@ def make_handler(state: State):
             elif path == "/api/channels":
                 result = load_result(settings) or {}
                 hidden = set(settings.hidden)
+                disabled = _module_disabled_names(settings)
                 rows = [
                     dict(row, hidden=row.get("name") in hidden)
                     for row in (result.get("channels", []) or [])
+                    # 与订阅一致：关掉的模块整组不返回，面板只显示启用的源
+                    if _row_module_visible(row, disabled)
                 ]
                 self._json({
                     "generated_at": result.get("generated_at", ""),
                     "channels": rows,
-                    # 面板要能列出「已隐藏」并提供一键恢复，所以整份返回、只打标记
                     "hidden": sorted(hidden),
                 })
             elif path == "/health":

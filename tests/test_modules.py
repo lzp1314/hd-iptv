@@ -166,6 +166,22 @@ class TestPanel(unittest.TestCase):
         self.assertIn('data-config=', js)
         self.assertIn("openModuleModal", js)
 
+    def test_modal_wider_and_copy_button_inline(self):
+        """配置弹窗放大、订阅复制按钮跟输入框同一行。"""
+        css = (WEB / "style.css").read_text(encoding="utf-8")
+        self.assertIn("width: min(880px, 100%)", css)
+        # 复制按钮与输入框同一行：nowrap + 按 order 排，不再换行掉下去
+        self.assertIn(".subscribe-aside .url-row { flex-wrap: nowrap", css)
+        self.assertIn(".subscribe-aside .url-row .btn { flex: none; order: 3; }", css)
+
+    def test_card_wording_distinguishes_collected_from_listed(self):
+        """开着却没台进列表时，卡片不能拿历史采集数冒充"抓到 N 个"，要催更新。"""
+        js = (WEB / "app.js").read_text(encoding="utf-8")
+        self.assertIn("尚未进入列表，点「更新此源」", js)
+        self.assertIn("还没抓到频道，点「更新此源」", js)
+        # 弹窗空态同样要指路，而不是让人以为这些台已经能播
+        self.assertIn("回到卡片点「更新此源」采集一次", js)
+
     def test_module_modal_and_channel_list_exist(self):
         html = (WEB / "index.html").read_text(encoding="utf-8")
         for eid in ("moduleModal", "moduleChannels", "moduleModalTitle", "btnModuleModalClose"):

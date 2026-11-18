@@ -303,12 +303,19 @@ function fillSettings(s) {
       const channels = m.channels && typeof m.channels === "object" ? m.channels : {};
       const count = Number(m.count) || 0;
       const collected = Number(m.collected) || 0;
-      // 卡片顶部状态：抓到的频道数优先，旧结果没有时用采集条数兜底
-      const shown = count || collected;
       const statusCls = m.enabled ? "on" : "off";
-      const statusTxt = m.enabled
-        ? `● 正常 · 抓到 ${shown} 个频道`
-        : `○ 已关闭 · 上次抓到 ${shown} 个频道`;
+      // count = 当前列表里真有的频道；collected = 历史采集条数。
+      // 开着却一条都没进列表时，别拿历史数字冒充"抓到 N 个"，要明确催一次更新。
+      let statusTxt;
+      if (!m.enabled) {
+        statusTxt = `○ 已关闭 · 上次抓到 ${collected || count} 个频道`;
+      } else if (count > 0) {
+        statusTxt = `● 正常 · 抓到 ${count} 个频道`;
+      } else if (collected > 0) {
+        statusTxt = `● 已开启 · 上次抓到 ${collected} 条 · 尚未进入列表，点「更新此源」`;
+      } else {
+        statusTxt = "● 已开启 · 还没抓到频道，点「更新此源」";
+      }
       // 分类频道名标签：央视 / 卫视 / 其它，每类显示前若干个名
       const cats = ["央视", "卫视", "其它"].filter((c) => Array.isArray(channels[c]) && channels[c].length);
       const chips = cats.map((c) => {
@@ -386,8 +393,13 @@ function openModuleModal(name) {
   if (box) {
     const cats = ["央视", "卫视", "其它"].filter((c) => Array.isArray(channels[c]) && channels[c].length);
     const total = Number(builtin.count) || 0;
+    const collected = Number(builtin.collected) || 0;
     if (!cats.length) {
-      box.innerHTML = `<p class="chan-empty">还没有抓到频道。打开这个模块并更新一次后，这里会列出它抓到的频道。</p>`;
+      // 列表里没有台时，历史采集数只做说明，不能让人以为这些台现在能播
+      const hint = collected > 0
+        ? `上次采集到 ${collected} 条，但当前列表里还没有它的频道。回到卡片点「更新此源」采集一次，这里就会列出来。`
+        : `还没有抓到频道。回到卡片点「更新此源」采集一次，这里就会列出来。`;
+      box.innerHTML = `<p class="chan-empty">${esc(hint)}</p>`;
     } else {
       box.innerHTML = `<p class="chan-empty">抓到的频道 · ${total} 个</p>` + cats.map((c) => {
         const names = channels[c];
