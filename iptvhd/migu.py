@@ -151,39 +151,50 @@ def _md5(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()
 
 
-def _dd_calcu(pu_data: str, pid: str, rate: int, user_id: str = "") -> str:
-    """把平台回包里的 puData 补成可直接请求的校验串。
+def _weave(pu_data: str, inject: dict[int, str]) -> str:
+    """把 puData 首尾成对交错展开，并在约定序号后插入校验字符。
 
-    按首尾交错展开，并在固定位置插入几个由日期、频道编号和账号决定的字符。
-    这些位置是平台的约定，改一位就会被拒。
+    ``inject`` 的键是展开序号（从 0 起），值是该处要插入的字符；没有对应键就跳过。
+    插入位是平台校验的骨架，错一位整条地址就作废。把"位置→字符"做成一张表，
+    新版票和旧版票就只需各提供自己的表，不必各写一遍展开循环。
     """
+    out: list[str] = []
+    for i in range(len(pu_data) // 2):
+        out.append(pu_data[-1 - i])
+        out.append(pu_data[i])
+        char = inject.get(i)
+        if char is not None:
+            out.append(char)
+    return "".join(out)
+
+
+def _digit_at(text: str, position: int) -> int:
+    """取字符串指定位置的十进制数字，越界或非数字按 0 处理。"""
+    return int(text[position]) if len(text) > position and text[position].isdigit() else 0
+
+
+def _lead_char(user_id: str, rate: int) -> str:
+    """新版校验串第 1 个插入位：标清看档位，其余按账号尾号推导。"""
+    if rate == 2:
+        return "v"
+    if 3 < len(user_id) <= 8:
+        return "e"
+    if len(user_id) > 7 and user_id[7].isdigit():
+        return _DD_KEYS[int(user_id[7])]
+    return "v"
+
+
+def _dd_calcu(pu_data: str, pid: str, rate: int, user_id: str = "") -> str:
+    """为新版换票生成校验串：日期、频道和账号各贡献一位，按约定落位。"""
     if not pu_data:
         return ""
-    words = ["v", "a", "0", "a"]
-    short_id = 3 < len(user_id) <= 8
-    if short_id:
-        words[0] = "e"
-    elif user_id and len(user_id) > 7 and user_id[7].isdigit():
-        words[0] = _DD_KEYS[int(user_id[7])]
-    if rate == 2:
-        words[0] = "v"
-
     day = datetime.now().strftime("%Y%m%d")
-    pid_at = int(pid[6]) if len(pid) > 6 and pid[6].isdigit() else 0
-    out: list[str] = []
-    half = len(pu_data) // 2
-    for i in range(half):
-        out.append(pu_data[len(pu_data) - i - 1])
-        out.append(pu_data[i])
-        if i == 1:
-            out.append(words[0])
-        elif i == 2:
-            out.append(_DD_KEYS[int(day[0])])
-        elif i == 3:
-            out.append(_DD_KEYS[pid_at])
-        elif i == 4:
-            out.append(words[3])
-    return "".join(out)
+    return _weave(pu_data, {
+        1: _lead_char(user_id, rate),
+        2: _DD_KEYS[_digit_at(day, 0)],
+        3: _DD_KEYS[_digit_at(pid, 6)],
+        4: "a",
+    })
 
 
 def _seal(raw: str, pid: str, rate: int, user_id: str = "") -> str:
@@ -336,30 +347,20 @@ def ticket(
 
 
 def _dd_calcu_hd(pu_data: str, pid: str) -> str:
-    """游客高清的校验串：与新版 _dd_calcu 的差别在插入位置和固定字符。
+    """为游客高清票生成校验串：旧版约定，日期取第 3 位、首尾位固定。
 
-    旧版在 i==2 取的是日期串第 3 位（``YYYYMMDD`` 的 ``[2]``），新版取第 1 位；
-    i==1/i==4 旧版固定塞 ``v``/``a``，新版按账号和档位推导。差一位整条地址就废。
+    与新版共用 ``_weave`` 展开，只把注入表换成旧版那套：不认账号、不随档位变，
+    日期从 ``YYYYMMDD`` 的第 3 位取（新版取第 1 位）。
     """
     if not pu_data or not pid:
         return ""
     day = datetime.now().strftime("%Y%m%d")
-    pid_at = int(pid[6]) if len(pid) > 6 and pid[6].isdigit() else 0
-    day_at = int(day[2]) if len(day) > 2 and day[2].isdigit() else 0
-    out: list[str] = []
-    half = len(pu_data) // 2
-    for i in range(half):
-        out.append(pu_data[len(pu_data) - i - 1])
-        out.append(pu_data[i])
-        if i == 1:
-            out.append("v")
-        elif i == 2:
-            out.append(_DD_KEYS[day_at])
-        elif i == 3:
-            out.append(_DD_KEYS[pid_at])
-        elif i == 4:
-            out.append("a")
-    return "".join(out)
+    return _weave(pu_data, {
+        1: "v",
+        2: _DD_KEYS[_digit_at(day, 2)],
+        3: _DD_KEYS[_digit_at(pid, 6)],
+        4: "a",
+    })
 
 
 def _seal_hd(raw: str, pid: str) -> str:

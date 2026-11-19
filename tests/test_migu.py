@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,6 +49,46 @@ class TestProtocol(unittest.TestCase):
         # 首尾交错：第 1、2 个字符来自 puData 的末位和首位
         self.assertEqual(a[0], "p")
         self.assertEqual(a[1], "a")
+
+    def test_dd_calcu_protocol_bytes_are_locked(self):
+        """校验串的字节是平台约定，重构实现后不得漂移。
+
+        这组黄金值在固定日期下录制，覆盖：游客标清、短号段、账号尾号查表、
+        日期不同取位（新版取首位/旧版取第 3 位）、短 puData 与空串。
+        """
+        class Frozen(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 19, 12, 0, 0)
+
+        golden = [
+            # (puData, pid, rate, user_id, 新版期望, 旧版期望)
+            ("abcdefghijklmnop", "608807420", 2, "", "paobvncamdyleakfjgih", "paobvncamdyleakfjgih"),
+            ("abcdefghijklmnop", "608807420", 3, "13800138000", "paobkncamdyleakfjgih", "paobvncamdyleakfjgih"),
+            ("0123456789abcdef", "641886683", 4, "1380013800", "f0e1kd2ac3wb4aa59687", "f0e1vd2ac3wb4aa59687"),
+            ("ABCD", "608807420", 2, "", "DACBv", "DACBv"),
+            ("", "608807420", 2, "", "", ""),
+        ]
+        with patch.object(migu, "datetime", Frozen):
+            for pu, pid, rate, uid, want_dd, want_hd in golden:
+                with self.subTest(pu=pu, rate=rate, uid=uid):
+                    self.assertEqual(migu._dd_calcu(pu, pid, rate, uid), want_dd)
+                    self.assertEqual(migu._dd_calcu_hd(pu, pid), want_hd)
+
+    def test_dd_calcu_new_vs_old_use_different_day_digit(self):
+        """新版取日期首位、旧版取第 3 位；两者取值不同时不能被合并掉。"""
+        class Frozen(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2019, 8, 7, 12, 0, 0)  # "20190807"：首位 2、第 3 位 1
+
+        with patch.object(migu, "datetime", Frozen):
+            new = migu._dd_calcu("abcdefghijklmnop", "608807420", 3)
+            old = migu._dd_calcu_hd("abcdefghijklmnop", "608807420")
+        self.assertNotEqual(new, old)
+        # 第 8 个字符（索引 7）是日期位：新版取密钥表[2]='a'，旧版取[1]='d'
+        self.assertEqual(new[7], "a")
+        self.assertEqual(old[7], "d")
 
     def test_seal_skips_when_no_pudata(self):
         raw = "http://cdn.example.com/index.m3u8?token=abc"
