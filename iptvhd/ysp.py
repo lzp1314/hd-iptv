@@ -339,8 +339,19 @@ def make_ckey(channel_id: str) -> dict:
 # --------------------------------------------------------------------------- #
 # 播放信息获取
 # --------------------------------------------------------------------------- #
-def play_info(cnlid: str, livepid: str, defn: str = "fhd", client: HttpClient | None = None) -> dict:
-    """换取频道播放信息，原样返回接口的 JSON。"""
+def play_info(
+    cnlid: str,
+    livepid: str,
+    defn: str = "fhd",
+    client: HttpClient | None = None,
+    force_ipv4: bool = False,
+    ip_mode: str = "auto",
+) -> dict:
+    """换取频道播放信息，原样返回接口的 JSON。
+
+    ``ip_mode`` 是地址族三态 auto/ipv4/ipv6；``force_ipv4`` 是旧接口，
+    True 等价于 ip_mode="ipv4"。都只作用于本次自建的客户端。
+    """
     if denied():
         raise YspError("上游限流中，暂停请求 60 秒")
     token = make_ckey(cnlid)
@@ -359,7 +370,9 @@ def play_info(cnlid: str, livepid: str, defn: str = "fhd", client: HttpClient | 
         "flowid": token["flowId"], "playbacktime": "0",
     })
 
-    client = client or HttpClient(user_agent=UA, timeout=10, retries=2)
+    client = client or HttpClient(
+        user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=ip_mode
+    )
     pace()
     resp = client.get(_INFO_URL + "?" + query, headers={"Accept": "application/json"})
     if resp.status in (403, 429):
@@ -444,6 +457,8 @@ def resolve(
     attempts: int = 3,
     pause: float = 1.2,
     meta: dict | None = None,
+    force_ipv4: bool = False,
+    ip_mode: str = "auto",
 ) -> tuple[str, dict, str]:
     """换一个当前确实能取到列表的地址，返回 (地址, 播放信息, 首个分片地址)。
 
@@ -457,11 +472,13 @@ def resolve(
     传 ``meta`` 字典可以把顺手读到的清单信息带出来（分片时长等），
     用来从分片大小推算真实码率，不必为它多发一次请求。
     """
-    client = client or HttpClient(user_agent=UA, timeout=10, retries=2)
+    client = client or HttpClient(
+        user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=ip_mode
+    )
     last = "获取播放信息失败"
     for round_no in range(max(1, attempts)):
         try:
-            info = play_info(cnlid, livepid, defn, client)
+            info = play_info(cnlid, livepid, defn, client, force_ipv4=force_ipv4, ip_mode=ip_mode)
         except YspUnavailable:
             raise
         except YspError as exc:

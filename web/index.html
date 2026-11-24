@@ -194,6 +194,27 @@
         </div>
         <div id="moduleChannels" class="module-channels"></div>
         <div id="moduleOtherConfig" class="module-other-config" hidden></div>
+        <div id="moduleIpConfig" class="module-config">
+          <div class="module-config-head">
+            <h3>网络地址族</h3>
+            <span class="hint">决定这个模块取流时走 IPv4、IPv6 还是自动。改完立即保存，播放时生效。</span>
+          </div>
+          <div class="form">
+            <label class="chk"><input id="setIpModeAuto" type="radio" name="ipMode" value="auto" checked> 自适应（推荐）
+              <span class="hint">系统默认选路；遇到 CDN 拒绝会自动换另一地址族重试一次。</span>
+            </label>
+            <label class="chk"><input id="setIpModeV4" type="radio" name="ipMode" value="ipv4"> 仅 IPv4
+              <span class="hint">这个模块固定走 IPv4。适合 IPv6 出口被上游拒绝的情况。</span>
+            </label>
+            <label class="chk" id="ipModeV6Label"><input id="setIpModeV6" type="radio" name="ipMode" value="ipv6"> 仅 IPv6
+              <span class="hint">这个模块固定走 IPv6。运营商官方源默认走这一族。</span>
+            </label>
+          </div>
+          <div class="btn-row">
+            <button id="btnIpModeSave" class="btn primary" type="button">保存地址族设置</button>
+          </div>
+          <p class="hint result" id="ipModeNote" hidden></p>
+        </div>
         <div id="miguConfig" class="module-config" hidden>
           <div class="module-config-head">
             <h3>咪咕视频 · 账号与画质</h3>

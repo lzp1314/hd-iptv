@@ -382,13 +382,25 @@ const MODULE_INFO = {
   "运营商官方源": "本省运营商的官方单播/组播源，按省份和运营商自动匹配。省份在「宽带与省份」页设置。",
 };
 
+let currentModuleName = "";
+
 function openModuleModal(name) {
   const modal = $("moduleModal");
   if (!modal) return;
+  currentModuleName = name;
   const builtin = ((settings && settings.modules && settings.modules.builtins) || [])
     .find((m) => m.name === name) || {};
   const channels = builtin.channels || {};
   if ($("moduleModalTitle")) $("moduleModalTitle").textContent = name + " · 配置";
+
+  // 地址族三态回填；运营商官方源的下发地址是 IPv6 边缘，隐藏「仅 IPv4」
+  const modes = (settings && settings.module_ip_mode) || {};
+  const mode = modes[name] || "auto";
+  const v4Input = $("setIpModeV4");
+  if (v4Input) v4Input.closest("label").hidden = name === "运营商官方源";
+  const radios = document.querySelectorAll('input[name="ipMode"]');
+  radios.forEach((el) => { el.checked = el.value === (mode === "ipv4" && name === "运营商官方源" ? "auto" : mode); });
+  if ($("ipModeNote")) $("ipModeNote").hidden = true;
   // 抓到的频道：按分类列频道名
   const box = $("moduleChannels");
   if (box) {
@@ -462,6 +474,12 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
       if ($("setMiguEnabled")) $("setMiguEnabled").value = miguSwitch.checked ? "1" : "0";
     }
   }
+  // 地址族三态：只提交当前弹窗模块的这一项，其它表单控件一概不碰。
+  if (btnId === "btnIpModeSave") {
+    const picked = document.querySelector('input[name="ipMode"]:checked');
+    const value = picked ? picked.value : "auto";
+    payload.module_ip_mode = { [currentModuleName]: value };
+  }
   // 咪咕账号/画质只在咪咕配置块自己的保存按钮提交。别的页共用一个 saveSettings，
   // 它们的表单控件虽在 DOM 里、但用户没填过，误提交会把账号清空。
   if (btnId === "btnMiguSave") {
@@ -507,6 +525,13 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
       note.textContent = `已保存：启用 ${on.length} 个模块（${on.join("、") || "无"}），`
         + `关闭 ${off.length} 个（${off.join("、") || "无"}）。`
         + "订阅链接立即按这个组合输出；关掉的模块下一轮也不再采集。";
+      fillSettings(st);
+    } else if (btnId === "btnIpModeSave") {
+      const st = d.settings || {};
+      const value = ((st.module_ip_mode || {})[currentModuleName]) || "auto";
+      const label = { auto: "自适应", ipv4: "仅 IPv4", ipv6: "仅 IPv6" }[value] || "自适应";
+      note.hidden = false;
+      note.textContent = `已保存：${currentModuleName} 的网络地址族为「${label}」。下一次点播这个模块的频道时生效。`;
       fillSettings(st);
     } else if (btnId === "btnMiguSave") {
       const st = d.settings || {};
@@ -1294,6 +1319,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btnSaveSettings").addEventListener("click", () => saveSettings());
   if ($("btnRegionSave")) $("btnRegionSave").addEventListener("click", () => saveSettings("btnRegionSave", "regionSaveNote"));
   if ($("btnMiguSave")) $("btnMiguSave").addEventListener("click", () => saveSettings("btnMiguSave", "miguNote"));
+  if ($("btnIpModeSave")) $("btnIpModeSave").addEventListener("click", () => saveSettings("btnIpModeSave", "ipModeNote"));
   if ($("btnModuleSave")) $("btnModuleSave").addEventListener("click", () => saveSettings("btnModuleSave", "moduleNote"));
   // 模块开关是动态渲染的，用事件委托标脏，避免被轮询覆盖
   if ($("moduleList")) $("moduleList").addEventListener("change", () => { settingsDirty = true; });

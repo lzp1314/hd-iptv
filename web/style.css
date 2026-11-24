@@ -276,6 +276,9 @@ code {
   display: flex; align-items: center; gap: 6px;
   font-size: 12px; color: var(--muted); cursor: pointer; user-select: none;
 }
+/* checkbox / radio 用原生尺寸，别被 .form input 的 width:100% 拉成一整行 */
+.form .chk input[type="checkbox"],
+.form .chk input[type="radio"] { width: auto; padding: 0; flex: 0 0 auto; }
 .count {
   font-size: 11px; font-weight: 400;
   color: #b45309; background: #fef3c7;

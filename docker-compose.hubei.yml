@@ -37,6 +37,14 @@ services:
       HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-2160}
       HDIPTV_PLAY_MODE: ${HDIPTV_PLAY_MODE:-direct}
       HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
+      # 央视频强制走 IPv4：默认 0 别动。仅在 IPv6 出口被央视频 CDN 拉黑、
+      # 而 IPv4 正常时设 1。只作用于央视频，不影响湖北本省的运营商官方源。
+      HDIPTV_YSP_IPV4: "${HDIPTV_YSP_IPV4:-0}"
+      # 模块网络地址族（auto/ipv4/ipv6），面板为主、这里仅兜底
+      HDIPTV_YSP_IP_MODE: "${HDIPTV_YSP_IP_MODE:-auto}"
+      HDIPTV_MIGU_IP_MODE: "${HDIPTV_MIGU_IP_MODE:-auto}"
+      HDIPTV_OFFICIAL_IP_MODE: "${HDIPTV_OFFICIAL_IP_MODE:-auto}"
+      HDIPTV_AGG_IP_MODE: "${HDIPTV_AGG_IP_MODE:-auto}"
       PUBLIC_URL: "${PUBLIC_URL:-}"
       HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
       # 自动按省取源（面板「运行设置」里的开关优先）；写 0 关闭

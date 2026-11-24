@@ -7,6 +7,7 @@ urllib 本身不提供后两者的计时能力，所以这里自己用 http.clie
 from __future__ import annotations
 
 import gzip
+import http.client
 import socket
 import ssl
 import threading
@@ -22,6 +23,121 @@ DEFAULT_UA = (
 )
 
 _MAX_REDIRECTS = 5
+
+
+class _V4HTTPSConnection(http.client.HTTPSConnection):
+    """只走 IPv4 建连的 HTTPS 连接。
+
+    ``socket.create_connection`` 默认按系统偏好选地址族，容器里常常优先 IPv6；
+    某个上游把本机 IPv6 拉黑、IPv4 却正常时就会一直 403。这里强制用 AF_INET
+    解析、逐地址尝试连接，但 ``host`` 仍是原域名——``http.client`` 会用它填
+    Host 头和 TLS SNI，CDN 正是靠这两个字段分发，换成 IP 会拿到错误节点。
+    """
+
+    def connect(self) -> None:
+        infos = socket.getaddrinfo(self.host, self.port, socket.AF_INET, socket.SOCK_STREAM)
+        if not infos:
+            raise OSError("IPv4 解析失败")
+        last: OSError | None = None
+        for family, socktype, proto, _canon, sockaddr in infos:
+            sock = socket.socket(family, socktype, proto)
+            try:
+                sock.settimeout(self.timeout)
+                sock.connect(sockaddr)
+                break
+            except OSError as exc:
+                last = exc
+                sock.close()
+        else:
+            raise last or OSError("IPv4 连接失败")
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+        else:
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _V4HTTPConnection(http.client.HTTPConnection):
+    """只走 IPv4 建连的 HTTP 连接，理由同上。"""
+
+    def connect(self) -> None:
+        infos = socket.getaddrinfo(self.host, self.port, socket.AF_INET, socket.SOCK_STREAM)
+        if not infos:
+            raise OSError("IPv4 解析失败")
+        last: OSError | None = None
+        for family, socktype, proto, _canon, sockaddr in infos:
+            sock = socket.socket(family, socktype, proto)
+            try:
+                sock.settimeout(self.timeout)
+                sock.connect(sockaddr)
+                break
+            except OSError as exc:
+                last = exc
+                sock.close()
+        else:
+            raise last or OSError("IPv4 连接失败")
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+        else:
+            self.sock = sock
+
+
+class _V6HTTPSConnection(http.client.HTTPSConnection):
+    """只走 IPv6 建连的 HTTPS 连接，与 _V4 对称。
+
+    运营商官方源的下发地址就是 ``[2409:...]:port`` 这类 IPv6 边缘，指定「仅 IPv6」
+    时用它。host 仍是域名，Host 头与 SNI 都靠它，不能换成字面地址。
+    """
+
+    def connect(self) -> None:
+        infos = socket.getaddrinfo(self.host, self.port, socket.AF_INET6, socket.SOCK_STREAM)
+        if not infos:
+            raise OSError("IPv6 解析失败")
+        last: OSError | None = None
+        for family, socktype, proto, _canon, sockaddr in infos:
+            sock = socket.socket(family, socktype, proto)
+            try:
+                sock.settimeout(self.timeout)
+                sock.connect(sockaddr)
+                break
+            except OSError as exc:
+                last = exc
+                sock.close()
+        else:
+            raise last or OSError("IPv6 连接失败")
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+        else:
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _V6HTTPConnection(http.client.HTTPConnection):
+    """只走 IPv6 建连的 HTTP 连接，理由同上。"""
+
+    def connect(self) -> None:
+        infos = socket.getaddrinfo(self.host, self.port, socket.AF_INET6, socket.SOCK_STREAM)
+        if not infos:
+            raise OSError("IPv6 解析失败")
+        last: OSError | None = None
+        for family, socktype, proto, _canon, sockaddr in infos:
+            sock = socket.socket(family, socktype, proto)
+            try:
+                sock.settimeout(self.timeout)
+                sock.connect(sockaddr)
+                break
+            except OSError as exc:
+                last = exc
+                sock.close()
+        else:
+            raise last or OSError("IPv6 连接失败")
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+        else:
+            self.sock = sock
+
 
 # ---- 域名解析的独立闸门 ----
 # getaddrinfo 不受 socket 超时约束（它没有超时参数），解析器抽风时一个域名能
@@ -123,6 +239,9 @@ class Response:
     # 读体被截止时间打断：body 不完整。有些源连得上、但一个字节一个字节往回滴，
     # 每次 read 都在超时内返回一点点，光靠 socket 超时永远判不出它已经废了。
     truncated: bool = False
+    # 本次实际建连用的地址族（socket.AF_INET / AF_INET6 / 0=未知）。auto 模式据此
+    # 判断 403 时该换哪一族——IPv6 被 CDN 拒、IPv4 正常时换对方向，只多打一枪。
+    family: int = 0
 
     @property
     def content_type(self) -> str:
@@ -155,17 +274,30 @@ class Response:
 class HttpClient:
     """带重试、限长读取的轻量客户端。"""
 
+    # 地址族三态：auto = 系统默认选路 + 403 时换族重试；ipv4/ipv6 = 只走该族。
+    IP_MODES = ("auto", "ipv4", "ipv6")
+
     def __init__(
         self,
         user_agent: str = "",
         timeout: float = 8.0,
         retries: int = 1,
         proxy: str = "",
+        force_ipv4: bool = False,
+        ip_mode: str = "auto",
     ) -> None:
         self.user_agent = user_agent or DEFAULT_UA
         self.timeout = timeout
         self.retries = max(1, retries)
         self.proxy = proxy
+        # force_ipv4 是旧接口，保留向后兼容：True 等价于 ip_mode="ipv4"。
+        # 新代码一律用 ip_mode。三态默认 auto —— 老行为、老用户完全不变。
+        mode = str(ip_mode or "auto").strip().lower()
+        if force_ipv4:
+            mode = "ipv4"
+        self.ip_mode = mode if mode in self.IP_MODES else "auto"
+        # 兼容旧读取点（tests / 老代码读 client.force_ipv4）
+        self.force_ipv4 = self.ip_mode == "ipv4"
         self._ssl = ssl.create_default_context()
         self._ssl.check_hostname = False
         self._ssl.verify_mode = ssl.CERT_NONE
@@ -185,11 +317,49 @@ class HttpClient:
         ``deadline`` 是 ``time.monotonic()`` 口径的绝对截止时刻：连接、首字节、
         读体加起来不能超过它。慢滴流的源靠 socket 超时判不出来（每 8 秒挤一点，
         永远不超时），必须给它一个总时限。
+
+        ip_mode=auto 时：先用系统默认选路；若拿到 403（CDN 边缘拒绝，常见于某个
+        出口地址被拉黑），换另一地址族重试一次。这是 Node.js autoSelectFamily
+        （RFC 8305）的简化版——不并发竞速，只在明确 403 时换一次，代价可控。
         """
+        last = self._get_loop(
+            url, limit=limit, headers=headers, allow_redirect=allow_redirect, deadline=deadline
+        )
+        if self.ip_mode == "auto" and last.status == 403 and not self.proxy:
+            other = "ipv6" if last.family == socket.AF_INET else "ipv4"
+            switched = self._get_loop(
+                url,
+                limit=limit,
+                headers=headers,
+                allow_redirect=allow_redirect,
+                deadline=deadline,
+                forced_mode=other,
+            )
+            # 换族成功才采纳；换族仍失败就保留第一次的结果（保住原有错误文案）
+            if switched.status and switched.status < 400 and switched.body:
+                return switched
+        return last
+
+    def _get_loop(
+        self,
+        url: str,
+        *,
+        limit: int,
+        headers: dict | None,
+        allow_redirect: bool,
+        deadline: float | None,
+        forced_mode: str = "",
+    ) -> Response:
+        """单次地址族策略下的重试循环。forced_mode 非空时覆盖 self.ip_mode。"""
         last = Response(url=url, error="未执行")
         for attempt in range(self.retries):
             last = self._get_once(
-                url, limit=limit, headers=headers, allow_redirect=allow_redirect, deadline=deadline
+                url,
+                limit=limit,
+                headers=headers,
+                allow_redirect=allow_redirect,
+                deadline=deadline,
+                forced_mode=forced_mode,
             )
             if last.truncated:
                 return last  # 慢源不重试：重试只是把同样的等待再做一遍
@@ -220,6 +390,7 @@ class HttpClient:
         headers: dict | None,
         allow_redirect: bool,
         deadline: float | None = None,
+        forced_mode: str = "",
     ) -> Response:
         resp = Response(url=url)
         current = url
@@ -250,12 +421,16 @@ class HttpClient:
 
             started = time.monotonic()
             try:
-                conn = self._connect(parts, deadline)
+                conn = self._connect(parts, deadline, forced_mode=forced_mode)
                 if self.proxy and parts.scheme == "http":
                     target = current  # 走代理时 http 请求目标用绝对地址
                 else:
                     target = urlunsplit(("", "", parts.path or "/", parts.query, ""))
                 conn.request("GET", target, headers=hdrs)
+                # 记录本次实际建连的地址族，供 auto 模式判断 403 时换哪一族。
+                # http.client 是懒连接：sock 在 request() 触发 connect 后才有。
+                if conn.sock is not None:
+                    resp.family = conn.sock.family
                 raw = conn.getresponse()
 
                 resp.status = raw.status
@@ -296,12 +471,12 @@ class HttpClient:
         return resp
 
     # ------------------------------------------------------------------ #
-    def _connect(self, parts, deadline: float | None = None):
-        import http.client
-
+    def _connect(self, parts, deadline: float | None = None, forced_mode: str = ""):
         timeout = self._op_timeout(deadline)
         proxy_host, _, proxy_port = self.proxy.partition(":")
         use_proxy = bool(self.proxy)
+        # 走代理时代理自己选路，地址族开关无效；forced_mode 是 auto 换族重试的临时覆盖。
+        mode = forced_mode or self.ip_mode
 
         if parts.scheme == "https":
             if use_proxy:
@@ -310,12 +485,18 @@ class HttpClient:
                 )
                 conn.set_tunnel(parts.hostname, parts.port or 443)
                 return conn
-            return http.client.HTTPSConnection(
-                parts.hostname, parts.port or 443, timeout=timeout, context=self._ssl
-            )
+            cls = {
+                "ipv4": _V4HTTPSConnection,
+                "ipv6": _V6HTTPSConnection,
+            }.get(mode, http.client.HTTPSConnection)
+            return cls(parts.hostname, parts.port or 443, timeout=timeout, context=self._ssl)
         if use_proxy:
             return http.client.HTTPConnection(proxy_host, int(proxy_port or 8080), timeout=timeout)
-        return http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout)
+        cls = {
+            "ipv4": _V4HTTPConnection,
+            "ipv6": _V6HTTPConnection,
+        }.get(mode, http.client.HTTPConnection)
+        return cls(parts.hostname, parts.port or 80, timeout=timeout)
 
     @staticmethod
     def _read_body(raw, limit: int, deadline: float | None = None) -> tuple[bytes, bool]:
@@ -364,8 +545,11 @@ def build_client(
     timeout: float = 8.0,
     retries: int = 1,
     proxy: str = "",
+    ip_mode: str = "auto",
 ) -> HttpClient:
-    return HttpClient(user_agent=user_agent, timeout=timeout, retries=retries, proxy=proxy)
+    return HttpClient(
+        user_agent=user_agent, timeout=timeout, retries=retries, proxy=proxy, ip_mode=ip_mode
+    )
 
 
 __all__ = ["HttpClient", "Response", "build_client", "resolve", "DEFAULT_UA", "__version__"]

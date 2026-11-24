@@ -49,6 +49,15 @@ services:
       HDIPTV_PLAY_MODE: ${HDIPTV_PLAY_MODE:-direct}
       # 分片缓存上限（MB）：只对 proxy 模式生效
       HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
+      # 央视频强制走 IPv4：默认 0 别动。仅在 IPv6 出口被央视频 CDN 拉黑、
+      # 而 IPv4 正常时设 1（表现：央视频全 502「列表 403」，换 IPv4 即恢复）。
+      # 只作用于央视频，不影响咪咕、运营商官方源和第三方源。改完重建容器生效。
+      HDIPTV_YSP_IPV4: "${HDIPTV_YSP_IPV4:-0}"
+      # 模块网络地址族（auto/ipv4/ipv6）。主入口是面板，这里只做兜底默认值。
+      HDIPTV_YSP_IP_MODE: "${HDIPTV_YSP_IP_MODE:-auto}"
+      HDIPTV_MIGU_IP_MODE: "${HDIPTV_MIGU_IP_MODE:-auto}"
+      HDIPTV_OFFICIAL_IP_MODE: "${HDIPTV_OFFICIAL_IP_MODE:-auto}"
+      HDIPTV_AGG_IP_MODE: "${HDIPTV_AGG_IP_MODE:-auto}"
       # 对外地址。留空即可：列表按请求的域名端口现拼，套了反代也自动用外网地址；
       # 只有反代不透传 Host 头时才需要填，例如 https://tv.example.com:8443
       PUBLIC_URL: "${PUBLIC_URL:-}"

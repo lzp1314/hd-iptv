@@ -342,11 +342,16 @@ class YangshipinCollector(Collector):
                 for slug, name, _cnlid, _livepid, defn in rows
             ])
 
+        # 央视频专用客户端：只读 pipeline 传来的「央视频」地址族三态。
+        # 其余模块连这个字段都感知不到，互不影响。
+        modes = getattr(client, "module_ip_modes", None) or {}
+        ip_mode = modes.get("央视频", "auto") if isinstance(modes, dict) else "auto"
         probe_client = HttpClient(
             user_agent=ysp.UA,
             timeout=client.timeout,
             retries=2,
             proxy=client.proxy,
+            ip_mode=ip_mode,
         )
 
         results: dict[str, Stream] = {}
@@ -433,7 +438,19 @@ class MiguCollector(Collector):
         data_dir = Path(str(self.config.get("data_dir", "") or ""))
         if not str(data_dir) or not data_dir.is_absolute():
             data_dir = Path(__file__).resolve().parent.parent / "output"
-        rows = migu.fetch_channels(client, timeout_minutes=refresh, data_dir=data_dir)
+        # 咪咕专用 client：只读「咪咕视频」的地址族三态，其余模块不受影响。
+        modes = getattr(client, "module_ip_modes", None) or {}
+        ip_mode = modes.get("咪咕视频", "auto") if isinstance(modes, dict) else "auto"
+        channel_client = (
+            client if ip_mode == "auto" else HttpClient(
+                user_agent=client.user_agent,
+                timeout=client.timeout,
+                retries=client.retries,
+                proxy=client.proxy,
+                ip_mode=ip_mode,
+            )
+        )
+        rows = migu.fetch_channels(channel_client, timeout_minutes=refresh, data_dir=data_dir)
 
         want = {str(x).strip() for x in (self.config.get("groups") or []) if str(x).strip()}
         rate = int(self.config.get("rate", 2) or 2)

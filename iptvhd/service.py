@@ -294,14 +294,17 @@ def _row_module_visible(row: dict, disabled: set[str]) -> bool:
     return display_module(str(row.get("group") or "")) not in disabled
 
 
-def _ysp_resolver(slug: str) -> tuple[str, str]:
-    """中转层拿不到频道表之外的地址，这里的解析器只认 ysp 里的台。"""
+def _ysp_resolver(slug: str, ip_mode: str = "auto") -> tuple[str, str]:
+    """中转层拿不到频道表之外的地址，这里的解析器只认 ysp 里的台。
+
+    ``ip_mode`` 是央视频模块的地址族三态：auto/ipv4/ipv6。
+    """
     from . import ysp
 
     row = ysp.CHANNEL_BY_SLUG.get(slug.lower())
     if row is None:
         raise RelayError(f"未知频道: {slug}")
-    url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=2)
+    url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=2, ip_mode=ip_mode)
     return url, ysp.UA
 
 
@@ -329,7 +332,7 @@ def migu_ticket(slug: str, settings: Settings) -> str:
         user_id=settings.migu_user_id,
         token=settings.migu_token,
         h265=settings.migu_h265,
-        client=HttpClient(timeout=12, retries=1),
+        client=HttpClient(timeout=12, retries=1, ip_mode=settings.module_ip_mode("咪咕视频")),
     ).url
 
 
@@ -342,7 +345,7 @@ def migu_edge_url(slug: str, settings: Settings) -> str:
     from . import migu
     from .net import HttpClient
 
-    client = HttpClient(timeout=6, retries=1)
+    client = HttpClient(timeout=6, retries=1, ip_mode=settings.module_ip_mode("咪咕视频"))
     return migu.edge_location(migu_ticket(slug, settings), client=client)
 
 
@@ -487,7 +490,7 @@ class State:
 
         name = channel_name(slug)
         if not name:
-            return _ysp_resolver(slug)
+            return _ysp_resolver(slug, ip_mode=self.settings.module_ip_mode("央视频"))
 
         self._ensure_lines()
         items = self._lines.get(slug) or []
@@ -520,7 +523,7 @@ class State:
             # 走 relay 取清单时用采集验证过的浏览器 UA。咪咕最终节点清单对 UA
             # 挑剔，空 UA 会落到默认 qqlive、取不到——这里必须显式带浏览器 UA。
             return migu_ticket(inner, self.settings), self.settings.user_agent
-        return _ysp_resolver(inner)
+        return _ysp_resolver(inner, ip_mode=self.settings.module_ip_mode("央视频"))
 
     def primary_migu_pid(self, slug: str) -> str:
         """这个台的首选线路是不是咪咕，是就返回它的 pID。
@@ -590,6 +593,8 @@ class State:
             # 「数据源」页：所有源模块 + 面板关掉的名字（只读，改走 btnModuleSave）
             "modules": _module_catalog(s, result),
             "disabled_modules": s.disabled_modules,
+            # 每个模块的地址族三态（auto/ipv4/ipv6），给面板弹窗回显
+            "module_ip_mode": s.module_ip_modes(),
             "migu_enabled": s.migu_enabled,
             # 账号非零即可：令牌本身绝不回传给面板，防止被截图/代理日志带走。
             "migu_account_set": bool(s.migu_user_id and s.migu_token),

@@ -253,6 +253,11 @@ def _collect(settings: Settings, collectors: list[Collector], log: Logger) -> tu
         retries=settings.retries,
         proxy=settings.proxy,
     )
+    # 采集阶段共享一个 client，不能直接设 force_ipv4——那会连累运营商官方源。
+    # 这里挂一份「模块→地址族三态」表，需要的采集器（央视频/咪咕）自己读它建专用 client。
+    client.module_ip_modes = dict(settings.module_ip_modes())
+    # 兼容旧的 ysp_ipv4 标记（老代码/测试可能读它）
+    client.ysp_ipv4 = client.module_ip_modes.get("央视频", "auto") == "ipv4"
     streams: list[Stream] = []
     stats: list[dict] = []
     for collector in collectors:

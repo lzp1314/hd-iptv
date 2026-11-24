@@ -55,6 +55,33 @@ def module_members(module: str) -> tuple[str, ...]:
     return BUILTIN_MODULES.get(name, (name,))
 
 
+# 模块级地址族三态。auto = 系统默认选路 + 403 换族重试（默认，等同旧行为）；
+# ipv4 / ipv6 = 该模块只走这一族。存 panel.json 的 module_ip_mode 字典里。
+IP_MODES = ("auto", "ipv4", "ipv6")
+
+# 运营商官方源的下发地址是 [2409:...] 这类 IPv6 边缘，只允许 auto / ipv6；
+# 面板上给它选 ipv4 会被归一化掉，避免把湖北本省源直接搞废。
+IPV4_FORBIDDEN_MODULES = frozenset({"运营商官方源"})
+
+# 环境变量按模块名给默认值，面板里改过的值优先（对齐 pad_mode / auto_switch 的优先级）
+MODULE_IP_ENV = {
+    "央视频": "HDIPTV_YSP_IP_MODE",
+    "咪咕视频": "HDIPTV_MIGU_IP_MODE",
+    "运营商官方源": "HDIPTV_OFFICIAL_IP_MODE",
+    "第三方聚合源": "HDIPTV_AGG_IP_MODE",
+}
+
+
+def coerce_ip_mode(value, module: str = "") -> str:
+    """把面板/环境来的地址族值收敛成三态；非法或该模块不允许的回落 auto。"""
+    mode = str(value or "").strip().lower()
+    if mode not in IP_MODES:
+        return "auto"
+    if mode == "ipv4" and display_module(module) in IPV4_FORBIDDEN_MODULES:
+        return "auto"
+    return mode
+
+
 def as_bool(value, default: bool = True) -> bool:
     """面板 checkbox / 环境变量 / TOML 三处来的开关统一收敛成布尔。"""
     if value is None:
@@ -236,6 +263,17 @@ def coerce_panel(raw: dict) -> dict:
                 if isinstance(x, str) and x.strip()
             }
             out[key] = sorted(names)
+        elif key == "module_ip_mode":
+            # 每个模块的地址族三态。归一到展示模块名，值收敛成 auto/ipv4/ipv6；
+            # 官方源选 ipv4 会被打回 auto（它的下发地址是 IPv6 边缘）。
+            raw_map = value if isinstance(value, dict) else {}
+            result: dict[str, str] = {}
+            for mod, mode in raw_map.items():
+                name = display_module(str(mod).strip()[:128])
+                if not name:
+                    continue
+                result[name] = coerce_ip_mode(mode, name)
+            out[key] = result
         elif key == "secret":
             # 只去掉两头的空白和斜杠，字符是否合法由 apply_settings 判定（那边能回 400）
             out[key] = str(value or "").strip().strip("/")
@@ -369,6 +407,30 @@ class Settings:
         if not text:
             return False
         return display_module(text) in set(self.disabled_modules)
+
+    def module_ip_mode(self, name: str) -> str:
+        """某模块的地址族三态。传入底层源名或展示模块名都行。
+
+        优先级：panel.json 面板设置 > 模块专属环境变量 > 默认 auto。
+        老用户没有这项配置时一律 auto，行为与升级前完全一致。
+        """
+        module = display_module(name)
+        raw_map = self.panel_get("module_ip_mode")
+        if isinstance(raw_map, dict) and module in raw_map:
+            return coerce_ip_mode(raw_map.get(module), module)
+        env_name = MODULE_IP_ENV.get(module)
+        if env_name:
+            raw = os.environ.get(env_name)
+            if raw is not None and str(raw).strip():
+                return coerce_ip_mode(raw, module)
+        # 兼容上一版央视频的 HDIPTV_YSP_IPV4 / [ysp] ipv4 开关
+        if module == "央视频" and self.ysp_ipv4:
+            return "ipv4"
+        return "auto"
+
+    def module_ip_modes(self) -> dict[str, str]:
+        """四个内置模块的地址族三态，给面板回显用。"""
+        return {name: self.module_ip_mode(name) for name in BUILTIN_MODULES}
 
     # ---- 常用项 ----
     @property
@@ -567,6 +629,19 @@ class Settings:
         else:
             value = str(self.get("relay", "pad_mode", "auto")).strip().lower()
         return value if value in {"auto", "on", "off"} else "auto"
+
+    @property
+    def ysp_ipv4(self) -> bool:
+        """央视频取清单是否强制走 IPv4（默认关）。
+
+        只在「NAS 的 IPv6 出口被央视频 CDN 拉黑、IPv4 正常」时打开。
+        作用于央视频的换票和取清单两处请求；其它源、播放器直连分片都不受影响。
+        环境变量优先于配置文件，改完重启生效。
+        """
+        raw = os.environ.get("HDIPTV_YSP_IPV4")
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("ysp", "ipv4", False))
 
     @property
     def public_url(self) -> str:
