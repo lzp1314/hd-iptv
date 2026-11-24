@@ -555,6 +555,105 @@ class _Window:
         return "\n".join(out) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# 垫片清单：给 VLC / libVLC 内核的播放器补「缓冲片」
+#
+# 现象：这类播放器解复用时，读到清单最后一项就停下，不提前去取下一片。于是
+# 最新的一整片要等清单里再冒出一片才轮得到它——上游一片 5~9 秒，它手里的内容
+# 常常刚好见底，画面停一两秒、自己调大缓冲、卡两三次才顺。上游报的
+# TARGETDURATION 越大，它刷清单越慢，断粮越明显。
+#
+# 对策：在每个分片后面垫一条极短的本机空片，让清单最后一项永远是垫片，最新的
+# 整片不再被扣住；TARGETDURATION 报小，逼它按固定节奏来取。垫片是纯 TS 空包，
+# 解复用器直接丢弃，不带时间戳，也不改变画面内容。
+#
+# 只给识别为 libVLC 的请求用；其它播放器下发原清单，互不影响。带加密／分片字节
+# 范围／fMP4 初始化段的清单原样下发，不冒险改写（改了反而播不了）。
+# ---------------------------------------------------------------------------
+
+# 垫片声明时长（秒）。极小值让它几乎不占播放时间，但必须 > 0 才能是合法的 EXTINF。
+_PAD_SECONDS = 0.01
+# 开头垫几条：libVLC 冷启动时会跳过清单头两项，不垫就白白少一整片可播。
+_PAD_LEADING = 2
+# TARGETDURATION 上限：报大会让 libVLC 很久才刷一次清单，长片期间就断粮。
+_PAD_TARGET_MAX = 5
+# 垫片 TS 包个数。libVLC 一次解复用最多读约 50 个包，垫片必须明显多于这个数，
+# 否则一次就读穿、把垫片当成流尾（播完）。空包 188 字节：同步字节 0x47 +
+# PID 0x1FFF（空包标志）+ 其余填充。
+_PAD_TS_PACKETS = 200
+_PAD_TS_BODY = (bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xff" * 184) * _PAD_TS_PACKETS
+
+# 这些标签出现时清单结构特殊，垫片化会破坏它们，原样下发。
+_PAD_UNSAFE = re.compile(
+    r"^#EXT-X-(?:KEY|MAP|BYTERANGE|DISCONTINUITY|ENDLIST|PART|STREAM-INF)\b", re.M
+)
+# libVLC / VLC 的 UA 特征（大小写不敏感）。观屿、Ceau 等外挂播放器基于 libVLC，
+# UA 里带 VLC/LibVLC 字样。
+_VLC_UA = re.compile(r"(?:^|\s)(?:VLC|LibVLC)/", re.I)
+
+
+def pad_body() -> bytes:
+    """垫片分片的字节内容：一段 TS 空包。返回常量本身（调用方不要改）。"""
+    return _PAD_TS_BODY
+
+
+def is_vlc_ua(user_agent: str) -> bool:
+    """这个 UA 是不是 VLC / libVLC 内核的播放器。"""
+    return bool(_VLC_UA.search(user_agent or ""))
+
+
+def padded_playlist(text: str, pad_url: str) -> str | None:
+    """给 VLC 内核生成一份「末项永远是垫片」的清单；不改写成则返回 None。
+
+    ``pad_url`` 是本机垫片端点的绝对地址（含密码段）。整片声明时长减去垫片
+    时长，保证「整片 + 垫片」相加等于上游真实时长，播放器不会在片边界重算时间线。
+    序号翻倍：上游第 n 片排在 2n、它的垫片排在 2n+1，这样同一片在每次刷新里的
+    序号稳定，已经播过的项不会被当成新片。
+    """
+    if not pad_url:
+        return None
+    body = str(text).replace("\r", "")
+    if _PAD_UNSAFE.search(body):
+        return None
+
+    try:
+        first = int(re.search(r"^#EXT-X-MEDIA-SEQUENCE:\s*(\d+)", body, re.M).group(1))
+    except (AttributeError, ValueError):
+        return None
+
+    segs: list[tuple[float, str]] = []
+    duration: float | None = None
+    for line in body.split("\n"):
+        value = line.strip()
+        if value.startswith("#EXTINF:"):
+            try:
+                duration = float(value[8:].split(",", 1)[0])
+            except ValueError:
+                duration = None
+        elif value and not value.startswith("#"):
+            # 只垫 TS 分片；m4s / fMP4 之类不碰
+            if not duration or duration <= _PAD_SECONDS or not re.search(r"\.ts(?:$|\?)", value, re.I):
+                return None
+            segs.append((duration, value))
+            duration = None
+    if not segs:
+        return None
+
+    pad_line = [f"#EXTINF:{_PAD_SECONDS:.3f},", pad_url]
+    out = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        f"#EXT-X-MEDIA-SEQUENCE:{first * 2 - _PAD_LEADING}",
+        f"#EXT-X-TARGETDURATION:{_PAD_TARGET_MAX}",
+    ]
+    for _ in range(_PAD_LEADING):
+        out.extend(pad_line)
+    for duration, url in segs:
+        out.extend([f"#EXTINF:{duration - _PAD_SECONDS:.3f},", url])
+        out.extend(pad_line)
+    return "\n".join(out) + "\n"
+
+
 class Relay:
     """按频道缓存上游地址，并把清单改写成播放器能直接用的形式。
 

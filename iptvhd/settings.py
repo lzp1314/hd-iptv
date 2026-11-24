@@ -553,6 +553,22 @@ class Settings:
         return as_bool(self.get("relay", "auto_switch", True))
 
     @property
+    def pad_mode(self) -> str:
+        """垫片清单给谁用：auto = 只对 VLC/libVLC 内核；on = 所有播放器都给；
+        off = 不给。
+
+        auto 是默认，观屿/Ceau 这类基于 libVLC 的播放器 UA 带 VLC 字样，会被自动
+        识别。万一某个播放器的 UA 认不出来，把它设成 on 强制验证；设 off 可随时
+        退回原清单。环境变量优先于配置文件，改完重启生效。
+        """
+        raw = os.environ.get("HDIPTV_PAD_MODE")
+        if raw is not None and str(raw).strip():
+            value = str(raw).strip().lower()
+        else:
+            value = str(self.get("relay", "pad_mode", "auto")).strip().lower()
+        return value if value in {"auto", "on", "off"} else "auto"
+
+    @property
     def public_url(self) -> str:
         """对外地址。面板里填过就用面板的，其次环境变量，最后配置文件。
 

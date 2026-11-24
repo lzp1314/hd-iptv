@@ -111,14 +111,23 @@ main { min-width: 0; padding: 0; }
   z-index: 6;
   background: var(--bg);
   padding: 14px 0 2px;
+  /* 整块状态区（四张卡 + 提示条）在页面里水平居中，两边留白一致。
+     用 flex 列排布，比给子元素加 auto 外边距可靠——子元素的宽度不受控时
+     auto 边距会失效，flex 的 align-items:center 则始终按内容整体对齐。 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
-/* 全屏铺开后若不限宽，四张卡会被拉到整屏宽、状态概览也跟着散开。
-   统一卡在一个舒适宽度，既对齐左侧内容，又不显得空旷。 */
-.statbar .cards { max-width: 960px; margin-bottom: 12px; }
-/* 吸顶时内容在它下面滚，补一条极浅的分隔，避免糊成一片 */
+/* 全屏铺开后若不限宽，四张卡会被拉到整屏宽。统一限一个舒适宽度，
+   连同提示条一起作为整体居中；窄屏时自动缩到 100%，不会溢出。 */
+.statbar .cards { width: min(960px, 100%); margin-bottom: 12px; }
+.statbar .banner { width: min(960px, 100%); }
+/* 吸顶时内容在它下面滚，补一条极浅的分隔，避免糊成一片。
+   flex 下伪元素也是一项，给满宽让它横贯整块状态区。 */
 .statbar::after {
   content: "";
   display: block;
+  width: 100%;
   height: 1px;
   background: linear-gradient(to right, var(--line), transparent);
 }

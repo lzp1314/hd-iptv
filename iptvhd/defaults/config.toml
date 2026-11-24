@@ -61,6 +61,12 @@ playlist_ttl = 5.0
 mode = "direct"
 # 分片中转缓存上限（MB）。仅 proxy 模式生效，多客户端同看一个台时共用；0 关闭。
 cache_mb = 96
+# 垫片清单（给 VLC/libVLC 内核的播放器补缓冲，解决「播完一片停一两秒」）：
+#   auto = 只对 UA 带 VLC/LibVLC 的播放器生效（默认，观屿/Ceau 会被自动认出）
+#   on   = 所有播放器都给垫片，用于某个播放器 UA 认不出来时强制验证
+#   off  = 关闭，下发原始清单
+# 改完重启生效；也可用环境变量 HDIPTV_PAD_MODE 覆盖。
+pad_mode = "auto"
 
 [migu]
 # 咪咕视频：央视/卫视等公开频道，播放时按 pID 现换票，由播放器就近取流。

@@ -16,7 +16,10 @@ from .epg import Epg
 from .logos import Logos
 from .models import Channel, Stream
 from .pipeline import load_result, load_sources, run_update
-from .relay import Relay, RelayError, channel_name, channel_slug, static_ua
+from .relay import (
+    Relay, RelayError, channel_name, channel_slug, is_vlc_ua,
+    pad_body, padded_playlist, static_ua,
+)
 from .region import detect
 from .settings import Settings, clean_secret, coerce_panel, display_module, write_panel
 
@@ -879,6 +882,20 @@ def make_handler(state: State):
             except Exception as exc:  # noqa: BLE001 - 失败要给出可读原因
                 self._json({"error": f"{type(exc).__name__}: {exc}", "channel": name}, 502)
                 return
+            # VLC / libVLC 内核（观屿、Ceau 等）读到清单最后一项就停，最新一整片
+            # 要等下一片列出来才播得上，上游出长片时就「停一两秒再自己顺回去」。
+            # 给这类播放器垫一层空片，让末项永远是垫片、并压低 TARGETDURATION。
+            # 只改发给播放器的那份清单，不碰 relay 的窗口和上游取流。
+            pad_mode = settings.pad_mode
+            ua = self.headers.get("User-Agent") or ""
+            did_pad = False
+            if pad_mode == "on" or (pad_mode == "auto" and is_vlc_ua(ua)):
+                pad_url = f"{self._base()}/pad.ts"
+                padded = padded_playlist(text, pad_url)
+                if padded is not None:
+                    text = padded
+                    did_pad = True
+
             # 这几个头是给人排查用的：F12 里看 /live/xxx.m3u8 的响应，
             # Seq 一直不动就是上游卡住了，Stale=1 表示这次给的是旧的那份，
             # Segs 是这次窗口里带了几片——正常应该在 3~8 之间往上长。
@@ -890,6 +907,7 @@ def make_handler(state: State):
                     "X-HD-Seq": str(seq),
                     "X-HD-Stale": "1" if stale else "0",
                     "X-HD-Segs": str(text.count("#EXTINF")),
+                    "X-HD-Pad": "1" if did_pad else "0",
                 },
                 cache="no-store",
             )
@@ -1029,6 +1047,10 @@ def make_handler(state: State):
 
             if path in ("/", "/index.html"):
                 self._file(WEB_DIR / "index.html", "text/html; charset=utf-8")
+            elif path == "/pad.ts":
+                # 垫片分片：纯 TS 空包，供 VLC 清单的「末项垫片」引用。走 _require
+                # 校验（URL 带密码段），不受 pad_mode 限制——旧清单可能还引用着它。
+                self._send(200, pad_body(), "video/mp2t", cache="public, max-age=86400")
             elif path.startswith("/static/"):
                 self._static(path)
             elif path in ("/m3u", "/m3u8", "/playlist.m3u", "/list.m3u", "/result.m3u"):
