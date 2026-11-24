@@ -243,8 +243,8 @@ async function loadStatus() {
       if (blocked > 0) {
         banner.hidden = false;
         banner.textContent =
-          `上游正在按 IP 限流，${blocked} 秒内不再去要新地址（避免越要越死）。` +
-          "已经播着的台不受影响，这时候连切台会更容易卡。";
+          `上游正在按 IP 限流，约 ${blocked} 秒内会放慢去要新地址的节奏（避免越要越死）。` +
+          "正在播的台会用上一份清单顶住，卡一下会自动接回来；这时候连着切台更容易卡。";
       } else if (relay.failures > 0) {
         const detail = (relay.errors && relay.errors[0]) ? `（${relay.errors[0]}）` : "";
         const proxy = relay.mode === "proxy";
@@ -1095,6 +1095,9 @@ let lastTime = 0;
 let lastProgressAt = 0;
 let restartTimer = null;
 let restarts = 0;
+// 上一次整条重开的时刻。成功往前播满一分钟就把 restarts 清零——否则一场
+// 直播断几次就把 8 次额度用完，之后再也不救，用户看到的就是「卡住不动」。
+let restartAt = 0;
 // 卡住时先原地重载清单（保住缓冲）的次数，画面一往前走就清零
 let softReloads = 0;
 
@@ -1138,6 +1141,11 @@ function playerStats() {
     lastTime = v.currentTime;
     lastProgressAt = now;
     softReloads = 0;
+    // 重开之后能顺畅播满一分钟，说明刚才那次是偶发，把额度还回去。
+    if (restartAt && now - restartAt > 60000) {
+      restarts = 0;
+      restartAt = 0;
+    }
   }
   const stuckMs = lastProgressAt ? now - lastProgressAt : 0;
   if (!v.paused && stuckMs > 3000) {
@@ -1145,17 +1153,21 @@ function playerStats() {
   }
   $("playerStats").textContent = parts.join(" · ") || "连接中…";
 
-  if (!v.paused && stuckMs > 4000 && stuckMs < 50000) {
-    $("playerTip").textContent = stuckMs > 12000
+  if (!v.paused && stuckMs > 3000 && stuckMs < 50000) {
+    $("playerTip").textContent = stuckMs > 6000
       ? "上游一直没给新分片，正在换票重连…"
       : "等上游给下一段——上游清单 5 秒才滚一片，稍等一下。";
   }
   // 卡住先「原地重载清单」，别急着销毁播放器：服务端刚换完票的几秒里，
   // 手里那几秒缓冲是唯一的救命稻草，一销毁就全丢了。连续多次救不回来才重开。
-  if (!v.paused && stuckMs > 24000 && restarts < 8) {
+  //
+  // 阈值按**播放器实际缓冲**来（内置播放器实测 8 秒左右）：6 秒先试着重载
+  // 清单，10 秒还没动静就整条重开。过去要到 24 秒才重开，而服务端的退避上限
+  // 一旦超过缓冲，画面早就耗干了——用户看到的就是「转一下圈然后彻底不动」。
+  if (!v.paused && stuckMs > 10000 && restarts < 8) {
     softReloads = 0;
     restartPlayer("画面停住了");
-  } else if (!v.paused && stuckMs > 9000 && softReloads < 2) {
+  } else if (!v.paused && stuckMs > 6000 && softReloads < 3) {
     softReloads += 1;
     if (hls) {
       try { hls.startLoad(); } catch (_) { /* ignore */ }
@@ -1319,6 +1331,7 @@ function restartPlayer(reason) {
     return;
   }
   restarts += 1;
+  restartAt = Date.now();
   $("playerTip").textContent = reason + " 上游清单可能冻住了，换票重取。";
   restartTimer = setTimeout(() => {
     restartTimer = null;

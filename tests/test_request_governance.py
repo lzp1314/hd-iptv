@@ -57,8 +57,39 @@ class ScanGuardTest(unittest.TestCase):
 
 
 class BudgetTest(unittest.TestCase):
-    def test_ticket_budget_is_twenty(self):
-        self.assertEqual(_TICKET_BUDGET, 20, "20 张/分钟足够正常换台，能挡住批量扫台")
+    def test_ticket_budget_allows_normal_playback(self):
+        """预算只管批量扫台，不能卡住正在看的人。
+
+        曾经降到 20，结果一个台被 403 打散后要连换几次票才接得上，20 张在
+        中途就见底，换不到票只能干等——画面直接定住。挡住扫台的是 ScanGuard，
+        不是这张总账。
+        """
+        self.assertEqual(_TICKET_BUDGET, 30, "30 张/分钟，给正常播放留足余量")
+
+    def test_global_cooldown_still_allows_expired_watch(self):
+        """出口冷却只挡「从没成功过」的台；在播台地址过期要换票照样放行。
+
+        否则在播台地址一过 TTL 就被冻住，而它手里只有几秒缓冲——正是
+        「播一分多钟后彻底不动、换回来也不播」的来源。
+        """
+        calls: list[str] = []
+
+        def resolver(slug: str):
+            calls.append(slug)
+            return "https://cdn.example.com/live/index.m3u8", "qqlive"
+
+        relay = Relay(resolver, warm=False, upstream_denied=lambda: True,
+                      addr_ttl=0.0)
+        # 从没成功过：冷却期一枪不打
+        with self.assertRaises(RelayError):
+            relay.upstream("cctv1")
+        self.assertEqual(calls, [])
+
+        # 有缓存但地址已过期（addr_ttl=0），在播台必须还能换票
+        relay._cache["cctv1"] = (time.time() - 10, "https://cdn.example.com/old.m3u8", "qqlive")
+        url, _ua = relay.upstream("cctv1")
+        self.assertEqual(url, "https://cdn.example.com/live/index.m3u8")
+        self.assertEqual(calls, ["cctv1"], "在播台换票不该被出口冷却挡死")
 
     def test_global_cooldown_blocks_cold_start_only(self):
         calls: list[str] = []
@@ -79,7 +110,12 @@ class BudgetTest(unittest.TestCase):
 
 
 class YspRequestCountTest(unittest.TestCase):
-    def test_default_two_attempts_and_short_manifest_deadline(self):
+    def test_default_attempts_recovered_and_manifest_has_deadline(self):
+        """容错回到 3 轮。
+
+        压到 2 轮时容错砍掉三分之一，CDN 节点一抖动就判死，接着换入口把票
+        也换得更勤，反而更容易撞上限流。
+        """
         client = mock.Mock()
         client.get.return_value = Response(url="u", status=403, body=b"")
         info = {"playurl": "https://cdn/t/c.m3u8"}
@@ -88,11 +124,12 @@ class YspRequestCountTest(unittest.TestCase):
                 mock.patch.object(ysp.time, "sleep"):
             with self.assertRaises(ysp.YspError):
                 ysp.resolve("1", "2", "fhd", client)
-        self.assertEqual(play.call_count, 2, "默认最多两轮取票")
+        self.assertEqual(play.call_count, 3, "默认三轮取票")
         self.assertTrue(
             any("deadline" in call.kwargs for call in client.get.call_args_list),
-            "取清单必须有总时限，挂住的节点不能占着播放器等满 10 秒",
+            "取清单仍要有总时限，挂住的节点不能无限占着",
         )
+        self.assertGreaterEqual(ysp.MANIFEST_TIMEOUT, 8.0, "时限不能压到几秒，慢节点会被判死")
 
 
 class HttpGovernanceTest(unittest.TestCase):

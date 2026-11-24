@@ -72,10 +72,11 @@ HLS_HEADERS = {
 # 一次分片采样读多少字节（用于测速和读 SPS 里的真实分辨率）
 SAMPLE_BYTES = 262144
 
-# 清单的总时限。上游偶尔挂住不回，等满 10 秒才换备用入口，播放器手里只剩
-# 十几秒内容时会直接停住；实测正常响应远低于 1 秒，3 秒足够兜住慢节点。
-# 超时只换入口，不当成「被限流」，不会触发出口冷却。
-MANIFEST_TIMEOUT = 3.0
+# 清单请求的总时限。**不要往小里调**：曾经压到 3 秒，结果慢节点被判死、
+# 换入口把票也换得更勤，反而更容易撞上按 IP 限流——表现为「播一分多钟
+# 就转圈、然后定住」。这里的值只兜住「上游彻底挂住」的极端情况，正常
+# 响应几十毫秒，够不上限。
+MANIFEST_TIMEOUT = 10.0
 
 # 码率档位 → 高度，用于给探测阶段提供分辨率提示
 DEFN_HEIGHT = {"fhd": 1080, "shd": 720, "hd": 540}
@@ -376,7 +377,7 @@ def play_info(
     })
 
     client = client or HttpClient(
-        user_agent=UA, timeout=10, retries=1, force_ipv4=force_ipv4, ip_mode=ip_mode
+        user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=ip_mode
     )
     pace()
     resp = client.get(_INFO_URL + "?" + query, headers={"Accept": "application/json"})
@@ -459,7 +460,7 @@ def resolve(
     defn: str = "fhd",
     client: HttpClient | None = None,
     verify_segment: bool = False,
-    attempts: int = 2,
+    attempts: int = 3,
     pause: float = 1.2,
     meta: dict | None = None,
     force_ipv4: bool = False,
@@ -478,7 +479,7 @@ def resolve(
     用来从分片大小推算真实码率，不必为它多发一次请求。
     """
     client = client or HttpClient(
-        user_agent=UA, timeout=10, retries=1, force_ipv4=force_ipv4, ip_mode=ip_mode
+        user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=ip_mode
     )
     last = "获取播放信息失败"
     for round_no in range(max(1, attempts)):

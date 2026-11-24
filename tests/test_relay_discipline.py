@@ -186,8 +186,12 @@ class CooldownTest(unittest.TestCase):
             relay.playlist("cctv1")
         self.assertEqual(fetch.calls, calls, "退避期内一次都不该再打上游")
 
-    def test_backoff_grows_with_consecutive_failures(self):
-        """连着被拒时逐次拉长，但封顶 20 秒左右——再长就超过画面能撑的时间。"""
+    def test_backoff_stays_within_player_buffer(self):
+        """连着被拒时逐次拉长，但**必须封顶在播放器缓冲以内**（实测约 8 秒）。
+
+        排到 10、18 秒时画面早就耗干了，用户看到的是「播一分多钟转圈九秒、
+        然后彻底定住」。这条守住的是「退避不许长过缓冲」。
+        """
         relay, _ = _relay(403)
         delays = []
         for _ in range(len(_RETRY_DELAYS) + 2):
@@ -196,9 +200,8 @@ class CooldownTest(unittest.TestCase):
             with self.assertRaises(RelayError):
                 relay.playlist("cctv1")
             delays.append(round(relay._next_try["cctv1"] - time.time()))
-        self.assertLessEqual(delays[0], 3)
-        self.assertGreaterEqual(max(delays), 15)
-        self.assertLessEqual(max(delays), 20)
+        self.assertLessEqual(delays[0], 2, "第一轮要快，别让画面先等")
+        self.assertLessEqual(max(delays), 6, "退避不能超过播放器缓冲（约 8 秒）")
 
     def test_cooling_one_channel_does_not_block_others(self):
         relay, fetch = _relay(403)
