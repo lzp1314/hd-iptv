@@ -45,11 +45,13 @@ class VlcPadTest(unittest.TestCase):
     def test_leading_pads(self):
         out = padded_playlist(PLAYLIST, PAD_URL)
         lines = out.splitlines()
-        # 头四行是清单标签，紧接着两个前导垫片（EXTINF + URL 各一行）
-        self.assertEqual(lines[4], "#EXTINF:0.010,")
-        self.assertEqual(lines[5], PAD_URL)
-        self.assertEqual(lines[6], "#EXTINF:0.010,")
-        self.assertEqual(lines[7], PAD_URL)
+        first_pad = lines.index("#EXTINF:0.010,")
+        # 第一个真实片之前只有两个前导垫片；直播起点标记排在垫片前面
+        self.assertEqual(lines[first_pad + 1], PAD_URL)
+        self.assertEqual(lines[first_pad + 2], "#EXTINF:0.010,")
+        self.assertEqual(lines[first_pad + 3], PAD_URL)
+        self.assertTrue(any(line.startswith("#EXT-X-START:") for line in lines[:first_pad]))
+        self.assertIn("seg100.ts?token=abc", lines[first_pad + 5])
 
     def test_duration_conserved_and_target_duration_capped(self):
         out = padded_playlist(PLAYLIST, PAD_URL)
@@ -70,8 +72,63 @@ class VlcPadTest(unittest.TestCase):
         # 3 个整片各跟一个垫片，再加 2 个前导 = 5
         self.assertEqual(pads, 5)
 
+    def test_start_tag_preserved_and_floored(self):
+        # 原清单给的起点要原样带过来
+        text = PLAYLIST.replace(
+            "#EXT-X-TARGETDURATION:8",
+            "#EXT-X-TARGETDURATION:8\n#EXT-X-START:TIME-OFFSET=-18.0",
+        )
+        out = padded_playlist(text, PAD_URL)
+        self.assertIn("#EXT-X-START:TIME-OFFSET=-18.0", out)
+
+        # 起点太贴直播边缘时，按 3 个 TARGETDURATION 往后退
+        text = PLAYLIST.replace(
+            "#EXT-X-TARGETDURATION:8",
+            "#EXT-X-TARGETDURATION:8\n#EXT-X-START:TIME-OFFSET=-6.0",
+        )
+        self.assertIn("#EXT-X-START:TIME-OFFSET=-15.0", padded_playlist(text, PAD_URL))
+
+        # 原清单没给起点时按窗口总时长合成，且不超过窗口长度
+        self.assertIn("#EXT-X-START:TIME-OFFSET=-15.0", padded_playlist(PLAYLIST, PAD_URL))
+        short = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\na.ts\n"
+        self.assertIn("#EXT-X-START:TIME-OFFSET=-4.0", padded_playlist(short, PAD_URL))
+
+    def test_program_date_time_kept_on_real_segments(self):
+        text = """#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:7
+#EXTINF:5.000,
+#EXT-X-PROGRAM-DATE-TIME:2026-11-24T07:00:00.000Z
+a.ts
+#EXTINF:5.000,
+#EXT-X-PROGRAM-DATE-TIME:2026-11-24T07:00:05.000Z
+b.ts
+"""
+        # 上游把 PDT 写在 EXTINF 与 URI 之间时也认
+        out = padded_playlist(text, PAD_URL)
+        self.assertIsNotNone(out)
+        self.assertIn("#EXT-X-PROGRAM-DATE-TIME:2026-11-24T07:00:00.000Z", out)
+        self.assertIn("#EXT-X-PROGRAM-DATE-TIME:2026-11-24T07:00:05.000Z", out)
+        self.assertEqual(out.count("#EXT-X-PROGRAM-DATE-TIME:"), 2)  # 垫片不带时间戳
+
+    def test_discontinuity_no_longer_skips_playlist(self):
+        text = """#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:9
+#EXTINF:5.000,
+a.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5.000,
+b.ts
+"""
+        out = padded_playlist(text, PAD_URL)
+        self.assertIsNotNone(out)
+        lines = out.splitlines()
+        pos = lines.index("#EXT-X-DISCONTINUITY")
+        self.assertEqual(lines[pos + 1], "#EXTINF:4.990,")
+        self.assertEqual(lines[pos + 2], "b.ts")
+        self.assertEqual(out.count("#EXT-X-DISCONTINUITY"), 1)
+
     def test_unsafe_playlist_unchanged(self):
-        for tag in ("KEY", "MAP", "BYTERANGE", "DISCONTINUITY", "ENDLIST", "PART", "STREAM-INF"):
+        for tag in ("KEY", "MAP", "BYTERANGE", "ENDLIST", "PART", "STREAM-INF"):
             text = f"#EXTM3U\n#EXT-X-{tag}:x\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:5,\na.ts\n"
             self.assertIsNone(padded_playlist(text, PAD_URL), tag)
 

@@ -584,8 +584,10 @@ _PAD_TS_PACKETS = 200
 _PAD_TS_BODY = (bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xff" * 184) * _PAD_TS_PACKETS
 
 # 这些标签出现时清单结构特殊，垫片化会破坏它们，原样下发。
+# 注意 DISCONTINUITY **不在**这里：它只是「这一片之前换个时间轴」的标记，
+# 原位保留即可，不能因为一个广告断点就放弃整份清单——央视频切回正片必带它。
 _PAD_UNSAFE = re.compile(
-    r"^#EXT-X-(?:KEY|MAP|BYTERANGE|DISCONTINUITY|ENDLIST|PART|STREAM-INF)\b", re.M
+    r"^#EXT-X-(?:KEY|MAP|BYTERANGE|ENDLIST|PART|STREAM-INF)\b", re.M
 )
 # libVLC / VLC 的 UA 特征（大小写不敏感）。观屿、Ceau 等外挂播放器基于 libVLC，
 # UA 里带 VLC/LibVLC 字样。
@@ -609,6 +611,17 @@ def padded_playlist(text: str, pad_url: str) -> str | None:
     时长，保证「整片 + 垫片」相加等于上游真实时长，播放器不会在片边界重算时间线。
     序号翻倍：上游第 n 片排在 2n、它的垫片排在 2n+1，这样同一片在每次刷新里的
     序号稳定，已经播过的项不会被当成新片。
+
+    **三个必须原样带过来的标记**（早期版本把它们丢了，垫片反而造成卡顿）：
+
+    - ``#EXT-X-START``：直播起点。原清单按「离末尾 3 片」给出，丢掉它 VLC 就会
+      从窗口最旧的一片开始播，落后几十秒、还容易撞上 CDN 已回收的片。这里保留
+      原值，并至少给到 3 个 ``TARGETDURATION``（RFC 8216 要求起点不落在末尾
+      3 个 target duration 内）；没有原值时按窗口总时长合成一个。
+    - ``#EXT-X-PROGRAM-DATE-TIME``：每片的真实时间。丢了它播放器只能拿窗口
+      第一片的时间当直播起点，同样会贴到最旧那头。
+    - ``#EXT-X-DISCONTINUITY``：广告切回正片的时间轴断点。它不再是「跳过整份
+      清单」的理由，原位保留在对应整片之前，让播放器重置解码器而不是回跳。
     """
     if not pad_url:
         return None
@@ -621,10 +634,26 @@ def padded_playlist(text: str, pad_url: str) -> str | None:
     except (AttributeError, ValueError):
         return None
 
-    segs: list[tuple[float, str]] = []
+    start_offset: float | None = None
+    match = re.search(r"^#EXT-X-START:TIME-OFFSET=(-?[\d.]+)", body, re.M)
+    if match:
+        try:
+            start_offset = float(match.group(1))
+        except ValueError:
+            start_offset = None
+
+    segs: list[tuple[float, str, str, bool]] = []
     duration: float | None = None
+    stamp = ""
+    discontinuity = False
     for line in body.split("\n"):
         value = line.strip()
+        if value.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+            stamp = value
+            continue
+        if value.startswith("#EXT-X-DISCONTINUITY"):
+            discontinuity = True
+            continue
         if value.startswith("#EXTINF:"):
             try:
                 duration = float(value[8:].split(",", 1)[0])
@@ -634,8 +663,10 @@ def padded_playlist(text: str, pad_url: str) -> str | None:
             # 只垫 TS 分片；m4s / fMP4 之类不碰
             if not duration or duration <= _PAD_SECONDS or not re.search(r"\.ts(?:$|\?)", value, re.I):
                 return None
-            segs.append((duration, value))
+            segs.append((duration, value, stamp, discontinuity))
             duration = None
+            stamp = ""
+            discontinuity = False
     if not segs:
         return None
 
@@ -646,9 +677,24 @@ def padded_playlist(text: str, pad_url: str) -> str | None:
         f"#EXT-X-MEDIA-SEQUENCE:{first * 2 - _PAD_LEADING}",
         f"#EXT-X-TARGETDURATION:{_PAD_TARGET_MAX}",
     ]
+    # 总真实时长（垫片与整片的时长互相抵消，所以就是各整片之和）。
+    total = sum(seg[0] for seg in segs)
+    floor = float(3 * _PAD_TARGET_MAX)
+    if start_offset is None:
+        start_offset = -min(floor, total) if total > 0 else None
+    elif start_offset > -floor:
+        # 原清单给的起点太贴边缘（比如上游一片只有 4 秒、3 片才 12 秒），
+        # 垫片把 TARGETDURATION 压到 5 之后就不合规了，往后退到 15 秒。
+        start_offset = -floor
+    if start_offset is not None:
+        out.append(f"#EXT-X-START:TIME-OFFSET={start_offset:.1f}")
     for _ in range(_PAD_LEADING):
         out.extend(pad_line)
-    for duration, url in segs:
+    for duration, url, stamp, discontinuity in segs:
+        if discontinuity:
+            out.append("#EXT-X-DISCONTINUITY")
+        if stamp:
+            out.append(stamp)
         out.extend([f"#EXTINF:{duration - _PAD_SECONDS:.3f},", url])
         out.extend(pad_line)
     return "\n".join(out) + "\n"
