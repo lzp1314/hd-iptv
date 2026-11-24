@@ -254,6 +254,17 @@ def _module_catalog(settings: Settings, result: dict | None = None) -> dict:
 
     from .kids import KIDS_MODULE
 
+    # 少儿频道有专属卡片和独立开关，不在 BUILTIN_MODULES 里；这里也把它的
+    # 频道清单带出去，卡片和配置弹窗才能像其它模块一样列出「抓到了哪些台」。
+    kids_found = found.get(KIDS_MODULE, {"total": 0, "groups": {}})
+    kids_stats = stats.get(KIDS_MODULE) or {}
+    kids = {
+        "name": KIDS_MODULE,
+        "channels": kids_found["groups"],
+        "count": kids_found["total"],
+        "collected": int(kids_stats.get("count") or 0) or kids_found["total"],
+    }
+
     # 少儿是独立采集模块，但它有专属卡片和独立开关，不能再混进「更多源」
     covered = {m for members in BUILTIN_MODULES.values() for m in members} | {KIDS_MODULE}
     others: list[dict] = []
@@ -265,7 +276,7 @@ def _module_catalog(settings: Settings, result: dict | None = None) -> dict:
             "type": str(item.get("type") or ""),
             "enabled": bool(item.get("enabled", True)),
         })
-    return {"builtins": builtins, "others": others}
+    return {"builtins": builtins, "others": others, "kids": kids}
 
 
 def _module_disabled_names(settings: Settings) -> set[str]:
@@ -705,6 +716,15 @@ class State:
         if "migu_user_id" in clean and not clean["migu_user_id"]:
             clean["migu_token"] = ""
         if clean:
+            # module_ip_mode 是「每个模块一个键」的字典，面板一次只提交当前模块。
+            # 直接覆盖会把别的模块已存的地址族清掉（它们会悄悄退回 auto），
+            # 所以这里按模块合并，只改提交了的那一项。
+            if "module_ip_mode" in clean:
+                from .settings import merge_ip_modes
+
+                clean["module_ip_mode"] = merge_ip_modes(
+                    self.settings.panel.get("module_ip_mode"), clean["module_ip_mode"]
+                )
             write_panel(self.settings.panel_path, clean)
             self.settings.panel.update(clean)
             if "kids_enabled" in clean and self.settings.kids_enabled and not was_kids_on:

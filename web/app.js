@@ -42,6 +42,20 @@ function esc(text) {
     .replace(/'/g, "&#39;");
 }
 
+// 模块频道清单按分类分组展示。固定顺序在前，后端新加的类别追加在后，
+// 各模块（含少儿）共用一套排序，避免某个模块的分类漏显示。
+const CAT_ORDER = ["央视", "卫视", "官方少儿", "动画轮播", "其它"];
+function catNames(channels) {
+  const map = channels && typeof channels === "object" ? channels : {};
+  return Object.keys(map)
+    .filter((c) => Array.isArray(map[c]) && map[c].length)
+    .sort((a, b) => {
+      const ia = CAT_ORDER.indexOf(a);
+      const ib = CAT_ORDER.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+}
+
 function fillUrls() {
   // 订阅地址已并入「源数据与订阅地址」页右侧常驻栏，这里只填那一组输入框
   const map = {
@@ -208,7 +222,7 @@ async function loadStatus() {
 
     setDot(d.running ? "busy" : (d.last_error ? "err" : "ok"));
     $("btnUpdate").disabled = !!d.running;
-    $("btnUpdate").textContent = d.running ? "更新中…" : "立即更新";
+    $("btnUpdate").textContent = d.running ? "更新中…" : "立即更新源";
 
     const hidden = settings.hidden || [];
     const total = rep.channels_matched != null ? rep.channels_matched : null;
@@ -318,7 +332,7 @@ function fillSettings(s) {
         statusTxt = "● 已开启 · 还没抓到频道，点「更新此源」";
       }
       // 分类频道名标签：央视 / 卫视 / 其它，每类显示前若干个名
-      const cats = ["央视", "卫视", "其它"].filter((c) => Array.isArray(channels[c]) && channels[c].length);
+      const cats = catNames(channels);
       const chips = cats.map((c) => {
         const names = channels[c];
         const preview = names.slice(0, 4).map(esc).join("、");
@@ -353,6 +367,28 @@ function fillSettings(s) {
     // 开启后内容作为「少儿频道」分组出现在上面那一条 M3U 订阅里。
     const kidsOn = s.kids_enabled !== false;
     const kidsCartoon = s.kids_cartoons !== false;
+    const kids = (catalog.kids && typeof catalog.kids === "object") ? catalog.kids : {};
+    const kidsCh = kids.channels && typeof kids.channels === "object" ? kids.channels : {};
+    const kidsCount = Number(kids.count) || 0;
+    const kidsCollected = Number(kids.collected) || 0;
+    // 和各模块一样，按分类列出「抓到了哪些台」，家长一眼能看到具体频道名
+    const kidCats = catNames(kidsCh);
+    const kidChips = kidCats.map((c) => {
+      const names = kidsCh[c];
+      const preview = names.slice(0, 4).map(esc).join("、");
+      const more = names.length > 4 ? ` 等 ${names.length} 个` : `（${names.length}）`;
+      return `<span class="builtin-chip" title="${esc(names.join("、"))}">${esc(c)} ${esc(preview)}${esc(more)}</span>`;
+    }).join("");
+    let kidStatus;
+    if (!kidsOn) {
+      kidStatus = `○ 已关闭 · 上次抓到 ${kidsCollected || kidsCount} 个频道`;
+    } else if (kidsCount > 0) {
+      kidStatus = `● 正常 · 抓到 ${kidsCount} 个频道 · 主订阅含「少儿频道」分组`;
+    } else if (kidsCollected > 0) {
+      kidStatus = `● 已开启 · 上次抓到 ${kidsCollected} 条 · 尚未进入列表，点「更新此源」`;
+    } else {
+      kidStatus = "● 已开启 · 还没抓到频道，点「更新此源」";
+    }
     $("builtinModules").insertAdjacentHTML("beforeend",
       `<div class="builtin-module" data-module="少儿频道">`
       + `<div class="builtin-head">`
@@ -360,11 +396,15 @@ function fillSettings(s) {
       + `<span class="builtin-name">少儿频道</span>`
       + `<span class="module-type">独立少儿源</span>`
       + `</div>`
-      + `<p class="builtin-status ${kidsOn ? "on" : "off"}">`
-      + `${kidsOn ? "● 已开启 · 主订阅含「少儿频道」分组" : "○ 已关闭"}</p>`
+      + `<p class="builtin-status ${kidsOn ? "on" : "off"}">${esc(kidStatus)}</p>`
+      + (kidChips ? `<div class="builtin-chips">${kidChips}</div>` : "")
       + `<div class="kids-cartoon-row"${kidsOn ? "" : " hidden"}>`
       + `<label class="chk"><input type="checkbox" id="kidsCartoons"${kidsCartoon ? " checked" : ""}>`
       + `包含动画轮播（海绵宝宝等，内容由上游决定）</label></div>`
+      + `<div class="builtin-actions">`
+      + `<button type="button" class="builtin-update" data-update="少儿频道"${kidsOn ? "" : ` disabled title="先打开开关再更新"`}>更新此源</button>`
+      + `<button type="button" class="builtin-config-btn" data-config="少儿频道">配置 ›</button>`
+      + `</div>`
       + `</div>`);
   }
   if ($("moduleList")) {
@@ -398,6 +438,7 @@ const MODULE_INFO = {
   "央视频": "央视与卫视的官方公开频道，匿名取流。会员频道登录暂未内置。",
   "第三方聚合源": "多条公开转播线路聚合，按 latency 自动选最快的。没有单独账号配置。",
   "运营商官方源": "本省运营商的官方单播/组播源，按省份和运营商自动匹配。省份在「宽带与省份」页设置。",
+  "少儿频道": "独立采集 CCTV-14、咪咕少儿分类、聚合列表里的少儿台与动画轮播，不依赖其它模块开关。播放在下面选地址族。",
 };
 
 let currentModuleName = "";
@@ -406,8 +447,11 @@ function openModuleModal(name) {
   const modal = $("moduleModal");
   if (!modal) return;
   currentModuleName = name;
-  const builtin = ((settings && settings.modules && settings.modules.builtins) || [])
-    .find((m) => m.name === name) || {};
+  const mods = (settings && settings.modules) || {};
+  // 少儿频道不在 builtins 里，频道清单单独放在 modules.kids
+  const builtin = name === "少儿频道"
+    ? (mods.kids || {})
+    : ((mods.builtins || []).find((m) => m.name === name) || {});
   const channels = builtin.channels || {};
   if ($("moduleModalTitle")) $("moduleModalTitle").textContent = name + " · 配置";
 
@@ -422,7 +466,7 @@ function openModuleModal(name) {
   // 抓到的频道：按分类列频道名
   const box = $("moduleChannels");
   if (box) {
-    const cats = ["央视", "卫视", "其它"].filter((c) => Array.isArray(channels[c]) && channels[c].length);
+    const cats = catNames(channels);
     const total = Number(builtin.count) || 0;
     const collected = Number(builtin.collected) || 0;
     if (!cats.length) {
@@ -563,7 +607,7 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
         + `H.265 ${st.migu_h265 === false ? "关" : "开"}、`
         + `客户端就近取流 ${st.migu_client_dispatch === false ? "关" : "开"}。`
         + (st.migu_account_set ? "账号已绑定。" : "当前游客模式。")
-        + "画质与开关立即生效；频道有变动时点一次「立即更新」。";
+        + "画质与开关立即生效；频道有变动时点一次「立即更新源」。";
       fillSettings(st);
     } else if (btnId === "btnRegionSave") {
       // 宽带与省份页：只报这一页关心的三样，别把间隔/缓存也塞进来
@@ -579,7 +623,7 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
           : "")
         + (d.settings.auto_region === false
           ? "开关是关的，这一页的选择暂时不生效。"
-          : "下一轮更新按这个组合取源，想立刻看效果就点「立即更新」。");
+          : "下一轮更新按这个组合取源，想立刻看效果就点「立即更新源」。");
     } else {
       note.textContent = `已保存：更新间隔 ${d.settings.interval_hours} 小时、`
         + `清单刷新 ${d.settings.playlist_ttl} 秒、分片缓存 ${d.settings.cache_mb} MB、`
@@ -818,7 +862,7 @@ function renderChannels(channels) {
   if ($("btnUnhideAll")) $("btnUnhideAll").hidden = !hiddenCount;
 
   if (!all.length) {
-    box.innerHTML = `<p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>`;
+    box.innerHTML = `<p class="empty">暂无数据，点状态区右上角「立即更新源」跑一次。</p>`;
     return;
   }
 

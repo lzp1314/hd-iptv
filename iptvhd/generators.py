@@ -529,7 +529,12 @@ class KidsCollector(Collector):
             data_dir = Path(__file__).resolve().parent.parent / "output"
         refresh = float(self.config.get("refresh_minutes", 360) or 360)
         modes = getattr(client, "module_ip_modes", None) or {}
-        ip_mode = modes.get("咪咕视频", "auto") if isinstance(modes, dict) else "auto"
+        modes = modes if isinstance(modes, dict) else {}
+        # 少儿频道有自己的地址族三态；没单独设过（auto）时沿用咪咕的，
+        # 保持升级前「少儿跟着咪咕走」的一致体验。
+        ip_mode = modes.get(KIDS_MODULE, "auto")
+        if ip_mode == "auto":
+            ip_mode = modes.get("咪咕视频", "auto")
         channel_client = (
             client if ip_mode == "auto" else HttpClient(
                 user_agent=client.user_agent,

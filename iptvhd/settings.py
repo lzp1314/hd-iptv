@@ -69,6 +69,8 @@ MODULE_IP_ENV = {
     "咪咕视频": "HDIPTV_MIGU_IP_MODE",
     "运营商官方源": "HDIPTV_OFFICIAL_IP_MODE",
     "第三方聚合源": "HDIPTV_AGG_IP_MODE",
+    # 少儿频道是独立采集模块，也要能单独选地址族（它自己抓央视频/咪咕/聚合三路）
+    "少儿频道": "HDIPTV_KIDS_IP_MODE",
 }
 
 
@@ -80,6 +82,26 @@ def coerce_ip_mode(value, module: str = "") -> str:
     if mode == "ipv4" and display_module(module) in IPV4_FORBIDDEN_MODULES:
         return "auto"
     return mode
+
+
+def merge_ip_modes(current, incoming) -> dict:
+    """把面板提交的「模块 → 地址族」合并进已有配置，只改提交了的那几项。
+
+    面板的模块弹窗一次只提交当前模块；若直接覆盖整张表，其它模块已选的
+    地址族会被清掉、悄悄退回 auto。这里按模块合并，和 write_panel 的
+    「别把没提交的项冲掉」是同一个原则。
+    """
+    merged = {
+        display_module(str(k).strip()[:128]): coerce_ip_mode(v, str(k))
+        for k, v in (current or {}).items()
+        if str(k).strip()
+    } if isinstance(current, dict) else {}
+    if isinstance(incoming, dict):
+        for name, mode in incoming.items():
+            key = display_module(str(name).strip()[:128])
+            if key:
+                merged[key] = coerce_ip_mode(mode, key)
+    return merged
 
 
 def as_bool(value, default: bool = True) -> bool:
@@ -432,8 +454,11 @@ class Settings:
         return "auto"
 
     def module_ip_modes(self) -> dict[str, str]:
-        """四个内置模块的地址族三态，给面板回显用。"""
-        return {name: self.module_ip_mode(name) for name in BUILTIN_MODULES}
+        """各模块的地址族三态，给面板回显 + 采集器读取用。"""
+        from .kids import KIDS_MODULE
+
+        names = list(BUILTIN_MODULES) + [KIDS_MODULE]
+        return {name: self.module_ip_mode(name) for name in names}
 
     # ---- 常用项 ----
     @property

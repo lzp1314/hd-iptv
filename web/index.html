@@ -15,10 +15,6 @@
     <button id="btnCheckUpdate" class="btn mini ghost">检查更新</button>
     <span id="updateResult" class="update-result"></span>
   </div>
-  <div class="actions">
-    <button id="btnUpdate" class="btn primary">立即更新</button>
-    <button id="btnRefresh" class="btn">刷新</button>
-  </div>
 </header>
 
 <div class="shell">
@@ -42,9 +38,17 @@
         <div class="card"><span class="label">上次生成</span><strong id="statTime" class="small">-</strong></div>
       </section>
 
-      <div id="regionNote" class="banner quiet" hidden></div>
-      <div id="relayBanner" class="banner" hidden></div>
-      <div id="missingNote" class="banner quiet" hidden></div>
+      <div class="statbar-row">
+        <div class="statbar-notes">
+          <div id="regionNote" class="banner quiet" hidden></div>
+          <div id="relayBanner" class="banner" hidden></div>
+          <div id="missingNote" class="banner quiet" hidden></div>
+        </div>
+        <div class="statbar-actions">
+          <button id="btnUpdate" class="btn primary">立即更新源</button>
+          <button id="btnRefresh" class="btn">刷新</button>
+        </div>
+      </div>
     </div>
 
     <section class="panel view" id="viewStatus" data-view="status">
@@ -79,7 +83,7 @@
         </div>
       </div>
       <div id="channelList" class="chan-layout">
-        <p class="empty">暂无数据，点右上角「立即更新」跑一次。</p>
+        <p class="empty">暂无数据，点状态区右上角「立即更新源」跑一次。</p>
       </div>
     </section>
 
@@ -123,7 +127,7 @@
     </div>
     <p class="hint" id="settingsNote">
       套了反向代理（Lucky / Nginx）时「对外地址」留空即可，面板和订阅列表都会用你访问时的域名和端口。
-      改完在下一次更新时生效，想立刻看效果就点一次「立即更新」。
+      改完在下一次更新时生效，想立刻看效果就点一次「立即更新源」。
       「自动按省取源」「省份 / 运营商」不在这里，挪到了左侧「宽带与省份」那一页。
     </p>
   </section>

@@ -45,6 +45,7 @@ services:
       HDIPTV_MIGU_IP_MODE: "${HDIPTV_MIGU_IP_MODE:-auto}"
       HDIPTV_OFFICIAL_IP_MODE: "${HDIPTV_OFFICIAL_IP_MODE:-auto}"
       HDIPTV_AGG_IP_MODE: "${HDIPTV_AGG_IP_MODE:-auto}"
+      HDIPTV_KIDS_IP_MODE: "${HDIPTV_KIDS_IP_MODE:-auto}"
       PUBLIC_URL: "${PUBLIC_URL:-}"
       HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
       # 自动按省取源（面板「运行设置」里的开关优先）；写 0 关闭

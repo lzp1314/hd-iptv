@@ -256,5 +256,54 @@ class SingleSubscriptionTest(unittest.TestCase):
         self.assertIn(f'group-title="{KIDS_MODULE}"', text)
 
 
+class KidsCatalogTest(unittest.TestCase):
+    """面板要像其它模块一样：列出少儿抓到的频道名，并能单独选地址族。"""
+
+    def test_catalog_lists_kids_channels(self):
+        from iptvhd.service import _module_catalog
+
+        result = {
+            "channels": [
+                {"name": "CCTV-14 少儿", "group": KIDS_MODULE},
+                {"name": "嘉佳卡通", "group": KIDS_MODULE},
+                {"name": "湖南卫视", "group": "第三方聚合源"},
+            ],
+            "report": {"sources": [{"name": KIDS_MODULE, "count": 7}]},
+        }
+        kids = _module_catalog(kids_project(), result)["kids"]
+        self.assertEqual(kids["count"], 2, "只统计少儿分组里的台")
+        self.assertEqual(kids["collected"], 7, "历史采集条数用 report 兜底")
+        self.assertIn("CCTV-14 少儿", kids["channels"]["央视"])
+        self.assertIn("嘉佳卡通", kids["channels"]["其它"])
+
+    def test_catalog_kids_empty_without_result(self):
+        from iptvhd.service import _module_catalog
+
+        kids = _module_catalog(kids_project())["kids"]
+        self.assertEqual(kids["count"], 0)
+        self.assertEqual(kids["channels"], {})
+
+    def test_kids_ip_mode_env(self):
+        with mock.patch.dict(os.environ, {"HDIPTV_KIDS_IP_MODE": "ipv4"}, clear=True):
+            s = Settings(root=Path("."), data={})
+            self.assertEqual(s.module_ip_mode("少儿频道"), "ipv4")
+            self.assertIn("少儿频道", s.module_ip_modes())
+
+    def test_kids_ip_mode_panel_overrides_env(self):
+        with mock.patch.dict(os.environ, {"HDIPTV_KIDS_IP_MODE": "ipv4"}, clear=True):
+            s = Settings(root=Path("."), data={},
+                         panel={"module_ip_mode": {"少儿频道": "ipv6"}})
+            self.assertEqual(s.module_ip_mode(KIDS_MODULE), "ipv6")
+
+    def test_ip_mode_merge_keeps_other_modules(self):
+        from iptvhd.settings import merge_ip_modes
+
+        merged = merge_ip_modes({"央视频": "ipv4"}, {"少儿频道": "ipv6"})
+        self.assertEqual(merged, {"央视频": "ipv4", "少儿频道": "ipv6"})
+        # 官方源不允许 ipv4，合并时同样被打回 auto
+        merged = merge_ip_modes({"运营商官方源": "ipv6"}, {"运营商官方源": "ipv4"})
+        self.assertEqual(merged["运营商官方源"], "auto")
+
+
 if __name__ == "__main__":
     unittest.main()

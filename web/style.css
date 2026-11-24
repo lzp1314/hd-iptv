@@ -121,7 +121,17 @@ main { min-width: 0; padding: 0; }
 /* 全屏铺开后若不限宽，四张卡会被拉到整屏宽。统一限一个舒适宽度，
    连同提示条一起作为整体居中；窄屏时自动缩到 100%，不会溢出。 */
 .statbar .cards { width: min(960px, 100%); margin-bottom: 12px; }
-.statbar .banner { width: min(960px, 100%); }
+/* 横幅与「立即更新源 / 刷新」同一横排：横幅占左边自适应，按钮组靠最右。
+   整行仍限宽 960px 居中，和上面的卡片、下面的状态面板同一个左右边界。 */
+.statbar-row {
+  width: min(960px, 100%);
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.statbar-notes { flex: 1; min-width: 0; }
+.statbar .banner { width: 100%; }
+.statbar-actions { flex: none; display: flex; gap: 8px; padding-top: 2px; }
 /* 吸顶时内容在它下面滚，补一条极浅的分隔，避免糊成一片。
    flex 下伪元素也是一项，给满宽让它横贯整块状态区。 */
 .statbar::after {
@@ -132,11 +142,17 @@ main { min-width: 0; padding: 0; }
   background: linear-gradient(to right, var(--line), transparent);
 }
 
-/* 状态概览：一行一个键值。固定两列并限宽，全屏下也不会被拉成一长排 */
+/* 状态概览：整块白色面板收窄到和上面状态卡同一宽度并居中，
+   左右边界上下对齐。左侧导航是独立的 grid 列，不受影响。 */
+#viewStatus {
+  width: min(960px, 100%);
+  margin-left: auto;
+  margin-right: auto;
+}
+/* 一行一个键值。固定两列并限宽，全屏下也不会被拉成一长排 */
 .kv {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  max-width: 960px;
   gap: 2px 28px;
 }
 .kv-row {
@@ -593,6 +609,8 @@ code {
   color: var(--muted); padding: 1px 6px; font-size: 11px;
 }
 .btn.ghost:hover { background: #f1f3f5; border-color: var(--line); color: var(--text); }
+/* 顶栏「检查更新」：字号放大、颜色加深，别太不起眼 */
+#btnCheckUpdate { font-size: 14px; color: var(--text); font-weight: 600; padding: 4px 10px; }
 
 .pill {
   font-size: 11px; padding: 2px 7px; border-radius: 999px;
@@ -730,7 +748,6 @@ footer .mono { font-size: 11.5px; }
   /* 屏幕不够宽时两栏叠起来，订阅栏不再吸顶粘在旁边 */
   .module-layout { grid-template-columns: minmax(0, 1fr); }
   .subscribe-aside { position: static; }
-  .kv { max-width: none; }
 }
 
 /* 窄屏：侧边栏横过来当标签条，吸在顶栏下面。状态卡在小屏上不吸顶，
