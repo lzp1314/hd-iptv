@@ -17,7 +17,7 @@ from .logos import Logos
 from .models import Channel, Stream
 from .pipeline import load_result, load_sources, run_update
 from .relay import (
-    Relay, RelayError, channel_name, channel_slug, is_vlc_ua,
+    Relay, RelayError, ScanGuard, channel_name, channel_slug, is_vlc_ua,
     pad_body, padded_playlist, static_ua,
 )
 from .region import detect
@@ -252,7 +252,10 @@ def _module_catalog(settings: Settings, result: dict | None = None) -> dict:
             "collected": collected,
         })
 
-    covered = {m for members in BUILTIN_MODULES.values() for m in members}
+    from .kids import KIDS_MODULE
+
+    # 少儿是独立采集模块，但它有专属卡片和独立开关，不能再混进「更多源」
+    covered = {m for members in BUILTIN_MODULES.values() for m in members} | {KIDS_MODULE}
     others: list[dict] = []
     for name, item in by_name.items():
         if name in covered:
@@ -272,7 +275,14 @@ def _module_disabled_names(settings: Settings) -> set[str]:
     原先关掉的模块仍然关着。两个出口都读这里，避免规则漂移——以前订阅过滤
     了、「我的频道」没过滤，才会出现"关掉的源还在列表里"的不一致。
     """
-    return {display_module(x) for x in settings.disabled_modules}
+    from .kids import KIDS_MODULE
+
+    names = {display_module(x) for x in settings.disabled_modules}
+    # 少儿有自己的 kids_enabled 开关，不在 disabled_modules 里；没开也按
+    # 「模块关掉」处理，主订阅和「我的频道」才不会出现一个空壳少儿分组。
+    if not settings.kids_enabled:
+        names.add(KIDS_MODULE)
+    return names
 
 
 def _module_visible(channels: list[Channel], settings: Settings) -> list[Channel]:
@@ -281,6 +291,21 @@ def _module_visible(channels: list[Channel], settings: Settings) -> list[Channel
     if not disabled:
         return channels
     return [c for c in channels if display_module(c.group) not in disabled]
+
+
+def _kids_visible(channels: list[Channel], settings: Settings) -> list[Channel]:
+    """动画轮播子开关：只在少儿分组里剔台，不改其它模块的内容。
+
+    子开关走输出层过滤，和隐藏台一样点完保存就生效，不用等下一轮采集。
+    """
+    if settings.kids_cartoons:
+        return channels
+    from .kids import KIDS_MODULE, classify
+
+    return [
+        c for c in channels
+        if display_module(c.group) != KIDS_MODULE or classify(c.name) != "cartoon"
+    ]
 
 
 def _row_module_visible(row: dict, disabled: set[str]) -> bool:
@@ -292,6 +317,29 @@ def _row_module_visible(row: dict, disabled: set[str]) -> bool:
     if not disabled:
         return True
     return display_module(str(row.get("group") or "")) not in disabled
+
+
+def _row_kids_visible(row: dict, settings: Settings) -> bool:
+    """「我的频道」行级少儿动画过滤，与订阅的 _kids_visible 同规则。"""
+    if settings.kids_cartoons:
+        return True
+    from .kids import KIDS_MODULE, classify
+
+    return (
+        display_module(str(row.get("group") or "")) != KIDS_MODULE
+        or classify(str(row.get("name") or "")) != "cartoon"
+    )
+
+
+def _kids_only(channels: list[Channel], settings: Settings) -> list[Channel]:
+    """从已过滤的频道表里派生少儿订阅（输出层视图，不落盘、不改原始数据）。
+
+    两组：官方少儿台 + 第三方动画轮播（后者可在面板单独关）。返回的仍是原
+    Channel 对象——group 保持真实值，线路表按它建索引，改了会播不了。
+    """
+    from .kids import kids_channels
+
+    return kids_channels(channels, include_cartoons=settings.kids_cartoons)
 
 
 def _ysp_resolver(slug: str, ip_mode: str = "auto") -> tuple[str, str]:
@@ -306,6 +354,17 @@ def _ysp_resolver(slug: str, ip_mode: str = "auto") -> tuple[str, str]:
         raise RelayError(f"未知频道: {slug}")
     url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=2, ip_mode=ip_mode)
     return url, ysp.UA
+
+
+def _ysp_cooling() -> bool:
+    """央视频出口是否正处在上游限流冷却（8 次拒绝后停 30 秒）。
+
+    只给 relay 在「手里没有可用地址」时看一眼；正在播的台仍用旧地址顶住。
+    延迟导入，避免把网络层提前拉进服务模块。
+    """
+    from . import ysp
+
+    return ysp.denied()
 
 
 def migu_pid(slug: str) -> str:
@@ -409,6 +468,9 @@ class State:
         self._line_lock = threading.Lock()
         # slug → 上次记「换线」日志的时刻，同一台 30 秒只记一条
         self._line_note: dict[str, float] = {}
+        # 播放器「预览图/检测可用性」会把几十个台挨个点一遍。按客户端先挡一道，
+        # 别让多设备各扫几个的流量汇聚起来把出口打进限流。
+        self.scan_guard = ScanGuard()
         # 清单由本机取（用上游认的 UA），分片默认让播放器直连 CDN
         self.relay = Relay(
             self._resolve,
@@ -416,6 +478,7 @@ class State:
             cache_bytes=int(settings.relay_cache_mb * 1024 * 1024),
             mode=settings.play_mode,
             auto_switch=settings.auto_switch,
+            upstream_denied=_ysp_cooling,
         )
         self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
         self.logos = Logos(settings.data_dir / "logos")
@@ -604,6 +667,9 @@ class State:
             "migu_client_dispatch": s.migu_client_dispatch,
             "migu_edge_dispatch": s.migu_edge_dispatch,
             "migu_refresh": s.migu_refresh_minutes,
+            # 少儿频道模块的开关（主开关 + 动画轮播子开关）
+            "kids_enabled": s.kids_enabled,
+            "kids_cartoons": s.kids_cartoons,
         }
 
     def set_hidden(self, names: list[str], hidden: bool) -> list[str]:
@@ -632,6 +698,7 @@ class State:
         所以校验放在这里，不合法就抛 ValueError（接口回 400），不做静默修正。
         """
         clean = coerce_panel(values)
+        was_kids_on = bool(self.settings.kids_enabled)
         if "secret" in clean:
             clean["secret"] = clean_secret(clean["secret"])
         # 账号 ID 留空 = 清空账号，令牌也一起清掉（避免留下孤立的无效令牌）
@@ -640,6 +707,13 @@ class State:
         if clean:
             write_panel(self.settings.panel_path, clean)
             self.settings.panel.update(clean)
+            if "kids_enabled" in clean and self.settings.kids_enabled and not was_kids_on:
+                # 刚打开少儿：单独抓一轮，主订阅立刻就有少儿分组，
+                # 不用等下一个定时全量周期；已有任务在跑就跳过，下一轮自然会带上。
+                from .kids import KIDS_MODULE
+
+                if self.trigger(KIDS_MODULE):
+                    self.log("[少儿] 已开启，正在单独抓一轮少儿频道")
             self.relay.configure(
                 prefetch_every=self.settings.playlist_ttl,
                 cache_bytes=int(self.settings.relay_cache_mb * 1024 * 1024),
@@ -836,6 +910,14 @@ def make_handler(state: State):
             return None
 
         # ---------------- 播放 ----------------
+        def _client_key(self) -> str:
+            """扫台防护的客户端标识：反代后的真实 IP + UA。"""
+            fwd = (self.headers.get("X-Forwarded-For")
+                   or self.headers.get("X-Real-IP") or "")
+            ip = fwd.split(",")[0].strip() or self.client_address[0]
+            ua = self.headers.get("User-Agent") or ""
+            return f"{ip}|{ua}"
+
         def _live(self, slug: str) -> None:
             """返回改写后的播放清单。
 
@@ -850,6 +932,20 @@ def make_handler(state: State):
                 self._json({"error": f"未知频道: {slug}", "hint": "/api/live 可列出全部"}, 404)
                 return
             key, name = hit
+
+            # 播放器扫台先在本地挡住：10 秒内碰 6 个新频道就判定异常，
+            # 之后 30 秒只允许这个客户端继续看它已经在看的台。
+            # 一枪不打上游，出口额度留给真在播的人。
+            allowed, retry = state.scan_guard.check(self._client_key(), key)
+            if not allowed:
+                body = json.dumps({
+                    "error": "正在批量请求频道，已本地暂停新频道请求",
+                    "retry_after": retry,
+                    "hint": "关闭播放器的「检测可用性 / 预览图」后约 30 秒自动恢复；正在看的频道不受影响",
+                }, ensure_ascii=False).encode("utf-8")
+                self._send(429, body, "application/json; charset=utf-8",
+                           {"Retry-After": str(retry)})
+                return
 
             # 咪咕播放有三条路，优先级从高到低：
             #  1) edge_dispatch（默认）：服务端只请求调度域名读一次 302，把真实
@@ -917,12 +1013,15 @@ def make_handler(state: State):
                 cache="no-store",
             )
 
-        def _playlist(self) -> None:
+        def _playlist(self, *, kids_only: bool = False) -> None:
             """按请求现拼订阅列表。
 
             为什么不直接发 result.m3u：那份文件在更新时就把地址写死了，
             改了对外地址、套了反代都得等下一轮更新才生效。现拼的成本是
             几十个频道做一次字符串拼接，可以忽略。
+
+            ``kids_only`` 走少儿派生视图（/kids.m3u）：只留少儿台、分组名统一
+            显示成「少儿频道」。原始数据一行不改，也不影响普通订阅。
             """
             result = load_result(settings) or {}
             channels = _channels_from_result(result)
@@ -937,6 +1036,28 @@ def make_handler(state: State):
             channels = _visible(channels, settings.hidden)
             # 关掉的源模块整组摘掉。这一步按请求现做，改开关不用等下一轮更新。
             channels = _module_visible(channels, settings)
+            # 少儿分组里的动画轮播单独开关；其它模块不受影响。
+            channels = _kids_visible(channels, settings)
+
+            display_group = ""
+            if kids_only:
+                if not settings.kids_enabled:
+                    self._json(
+                        {"error": "少儿频道订阅已在面板关闭",
+                         "hint": "数据源页 → 少儿频道 → 打开开关"},
+                        404,
+                    )
+                    return
+                channels = _kids_only(channels, settings)
+                if not channels:
+                    self._json(
+                        {"error": "还没有采集到少儿频道",
+                         "hint": "先更新一次数据；或检查少儿频道模块是否已开启"},
+                        404,
+                    )
+                    return
+                from .kids import KIDS_MODULE
+                display_group = KIDS_MODULE
 
             base = self._base()
             logo_base = settings.logo_base or (f"{base}/logo" if base else "")
@@ -949,6 +1070,7 @@ def make_handler(state: State):
                 tvg_ids=state.epg.mapping(),
                 lines_per_channel=settings.lines_per_channel,
                 failover=settings.failover,
+                group_override=display_group,
             )
             self._send(
                 200,
@@ -1067,10 +1189,17 @@ def make_handler(state: State):
                     self._redirect(f"{secret_prefix(settings.secret)}/playlist.m3u")
                 else:
                     self._playlist()
+            elif path in ("/kids.m3u", "/kids"):
+                # 老版少儿专属地址的兼容别名，面板已不再展示；新用法是
+                # 主订阅里按模块开关出现的「少儿频道」分组。
+                self._playlist(kids_only=True)
             elif path in ("/txt", "/playlist.txt", "/result.txt"):
                 result = load_result(settings) or {}
-                channels = _module_visible(
-                    _visible(_channels_from_result(result), settings.hidden), settings
+                channels = _kids_visible(
+                    _module_visible(
+                        _visible(_channels_from_result(result), settings.hidden), settings
+                    ),
+                    settings,
                 )
                 if not channels:
                     self._json({"error": "结果尚未生成，请先更新一次"}, 404)
@@ -1157,6 +1286,7 @@ def make_handler(state: State):
                     for row in (result.get("channels", []) or [])
                     # 与订阅一致：关掉的模块整组不返回，面板只显示启用的源
                     if _row_module_visible(row, disabled)
+                    and _row_kids_visible(row, settings)
                 ]
                 self._json({
                     "generated_at": result.get("generated_at", ""),
@@ -1211,6 +1341,21 @@ def make_handler(state: State):
                 self._json({"error": "not found", "path": path}, 404)
 
         def do_HEAD(self) -> None:  # noqa: N802
+            """HEAD 探活本地应答，绝不为它换票或取清单。
+
+            播放器（以及面板里的「检测可用性」）会用 HEAD 把每个台问一遍，
+            一台一张票正好撞上按出口 IP 的频率限制。HEAD 只需要状态码和头，
+            本地回 200 空体即可；真正要看的 GET 才走上游。
+            """
+            path = self._require()
+            if path is None:
+                return
+            if path.startswith(("/live/", "/ysp/")) and path.endswith(".m3u8"):
+                slug = path.rsplit("/", 1)[-1][: -len(".m3u8")]
+                if live_target(slug) is not None:
+                    self._send(200, b"", "application/vnd.apple.mpegurl; charset=utf-8",
+                               cache="no-store")
+                    return
             self.do_GET()
 
         def _body(self) -> dict | None:
@@ -1349,6 +1494,17 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 9797) -> None:
 
     if settings.run_on_start:
         state.trigger()
+    else:
+        # 升级前的结果里没有少儿分组，但少儿默认开。后台单独抓一轮，
+        # 用户更新镜像后不用等下一个定时全量周期，订阅里就能看到少儿。
+        from .kids import KIDS_MODULE
+
+        old = load_result(settings) or {}
+        if settings.kids_enabled and not any(
+            display_module(str(c.get("group") or "")) == KIDS_MODULE
+            for c in (old.get("channels") or [])
+        ):
+            state.trigger(KIDS_MODULE)
 
     threading.Thread(target=_scheduler, args=(state,), daemon=True).start()
     # 识别宽带放后台：面板第一屏就能打开，几秒后那一行自己补上

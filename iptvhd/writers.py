@@ -116,6 +116,7 @@ def render_m3u(
     tvg_ids: dict | None = None,
     lines_per_channel: int = 1,
     failover: bool = True,
+    group_override: str = "",
 ) -> tuple[str, int]:
     """生成 m3u 文本，返回 ``(内容, 条数)``。
 
@@ -132,6 +133,10 @@ def render_m3u(
     ``failover`` 打开时，有多条线路的台改用一个固定的本机地址
     （``/live/c:<台名>.m3u8``），线路切换由中转层内部完成——这样「只写一行」
     不会变成「一条挂了就播不了」。
+
+    ``group_override`` 只改 M3U 里 group-title 的显示名，不改 Channel.group——
+    线路表按真实 group 建索引，改写会让 /live/c:... 找不到线路。派生视图
+    （少儿订阅）用它把散落各模块的少儿台统一显示成一个分组。
     """
     lines = []
     head = "#EXTM3U"
@@ -164,7 +169,7 @@ def render_m3u(
             attrs = [
                 f'tvg-id="{_attr(tvg_id)}"',
                 f'tvg-name="{_attr(ch.name)}"',
-                f'group-title="{_attr(ch.group)}"',
+                f'group-title="{_attr(group_override or ch.group)}"',
             ]
             if logo:
                 attrs.append(f'tvg-logo="{_attr(logo)}"')

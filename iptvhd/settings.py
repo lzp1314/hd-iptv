@@ -296,6 +296,9 @@ def coerce_panel(raw: dict) -> dict:
             out[key] = as_bool(value)
         elif key == "migu_edge_dispatch":
             out[key] = as_bool(value)
+        elif key in ("kids_enabled", "kids_cartoons"):
+            # 少儿模块：主开关 + 动画轮播子开关。都缺省视为开。
+            out[key] = as_bool(value)
         elif key == "migu_user_id":
             # 留空 = 清空账号（连同令牌一起，见 apply_settings）
             out[key] = str(value or "").strip()[:256]
@@ -787,6 +790,15 @@ class Settings:
         text = str(raw or "").strip().lower()
         return text if text in ("direct", "proxy") else "direct"
 
+    # ---- 少儿频道 ----
+    @property
+    def has_kids_section(self) -> bool:
+        """完整项目配置才注入少儿采集源；最小测试配置保持零额外请求。
+
+        和 [migu] 同样的约定：新模板自带 [kids]，老配置由升级补上。
+        """
+        return "kids" in self.data
+
     # ---- 咪咕视频 ----
     @property
     def has_migu_section(self) -> bool:
@@ -806,6 +818,25 @@ class Settings:
         if raw is not None and str(raw).strip():
             return as_bool(raw)
         return as_bool(self.get("migu", "enabled", True))
+
+    def _kids_value(self, panel_key: str, env_key: str, section_key: str, default: bool):
+        panel = self.panel_get(panel_key)
+        if panel is not None:
+            return as_bool(panel)
+        raw = os.environ.get(env_key)
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("kids", section_key, default))
+
+    @property
+    def kids_enabled(self) -> bool:
+        """少儿频道专属订阅是否启用。默认开——它是新增的派生视图，不影响主订阅。"""
+        return bool(self._kids_value("kids_enabled", "HDIPTV_KIDS_ENABLED", "enabled", True))
+
+    @property
+    def kids_cartoons(self) -> bool:
+        """少儿订阅是否包含第三方动画轮播（内容适龄性由上游决定）。默认开。"""
+        return bool(self._kids_value("kids_cartoons", "HDIPTV_KIDS_CARTOONS", "cartoons", True))
 
     def _migu_value(self, panel_key: str, env_key: str, section_key: str, default):
         panel = self.panel_get(panel_key)
@@ -989,6 +1020,16 @@ h265 = false
 edge_dispatch = true
 client_dispatch = false
 refresh_minutes = 360
+"""
+    # 旧配置没有 [kids] 段：补上默认开启的少儿模块。同样用 [output] 当
+    # 「这是完整项目配置」的标记，最小测试配置不会被凭空塞进一路采集。
+    if "[output]" in current and "[kids]" not in current:
+        current = current.rstrip() + """\n
+[kids]
+# 少儿频道：独立采集 CCTV-14 / 咪咕少儿 / 聚合列表里的少儿台。
+# 开启后作为「少儿频道」分组出现在同一条订阅地址里。
+enabled = true
+cartoons = true             # 第三方动画轮播（海绵宝宝等），内容由上游决定
 """
     if "playlist_ttl = 2.5" in current:
         current = current.replace(

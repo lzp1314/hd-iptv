@@ -95,6 +95,30 @@ def load_sources(settings: Settings, log: Logger | None = None) -> list[dict]:
             }
         )
 
+    # 少儿频道：独立采集源，跟央视频 / 咪咕 / 聚合源的开关互不影响。
+    # 镜像直接复用现有列表的配置（用户改过 mirrors 也跟得上）；三路采集里
+    # CCTV-14 和咪咕少儿分类不需要镜像，所以这里为空也不影响少儿组出台。
+    from .kids import KIDS_MODULE
+
+    if settings.kids_enabled and settings.has_kids_section:
+        mirror_groups: list[list[str]] = []
+        for item in sources:
+            if str(item.get("name") or "").strip() not in ("官方直连", "聚合源-多线路"):
+                continue
+            urls = item.get("urls") or []
+            if isinstance(urls, list) and urls:
+                mirrors = [str(u).strip() for u in urls if str(u).strip()]
+                if mirrors:
+                    mirror_groups.append(mirrors)
+        sources.append({
+            "name": KIDS_MODULE,
+            "type": "kids",
+            "enabled": True,
+            "url_groups": mirror_groups,
+            "data_dir": str(settings.data_dir),
+            "refresh_minutes": settings.migu_refresh_minutes,
+        })
+
     # 本地源的相对路径统一按项目根目录解析，避免受工作目录影响
     for item in sources:
         if str(item.get("type", "")).lower() == "local" and item.get("path"):
@@ -295,12 +319,21 @@ def _collect(settings: Settings, collectors: list[Collector], log: Logger) -> tu
 
 
 def _dedupe(streams: list[Stream]) -> list[Stream]:
+    from .kids import KIDS_MODULE
+
     seen: set[str] = set()
     out: list[Stream] = []
     for s in streams:
         # 采集阶段可以只给 slug、不给地址（地址在播放时现换），这种条目按 slug 认
         key = s.url.strip() or (f"slug:{s.slug}" if s.slug else "")
-        if not key or key in seen:
+        if not key:
+            continue
+        # 少儿模块故意和其它模块收同一批台，只是分组不同（家长在订阅里
+        # 按分组挑）。全局按 URL/slug 去重会把少儿这一份整组吃掉，所以
+        # 给它单独的命名空间：少儿内部照样去重，跨模块保留两条。
+        if display_module(s.source) == KIDS_MODULE:
+            key = f"kids:{key}"
+        if key in seen:
             continue
         seen.add(key)
         out.append(s)

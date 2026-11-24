@@ -370,9 +370,71 @@ _BLACKOUT = "版权"
 
 # 换票预算：整台实例每分钟最多换这么多张票（只管「冷启动」和「403 换票重取」，
 # 抱着旧地址续播不计）。一个台正常播放每分钟只换 1~2 张；被拒时重取一次算一张。
-# 把六十多个公开频道扫一遍会在第 31 个被拦住——那正是把出口打进限流的典型动作。
-_TICKET_BUDGET = 30
+# 从 30 降到 20：同机参照项目的共享实例日志（两天 1487 次 403）显示，20 张/分钟
+# 足够一个人正常换台，却能在播放器把六十多个台扫到第 21 个时挡住。
+_TICKET_BUDGET = 20
 _TICKET_WINDOW = 60.0
+
+
+class ScanGuard:
+    """按客户端拦「批量扫台」，在请求到达上游之前本地回绝。
+
+    实例级换票预算只能看到总账：几台设备各扫几个台，每台都没超自己的节奏，
+    加起来照样把 NAS 的出口打进限流。这里按 `IP + UA` 各记一本账：10 秒内
+    碰到 6 个不同频道就判定为扫描，之后 30 秒内只允许这个客户端**已经在看**
+    的频道继续续播，新频道本地回 429，一枪不打上游。
+
+    正在播的频道不受影响：播放器拿完清单隔两三秒才来取下一份，同一个台
+    重复请求不算「碰新台」。扫描通常是每台碰一次、或毫秒级连打两次，都
+    判不成在播。
+    """
+
+    def __init__(self, limit: int = 6, window: float = 10.0, cooldown: float = 30.0):
+        self.limit = max(2, int(limit))
+        self.window = max(1.0, float(window))
+        self.cooldown = max(1.0, float(cooldown))
+        self._lock = threading.Lock()
+        self._touches: dict[str, deque] = {}
+        self._watching: dict[str, dict[str, float]] = {}
+        self._until: dict[str, float] = {}
+        self.blocked = 0
+
+    def check(self, client: str, slug: str, now: float | None = None) -> tuple[bool, int]:
+        """返回 `(是否放行, 建议重试秒数)`。"""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            touches = self._touches.setdefault(client, deque())
+            watching = self._watching.setdefault(client, {})
+            # 只留窗口内的记录；过期就当没碰过。
+            while touches and now - touches[0][0] > self.window:
+                touches.popleft()
+            for key, at in list(watching.items()):
+                if now - at > self.window:
+                    watching.pop(key, None)
+            until = self._until.get(client, 0.0)
+            if until and now >= until:
+                self._until.pop(client, None)
+                until = 0.0
+            repeat = slug in watching
+            watching[slug] = now
+            if until and not repeat:
+                self.blocked += 1
+                return False, max(1, int(until - now + 0.999))
+            if not repeat:
+                touches.append((now, slug))
+            distinct = {key for _, key in touches}
+            if not until and len(distinct) >= self.limit:
+                # 本次放行（第 6 个），之后的新频道才挡——正常换台不会被误伤。
+                self._until[client] = now + self.cooldown
+            return True, 0
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "clients": len(self._touches),
+                "blocked": self.blocked,
+                "cooling": sum(1 for until in self._until.values() if until > time.monotonic()),
+            }
 
 
 def _parse_media(text: str, base: str):
@@ -727,8 +789,13 @@ class Relay:
         mode: str = "direct",
         auto_switch: bool = True,
         warm: bool = True,
+        upstream_denied=None,
     ):
         self._resolver = resolver
+        # 上游自己的出口级冷却回调（央视频 8 次拒绝后停 30 秒）。只挡「手里没有
+        # 可用地址」的冷启动请求；正在播的台照常用旧地址/旧窗口顶住，不重演
+        # 过去整台冷却 30 秒导致画面定住的回归。
+        self._upstream_denied = upstream_denied if callable(upstream_denied) else None
         # 解析器支持不支持「换下一路」。老实现只有一个参数，这里探测一次，
         # 免得为了一个可选参数让所有调用方（含测试里的假解析器）都得改。
         try:
@@ -949,6 +1016,14 @@ class Relay:
         # 出口级退避（``_forbidden_until``）**只停后台预取**，不挡这里的同步取：
         # 一个台 403 就把所有台一起关掉，等于别人一个坏台害你看不了 CCTV-1。
         # 真正防「批量扫台把出口敲爆」的是下面那张换票预算，按 IP 记账的口径更准。
+
+        # 上游出口级冷却中（央视频连续拒绝后的 30 秒）就不再为**新频道**敲门。
+        # 手里有旧地址的照旧续播——过去把正在看的台一起冻 30 秒，正好耗干窗口
+        # 里那几片，是「播十几秒停一下」的回归点，这里明确避开。
+        if self._upstream_denied and self._upstream_denied() and (not hit or fresh):
+            if hit:
+                return hit[1], hit[2]
+            raise RelayError("央视频上游限流中，约 30 秒后自动恢复")
 
         if not hit or fresh:
             # 只有真的要向接口要一张新票时才记预算。抱着旧地址续播不计。
@@ -1616,4 +1691,4 @@ def _guess_type(url: str) -> str:
     return "application/octet-stream"
 
 
-__all__ = ["Relay", "RelayError", "allowed", "encode", "decode", "parse_range"]
+__all__ = ["Relay", "RelayError", "ScanGuard", "allowed", "encode", "decode", "parse_range"]

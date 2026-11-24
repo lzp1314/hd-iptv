@@ -44,6 +44,8 @@ from .net import HttpClient
 # 协议常量
 # --------------------------------------------------------------------------- #
 _CATES_URL = "https://program-sc.miguvideo.com/live/v2/tv-data/{cate}"
+# 少儿分类单独暴露给少儿模块：只抓这一路，不必为几个少儿台打十次接口。
+_KIDS_CATE_ID = "fc2f5b8fd7db43ff88c4243e731ecede"
 # 分类：去掉「热门」（与别的分类重复）
 _CATE_IDS = (
     "7538163cdac044398cb292ecf75db4e0",  # 体育
@@ -55,7 +57,7 @@ _CATE_IDS = (
     "af72267483d94275995a4498b2799ecd",  # 教育
     "e76e56e88fff4c11b0168f55e826445d",  # 熊猫
     "192a12edfef04b5eb616b878f031f32f",  # 综艺
-    "fc2f5b8fd7db43ff88c4243e731ecede",  # 少儿
+    _KIDS_CATE_ID,  # 少儿
     "e1165138bdaa44b9a3138d74af6c6673",  # 纪实
 )
 
@@ -510,13 +512,20 @@ def name_of(pid: str, data_dir: Path | None = None) -> str:
 
 
 def fetch_channels(client: HttpClient, *, timeout_minutes: float = 360.0,
-                   data_dir: Path | None = None) -> list[ChannelRow]:
+                   data_dir: Path | None = None, cates: tuple[str, ...] | None = None,
+                   cache_name: str = "", merge_names: bool = False) -> list[ChannelRow]:
     """抓频道表，按刷新间隔复用本地缓存。
 
     采集阶段只登记「名字 → 编号」，不换票、不发账号，避免一轮更新就打几十次
     播放接口被限流。缓存只存这份公开目录，不存任何播放地址或账号信息。
+
+    ``cates`` 只抓指定分类（少儿模块只抓「少儿」那一路，省 10 次请求），
+    ``cache_name`` 给它单独一份缓存，免得把咪咕全量频道表覆盖成只有少儿。
+    ``merge_names`` 时不清空全局「编号 → 频道名」表——少儿采集完成后，
+    咪咕模块仍要能按编号报出正确台名（顺序无关）。
     """
-    cache = (data_dir / _CHANNEL_CACHE) if data_dir else None
+    target = tuple(cates) if cates else _CATE_IDS
+    cache = (data_dir / (cache_name or _CHANNEL_CACHE)) if data_dir else None
     if cache is not None:
         try:
             age = time.time() - cache.stat().st_mtime
@@ -533,8 +542,9 @@ def fetch_channels(client: HttpClient, *, timeout_minutes: float = 360.0,
     rows: list[ChannelRow] = []
     seen: set[str] = set()
     failed = 0
-    _NAMES.clear()
-    for cate in _CATE_IDS:
+    if not merge_names:
+        _NAMES.clear()
+    for cate in target:
         try:
             resp = client.get(_CATES_URL.format(cate=cate))
             data = json.loads(resp.text) if resp.body else {}
@@ -559,7 +569,7 @@ def fetch_channels(client: HttpClient, *, timeout_minutes: float = 360.0,
                                    group=str(item.get("group") or ""), logo=logo))
 
     if not rows:
-        raise MiguError(f"频道表获取失败（{failed}/{len(_CATE_IDS)} 个分类无响应）")
+        raise MiguError(f"频道表获取失败（{failed}/{len(target)} 个分类无响应）")
 
     # 按分组顺序输出，保证每次生成的列表顺序稳定
     if cache is not None:

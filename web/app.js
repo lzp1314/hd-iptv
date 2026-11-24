@@ -348,6 +348,24 @@ function fillSettings(s) {
         + `</div>`
         + `</div>`;
     }).join("");
+    // 少儿频道是独立采集模块：自己抓 CCTV-14 / 咪咕少儿 / 聚合列表少儿台，
+    // 不依赖其它模块开关。它走独立的 kids_enabled 开关，仍由前端单独渲染卡片；
+    // 开启后内容作为「少儿频道」分组出现在上面那一条 M3U 订阅里。
+    const kidsOn = s.kids_enabled !== false;
+    const kidsCartoon = s.kids_cartoons !== false;
+    $("builtinModules").insertAdjacentHTML("beforeend",
+      `<div class="builtin-module" data-module="少儿频道">`
+      + `<div class="builtin-head">`
+      + `<label class="builtin-toggle"><input type="checkbox" id="kidsEnabled"${kidsOn ? " checked" : ""}></label>`
+      + `<span class="builtin-name">少儿频道</span>`
+      + `<span class="module-type">独立少儿源</span>`
+      + `</div>`
+      + `<p class="builtin-status ${kidsOn ? "on" : "off"}">`
+      + `${kidsOn ? "● 已开启 · 主订阅含「少儿频道」分组" : "○ 已关闭"}</p>`
+      + `<div class="kids-cartoon-row"${kidsOn ? "" : " hidden"}>`
+      + `<label class="chk"><input type="checkbox" id="kidsCartoons"${kidsCartoon ? " checked" : ""}>`
+      + `包含动画轮播（海绵宝宝等，内容由上游决定）</label></div>`
+      + `</div>`);
   }
   if ($("moduleList")) {
     $("moduleList").innerHTML = others.map((m) => {
@@ -362,8 +380,8 @@ function fillSettings(s) {
   if ($("moduleStatus")) {
     $("moduleStatus").hidden = false;
     const all = builtins.concat(others);
-    const on = all.filter((m) => m.enabled).length;
-    $("moduleStatus").textContent = `共 ${all.length} 个模块，已启用 ${on} 个。`;
+    const on = all.filter((m) => m.enabled).length + ($("kidsEnabled")?.checked ? 1 : 0);
+    $("moduleStatus").textContent = `共 ${all.length + 1} 个模块，已启用 ${on} 个。`;
   }
   // 咪咕启用以内置卡片开关为准，回填到配置块里的下拉，两者保持同步
   const miguBuiltin = builtins.find((m) => m.name === "咪咕视频");
@@ -472,6 +490,11 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     if (miguSwitch) {
       payload.migu_enabled = miguSwitch.checked;
       if ($("setMiguEnabled")) $("setMiguEnabled").value = miguSwitch.checked ? "1" : "0";
+    }
+    // 少儿频道独立开关（不混进 disabled_modules——它没有采集源）
+    if ($("kidsEnabled")) {
+      payload.kids_enabled = $("kidsEnabled").checked;
+      payload.kids_cartoons = $("kidsCartoons") ? $("kidsCartoons").checked : true;
     }
   }
   // 地址族三态：只提交当前弹窗模块的这一项，其它表单控件一概不碰。
@@ -1337,7 +1360,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const card = cfgBtn.closest(".builtin-module");
       if (card) openModuleModal(card.dataset.module || cfgBtn.dataset.config);
     });
-    $("builtinModules").addEventListener("change", () => { settingsDirty = true; });
+    $("builtinModules").addEventListener("change", (e) => {
+      settingsDirty = true;
+      if (e.target && e.target.id === "kidsEnabled") {
+        const row = document.querySelector(".kids-cartoon-row");
+        if (row) row.hidden = !e.target.checked;
+      }
+    });
   }
   if ($("btnModuleModalClose")) $("btnModuleModalClose").addEventListener("click", closeModuleModal);
   if ($("moduleModal")) {

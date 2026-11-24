@@ -483,12 +483,124 @@ class MiguCollector(Collector):
         return tagged
 
 
+class KidsCollector(Collector):
+    """少儿频道：自己抓台，不依赖央视频 / 咪咕 / 聚合源的开关。
+
+    以前少儿只是输出层派生视图，关掉采集模块就跟着空了。这里把它做成一条
+    真正参与采集的源，三路合并：
+
+    1. 央视频 CCTV-14 —— 只登记、不换票（0 次网络请求）；
+    2. 咪咕「少儿」分类 —— 单独缓存，只打 1 次接口，不覆盖咪咕全量频道表；
+    3. 聚合列表 —— 复用配置里的镜像，只留下按名字判定为少儿台的条目。
+
+    三路都按 ``少儿频道`` 模块落库；播放时 CCTV-14 走央视频现换票、咪咕台
+    按 pID 现换票、聚合台直连，都不要求原模块处于开启状态（模块开关只管
+    采集与主订阅分组，不管播放链路）。动画轮播在最外层按 ``kids_cartoons``
+    过滤，开关切换不用重采。
+    """
+
+    kind = "kids"
+
+    def collect(self, client: HttpClient) -> list[Stream]:
+        from pathlib import Path
+
+        from . import migu
+        from .collectors import SubscriptionCollector
+        from .kids import KIDS_MODULE, classify
+
+        self.notes: list[str] = []
+        streams: list[Stream] = []
+
+        # 1) 央视频 CCTV-14：与「央视频」模块共用同一张频道表，但这里只取少儿台。
+        ysp_collector = YangshipinCollector(
+            name=self.name,
+            enabled=True,
+            config={"channels": ["cctv14"], "resolve": False},
+        )
+        try:
+            streams.extend(ysp_collector.collect(client))
+        except Exception as exc:  # noqa: BLE001 - 单路失败不影响其余
+            self.notes.append(f"央视频少儿台：{type(exc).__name__}")
+        self.notes.extend(getattr(ysp_collector, "notes", []) or [])
+
+        # 2) 咪咕少儿分类：单独缓存，避免把咪咕全量频道表覆盖成只有少儿。
+        data_dir = Path(str(self.config.get("data_dir", "") or ""))
+        if not str(data_dir) or not data_dir.is_absolute():
+            data_dir = Path(__file__).resolve().parent.parent / "output"
+        refresh = float(self.config.get("refresh_minutes", 360) or 360)
+        modes = getattr(client, "module_ip_modes", None) or {}
+        ip_mode = modes.get("咪咕视频", "auto") if isinstance(modes, dict) else "auto"
+        channel_client = (
+            client if ip_mode == "auto" else HttpClient(
+                user_agent=client.user_agent,
+                timeout=client.timeout,
+                retries=client.retries,
+                proxy=client.proxy,
+                ip_mode=ip_mode,
+            )
+        )
+        try:
+            rows = migu.fetch_channels(
+                channel_client,
+                timeout_minutes=refresh,
+                data_dir=data_dir,
+                cates=(migu._KIDS_CATE_ID,),
+                cache_name="migu-kids-channels.json",
+                merge_names=True,
+            )
+            height = migu.RATES.get(migu.DEFAULT_RATE, migu.RATES[migu.DEFAULT_RATE])[1]
+            for row in rows:
+                streams.append(Stream(
+                    url="",
+                    raw_name=row.name,
+                    group=row.group or "少儿",
+                    logo=row.logo,
+                    slug=f"m:{row.pid}",
+                    trusted=True,
+                    hint_height=height,
+                    height=height,
+                    playlist_only=True,
+                    ok=True,
+                ))
+        except Exception as exc:  # noqa: BLE001 - 单路失败不影响其余
+            self.notes.append(f"咪咕少儿分类：{type(exc).__name__}: {exc}")
+
+        # 3) 聚合列表：每组镜像各试一次，只收少儿台。
+        for urls in (self.config.get("url_groups") or []):
+            mirrors = [str(u).strip() for u in urls if str(u).strip()] if isinstance(urls, (list, tuple)) else []
+            if not mirrors:
+                continue
+            sub = SubscriptionCollector(name=self.name, enabled=True, config={"urls": mirrors})
+            try:
+                got = sub.collect(client)
+            except Exception as exc:  # noqa: BLE001 - 某个列表抽风不影响其它
+                self.notes.append(f"少儿聚合列表：{type(exc).__name__}")
+                continue
+            for s in got:
+                name = (s.raw_name or s.channel or s.group or "").strip()
+                if not classify(name):
+                    continue
+                s.raw_name = name
+                streams.append(s)
+
+        # 统一归到「少儿频道」模块：pipeline 按 source 分模块，
+        # 这里不改写 channel/group 的编码来源（线路表仍按真实内容建索引）。
+        out = self._tag(streams)
+        for s in out:
+            s.group = KIDS_MODULE
+            if s.slug == "cctv14" or str(s.slug).startswith("m:"):
+                # 官方换票源走串行慢探，别跟第三方聚合台一起并发打接口
+                s.trusted = True
+        return out
+
+
 GENERATORS = {
     YangshipinCollector.kind: YangshipinCollector,
     CctvCollector.kind: CctvCollector,
     ZhejiangCollector.kind: ZhejiangCollector,
     TemplateCollector.kind: TemplateCollector,
     MiguCollector.kind: MiguCollector,
+    KidsCollector.kind: KidsCollector,
 }
 
 __all__ = [
@@ -498,4 +610,5 @@ __all__ = [
     "ZhejiangCollector",
     "TemplateCollector",
     "MiguCollector",
+    "KidsCollector",
 ]

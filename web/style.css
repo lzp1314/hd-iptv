@@ -378,6 +378,10 @@ code {
 .builtin-status { font-size: 12px; margin: 9px 0 6px; color: var(--muted); }
 .builtin-status.on { color: #1a7f37; }
 .builtin-status.off { color: var(--muted); }
+/* 少儿频道卡的动画轮播子开关：跟着主开关显隐，样式沿用 .chk */
+.kids-cartoon-row { margin: 6px 0 2px; }
+.kids-cartoon-row[hidden] { display: none; }
+.kids-cartoon-row .chk input { width: auto; flex: none; }
 .builtin-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
 .builtin-chip {
   font-size: 11px; padding: 2px 7px; border-radius: 6px;

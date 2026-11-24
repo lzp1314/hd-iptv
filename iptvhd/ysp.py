@@ -72,6 +72,11 @@ HLS_HEADERS = {
 # 一次分片采样读多少字节（用于测速和读 SPS 里的真实分辨率）
 SAMPLE_BYTES = 262144
 
+# 清单的总时限。上游偶尔挂住不回，等满 10 秒才换备用入口，播放器手里只剩
+# 十几秒内容时会直接停住；实测正常响应远低于 1 秒，3 秒足够兜住慢节点。
+# 超时只换入口，不当成「被限流」，不会触发出口冷却。
+MANIFEST_TIMEOUT = 3.0
+
 # 码率档位 → 高度，用于给探测阶段提供分辨率提示
 DEFN_HEIGHT = {"fhd": 1080, "shd": 720, "hd": 540}
 
@@ -371,7 +376,7 @@ def play_info(
     })
 
     client = client or HttpClient(
-        user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=ip_mode
+        user_agent=UA, timeout=10, retries=1, force_ipv4=force_ipv4, ip_mode=ip_mode
     )
     pace()
     resp = client.get(_INFO_URL + "?" + query, headers={"Accept": "application/json"})
@@ -454,7 +459,7 @@ def resolve(
     defn: str = "fhd",
     client: HttpClient | None = None,
     verify_segment: bool = False,
-    attempts: int = 3,
+    attempts: int = 2,
     pause: float = 1.2,
     meta: dict | None = None,
     force_ipv4: bool = False,
@@ -473,7 +478,7 @@ def resolve(
     用来从分片大小推算真实码率，不必为它多发一次请求。
     """
     client = client or HttpClient(
-        user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=ip_mode
+        user_agent=UA, timeout=10, retries=1, force_ipv4=force_ipv4, ip_mode=ip_mode
     )
     last = "获取播放信息失败"
     for round_no in range(max(1, attempts)):
@@ -498,7 +503,10 @@ def resolve(
         forbidden = 0
         for url in urls:
             pace()
-            resp = client.get(url, limit=131072, headers=HLS_HEADERS)
+            resp = client.get(
+                url, limit=131072, headers=HLS_HEADERS,
+                deadline=time.monotonic() + MANIFEST_TIMEOUT,
+            )
             if resp.status in (403, 429):
                 forbidden += 1
                 note_denied()
@@ -521,7 +529,10 @@ def resolve(
             # 读不到**不算失败**——清单已经证明这条地址是活的，分片被拒多半只是
             # 出口限流（403），拿它否掉一条能播的流是过去「好多台没拉到」的主因。
             pace()
-            probe = client.get(first, limit=SAMPLE_BYTES, headers=HLS_HEADERS)
+            probe = client.get(
+                first, limit=SAMPLE_BYTES, headers=HLS_HEADERS,
+                deadline=time.monotonic() + MANIFEST_TIMEOUT * 2,
+            )
             if meta is not None:
                 meta["segment_status"] = probe.status
                 if _usable(probe):
