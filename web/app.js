@@ -284,6 +284,8 @@ function fillSettings(s) {
   if ($("setRegion")) $("setRegion").value = s.region || "";
   if ($("setIsp")) $("setIsp").value = s.isp || "";
   if ($("setAutoSwitch")) $("setAutoSwitch").value = s.auto_switch === false ? "0" : "1";
+  // 缺省视为开：老部署没有这个字段时按推荐值勾上
+  if ($("setYspPlain")) $("setYspPlain").checked = s.ysp_plain !== false;
   if ($("setPublicUrl")) $("setPublicUrl").value = s.public_url || "";
   if ($("setInterval")) $("setInterval").value = s.interval_hours != null ? s.interval_hours : "";
   if ($("setTtl")) $("setTtl").value = s.playlist_ttl != null ? s.playlist_ttl : "";
@@ -513,6 +515,8 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     region: $("setRegion") ? $("setRegion").value : "",
     isp: $("setIsp") ? $("setIsp").value : "",
     auto_switch: $("setAutoSwitch") ? $("setAutoSwitch").value === "1" : true,
+    // 央视频分片降 http：默认开，只有明确取消勾选才关
+    ysp_plain: $("setYspPlain") ? $("setYspPlain").checked : true,
     public_url: $("setPublicUrl").value.trim(),
     interval_hours: Number($("setInterval").value || 0),
     playlist_ttl: Number($("setTtl").value || 1),
@@ -1490,7 +1494,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // 用户正在改设置时不要被轮询覆盖
-  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setAutoSwitch", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource", "setMiguEnabled", "setMiguUser", "setMiguToken", "setMiguRate", "setMiguH265", "setMiguEdgeDispatch", "setMiguDispatch", "setMiguRefresh"].forEach((id) => {
+  ["setPlayMode", "setAutoRegion", "setRegion", "setIsp", "setAutoSwitch", "setYspPlain", "setPublicUrl", "setSecret", "setInterval", "setTtl", "setCache", "setEpgSource", "setMiguEnabled", "setMiguUser", "setMiguToken", "setMiguRate", "setMiguH265", "setMiguEdgeDispatch", "setMiguDispatch", "setMiguRefresh"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("input", () => { settingsDirty = true; });
   });

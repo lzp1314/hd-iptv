@@ -310,6 +310,10 @@ def coerce_panel(raw: dict) -> dict:
             out[key] = as_bool(value)
         elif key == "auto_switch":
             out[key] = as_bool(value)
+        elif key == "ysp_plain":
+            # 央视频分片直连时降成 http：老旧电视盒子的 TLS 栈握手不了，
+            # 而 CDN 的 http / https 返回同一份字节。面板可随时关掉。
+            out[key] = as_bool(value)
         elif key == "migu_enabled":
             out[key] = as_bool(value)
         elif key == "migu_h265":
@@ -670,6 +674,27 @@ class Settings:
         if raw is not None and str(raw).strip():
             return as_bool(raw)
         return as_bool(self.get("ysp", "ipv4", False))
+
+    @property
+    def ysp_plain(self) -> bool:
+        """央视频分片直连时是否降成 http（默认开）。
+
+        电视盒子的 TLS 栈普遍很旧（根证书缺失、系统时间不对），直连 https 分片
+        一律报「网络连接错误」；实测央视频 CDN 的 http 与 https 返回同一份字节，
+        所以把分片降成 http 给播放器直连——不占 NAS 带宽，也不会因为本机高频
+        取分片被平台回 403。
+
+        只有面板自身是 http 时才会降级（https 面板会被混合内容拦掉）。CDN 以后
+        若关掉 http，面板上关掉这个开关即可立刻回到 https。
+        面板 > HDIPTV_YSP_PLAIN > [ysp] plain > 默认开。
+        """
+        panel = self.panel_get("ysp_plain")
+        if panel is not None:
+            return as_bool(panel)
+        raw = os.environ.get("HDIPTV_YSP_PLAIN")
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("ysp", "plain", True))
 
     @property
     def public_url(self) -> str:

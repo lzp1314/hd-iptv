@@ -59,6 +59,8 @@ services:
       HDIPTV_OFFICIAL_IP_MODE: "${HDIPTV_OFFICIAL_IP_MODE:-auto}"
       HDIPTV_AGG_IP_MODE: "${HDIPTV_AGG_IP_MODE:-auto}"
       HDIPTV_KIDS_IP_MODE: "${HDIPTV_KIDS_IP_MODE:-auto}"
+      # 央视频分片直连降 http（老电视盒子 TLS 兼容）。1=开（默认），0=关。
+      HDIPTV_YSP_PLAIN: "${HDIPTV_YSP_PLAIN:-1}"
       # 对外地址。留空即可：列表按请求的域名端口现拼，套了反代也自动用外网地址；
       # 只有反代不透传 Host 头时才需要填，例如 https://tv.example.com:8443
       PUBLIC_URL: "${PUBLIC_URL:-}"

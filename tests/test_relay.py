@@ -127,7 +127,9 @@ class RelayTest(unittest.TestCase):
         """
         relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)})
         text = relay.playlist("cctv1")
-        self.assertIn("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/index.m3u8", text)
+        # 默认还会把央视频分片降成 http（老旧电视盒子的 TLS 兼容，见
+        # tests/test_ysp_plain.py），所以这里只断言「域名+票据在、且没有 /relay/」。
+        self.assertIn("ysp.cctv.cn/TOKEN/index.m3u8", text)
         self.assertNotIn("/relay/", text)
         self.assertNotIn("\nindex.m3u8", text)  # 相对地址必须换成绝对地址
         self.assertEqual(relay.stats()["mode"], "direct")
@@ -138,8 +140,8 @@ class RelayTest(unittest.TestCase):
         migu = "http://hlsztemgsplive.miguvideo.com:8080/x/01.m3u8?a=1"
         # 咪咕：强制 /relay/
         self.assertIn("/relay/cctv1/p/", relay.target("cctv1", migu, "http://nas"))
-        # 普通 CDN：direct 仍直连
-        plain = "https://hlsliveali-cdn.ysp.cctv.cn/x/01.m3u8"
+        # 普通 CDN（非央视频域名）：direct 仍直连，连 scheme 都不动
+        plain = "https://cdn.example.com/x/01.m3u8"
         self.assertEqual(relay.target("cctv1", plain, "http://nas"), plain)
 
     def test_proxy_mode_rewrites_everything(self):

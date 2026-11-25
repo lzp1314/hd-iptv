@@ -490,6 +490,7 @@ class State:
             mode=settings.play_mode,
             auto_switch=settings.auto_switch,
             upstream_denied=_ysp_cooling,
+            plain_http=settings.ysp_plain,
         )
         self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
         self.logos = Logos(settings.data_dir / "logos")
@@ -654,6 +655,8 @@ class State:
             "playlist_ttl": s.playlist_ttl,
             "cache_mb": int(s.relay_cache_mb),
             "play_mode": s.play_mode,
+            # 央视频分片直连降 http（老旧电视盒子 TLS 兼容），面板可开关
+            "ysp_plain": s.ysp_plain,
             "auto_region": s.auto_region,
             "region": s.region_hint,
             "isp": s.isp_hint,
@@ -739,6 +742,7 @@ class State:
                 cache_bytes=int(self.settings.relay_cache_mb * 1024 * 1024),
                 mode=self.settings.play_mode,
                 auto_switch=self.settings.auto_switch,
+                plain_http=self.settings.ysp_plain,
             )
             if "epg_source" in clean:
                 # 换了节目单源就把旧的清掉，免得播放器拿到对不上的节目单

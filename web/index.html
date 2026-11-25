@@ -104,6 +104,9 @@
           <option value="proxy">经本机转发</option>
         </select>
       </label>
+      <label class="chk"><input id="setYspPlain" type="checkbox"> 央视频分片走 http（老旧电视盒子兼容）
+        <span class="hint">盒子直连 https 分片报「网络连接错误」时保持勾选：央视频 CDN 的 http 与 https 是同一份内容，降级后盒子不用做 TLS 握手，分片仍由盒子直连、不占 NAS 带宽。</span>
+      </label>
       <label>对外地址
         <input id="setPublicUrl" type="text" placeholder="留空 = 用你打开面板的这个地址">
       </label>

@@ -73,6 +73,18 @@ _RETRY_PAUSE = 0.25
 # 取清单/分片时带的 Referer
 _REFERER = "https://live.cctv.cn/"
 
+# 直连时可以把分片从 https 降成 http 的域名。
+#
+# 实测（2026-11-25，NAS 出口）：央视频 CDN 的**同一个分片地址**，https 与 http
+# 返回完全相同的字节（2072324 字节，逐字节一致），http 不会被 302 回 https。
+#
+# 为什么要降：电视盒子（观屿、各类 libVLC 外壳）的 TLS 栈普遍很旧——根证书链
+# 不全、只支持到 TLS 1.0/1.1、断电重启后系统时间是错的——播放器直连 https 分片
+# 一律报「网络连接错误」。而同一台盒子播 http 的咪咕、运营商源完全正常，说明
+# 盒子本身能跑 http。降级之后盒子不必做 TLS 握手，分片仍是它自己直连 CDN，
+# 不经过 NAS，因此不会把本机出口打成高频请求（转发正是因此被平台回 403）。
+_PLAIN_SUFFIX = (".ysp.cctv.cn",)
+
 
 def _ipv6_host(url: str) -> str:
     """地址里的主机是 IPv6 字面量就返回它，否则返回空串。"""
@@ -797,6 +809,7 @@ class Relay:
         auto_switch: bool = True,
         warm: bool = True,
         upstream_denied=None,
+        plain_http: bool = True,
     ):
         self._resolver = resolver
         # 上游自己的出口级冷却回调（央视频 8 次拒绝后停 30 秒）。只挡「手里没有
@@ -810,6 +823,9 @@ class Relay:
         except (TypeError, ValueError):
             self._resolver_rotates = False
         self._mode = mode if mode in ("direct", "proxy") else "direct"
+        # 央视频分片直连时是否降成 http（见 _PLAIN_SUFFIX）。默认开：不占本机
+        # 带宽、不增加本机对上游的请求，只影响「播放器自己怎么连 CDN」。
+        self._plain_http = bool(plain_http)
         # 播放中是否允许换到同台的下一条线路。关掉之后只「换票重取同一个地址」，
         # 不再换线路——线路之间来回跳的时候用面板上那个开关先稳住画面。
         self._auto_switch = bool(auto_switch)
@@ -1106,6 +1122,7 @@ class Relay:
         cache_bytes: int | None = None,
         mode: str | None = None,
         auto_switch: bool | None = None,
+        plain_http: bool | None = None,
     ) -> None:
         """面板上改了参数后立刻生效，不用重启容器。
 
@@ -1124,6 +1141,13 @@ class Relay:
             self._auto_switch = bool(auto_switch)
             with self._lock:
                 self._stuck_streak.clear()
+        if plain_http is not None:
+            # 只影响「下一次改写清单时写成什么 scheme」，缓存里的原文不用清；
+            # 但已改写好的清单（_playlists）是旧 scheme，要丢掉重写。
+            if bool(plain_http) != self._plain_http:
+                self._plain_http = bool(plain_http)
+                with self._lock:
+                    self._playlists.clear()
         if mode is not None and mode in ("direct", "proxy") and mode != self._mode:
             self._mode = mode
             with self._lock:
@@ -1253,8 +1277,33 @@ class Relay:
             host = ""
         is_migu = host.endswith("miguvideo.com")
         if self._mode == "direct" and not _ipv6_host(url) and not is_migu:
-            return url
+            return self._plain(url, prefix)
         return self.wrap(slug, url, prefix)
+
+    def _plain(self, url: str, prefix: str = "") -> str:
+        """直连地址的必要降级：央视频分片改走 http，绕开盒子的 TLS 栈。
+
+        只有同时满足三个条件才降级，任一不满足都原样返回 https：
+
+        * 开关打开（``self._plain_http``，面板可关，CDN 以后关掉 http 时用）；
+        * 主机落在 ``_PLAIN_SUFFIX``（目前只有央视频 CDN）；
+        * 面板自身是 http——https 面板里往 http 分片发请求会被浏览器按混合内容
+          直接拦掉，那种部署必须保留 https。
+        """
+        if not self._plain_http:
+            return url
+        if (prefix or "").strip().lower().startswith("https://"):
+            return url
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:
+            return url
+        if parts.scheme != "https":
+            return url
+        host = (parts.hostname or "").lower()
+        if not host.endswith(_PLAIN_SUFFIX):
+            return url
+        return urllib.parse.urlunsplit(("http", parts.netloc, parts.path, parts.query, parts.fragment))
 
     def _rewrite(self, text: str, base: str, slug: str, prefix: str = "") -> str:
         out: list[str] = []
