@@ -48,6 +48,7 @@ services:
       HDIPTV_KIDS_IP_MODE: "${HDIPTV_KIDS_IP_MODE:-auto}"
       # 央视频分片直连降 http（老电视盒子 TLS 兼容）。1=开（默认），0=关。
       HDIPTV_YSP_PLAIN: "${HDIPTV_YSP_PLAIN:-1}"
+      HDIPTV_WARM_NEXT: "${HDIPTV_WARM_NEXT:-1}"
       PUBLIC_URL: "${PUBLIC_URL:-}"
       HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
       # 自动按省取源（面板「运行设置」里的开关优先）；写 0 关闭

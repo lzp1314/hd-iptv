@@ -697,6 +697,23 @@ class Settings:
         return as_bool(self.get("ysp", "plain", True))
 
     @property
+    def warm_next(self) -> bool:
+        """换台时是否预热「下一个央视频台」（默认开）。
+
+        换到一个没人看过的台，第一份清单要现换票再取，两个串行往返加上播放器
+        取首片、初始化解码器，就是换台那 1 秒。提前替下一个台把票据和清单取好，
+        换过去时第一份清单直接命中缓存，省掉服务端那两个往返。
+
+        代价是多花出口配额：每次成功换台约多 1 张票 + 1 次清单。出口本来就吃紧
+        （经常看到「按 IP 限流」）时可以关掉，换台会慢回原来的样子。
+        HDIPTV_WARM_NEXT 优先，其次 [relay] warm_next，默认开。
+        """
+        raw = os.environ.get("HDIPTV_WARM_NEXT")
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("relay", "warm_next", True))
+
+    @property
     def public_url(self) -> str:
         """对外地址。面板里填过就用面板的，其次环境变量，最后配置文件。
 

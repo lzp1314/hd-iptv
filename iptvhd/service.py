@@ -169,6 +169,32 @@ def _visible(channels: list[Channel], hidden: list[str]) -> list[Channel]:
     return [c for c in channels if c.name not in blocked]
 
 
+def warm_neighbors(channels: list[Channel]) -> dict[str, str]:
+    """订阅顺序里「下一个央视频台」，供换台预热用。
+
+    只认**紧挨着的下一个**：中间隔了别的模块说明已经跨分组，遥控器换台不会一步
+    跨过去，预热那个台纯属浪费出口配额。只收央视频的台——别的源换台没有
+    「换票 + 取清单」这两跳，预热没有收益。
+    """
+    from . import ysp
+
+    keys: list[str] = []
+    for channel in channels:
+        key = ""
+        for stream in channel.streams:
+            slug = (stream.slug or "").lower()
+            if slug in ysp.CHANNEL_BY_SLUG:
+                key = slug
+                break
+        keys.append(key)
+    out: dict[str, str] = {}
+    for index, key in enumerate(keys[:-1]):
+        nxt = keys[index + 1]
+        if key and nxt and nxt != key:
+            out[key] = nxt
+    return out
+
+
 def _module_channels(result: dict | None) -> dict[str, dict]:
     """从最近一次结果里按展示模块汇总「抓到了哪些频道」。
 
@@ -1096,6 +1122,14 @@ def make_handler(state: State):
                 from .kids import KIDS_MODULE
                 display_group = KIDS_MODULE
 
+            # 换台预热：把「订阅顺序里的下一个央视频台」交给中转层。只有这里
+            # 知道真实顺序（已经按模块分组排好），所以趁拼订阅时顺手刷新。
+            # 少儿派生视图是另一套顺序，不参与。
+            if not kids_only:
+                state.relay.set_neighbor_map(
+                    warm_neighbors(channels) if settings.warm_next else {}
+                )
+
             base = self._base()
             logo_base = settings.logo_base or (f"{base}/logo" if base else "")
             epg_url = settings.epg_url or (f"{base}/epg.xml" if base else "")
@@ -1115,6 +1149,32 @@ def make_handler(state: State):
                 M3U_TYPE,
                 {"Content-Disposition": 'inline; filename="hd-iptv.m3u"'},
             )
+
+        def _warm(self, raw_slug: str) -> None:
+            """/warm/<slug>：预热一个台（只排任务，不等结果）。
+
+            给播放器用的：它知道遥控器的下一个是哪个台（可能跨分组、跨模块），
+            比服务端按订阅顺序猜更准。回 202 表示「收到，后台在取」，播放器不必
+            等，也不该根据响应做任何判断——预热失败只是换台慢一点，不影响能不能播。
+
+            这条路径**不经过 scan_guard**：它由播放器在稳定播放后主动调用，不是
+            扫台。真正防止被滥用的是 ``Relay.warm`` 自己的出口余量门槛和 20 秒
+            单台间隔。
+            """
+            if not settings.warm_next:
+                self._send(202, b"", "text/plain; charset=utf-8", cache="no-store")
+                return
+            # 允许直接把播放地址里的 /live/ 换成 /warm/ 发过来（带 .m3u8 也认），
+            # 播放器不必自己拆扩展名。
+            slug = unquote(raw_slug)
+            if slug.lower().endswith(".m3u8"):
+                slug = slug[: -len(".m3u8")]
+            hit = live_target(slug)
+            if hit is None:
+                self._json({"error": f"未知频道: {slug}"}, 404)
+                return
+            state.relay.warm_async(hit[0])
+            self._send(202, b"", "text/plain; charset=utf-8", cache="no-store")
 
         def _relay(self, path: str) -> None:
             """/relay/<slug>/p/<token>：转发子清单、分片和密钥。"""
@@ -1230,6 +1290,10 @@ def make_handler(state: State):
                 # 老版少儿专属地址的兼容别名，面板已不再展示；新用法是
                 # 主订阅里按模块开关出现的「少儿频道」分组。
                 self._playlist(kids_only=True)
+            elif path.startswith("/warm/"):
+                # 播放器主动指路（它比服务端更清楚遥控器的下一个是谁，可能跨
+                # 分组）。只排后台任务，立刻回 202，播放器不该等也不该看结果。
+                self._warm(path[len("/warm/") :])
             elif path in ("/txt", "/playlist.txt", "/result.txt"):
                 result = load_result(settings) or {}
                 channels = _kids_visible(

@@ -185,5 +185,74 @@ class HttpGovernanceTest(unittest.TestCase):
         self.assertEqual(fetch.call_count, 7, "被挡的第 7 个台没打上游")
 
 
+class WarmEndpointTest(unittest.TestCase):
+    """播放器主动指路（P3）：/warm/<slug> 只排任务、立刻回 202。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        (root / "config").mkdir()
+        (root / "output").mkdir()
+        (root / "output" / "result.json").write_text(
+            json.dumps({"generated_at": "", "channels": []}), encoding="utf-8"
+        )
+        os.environ.pop("HDIPTV_SECRET", None)
+        self.addCleanup(os.environ.pop, "HDIPTV_SECRET", None)
+        self.state = State(load_settings(root))
+        self.slugs = [row[0] for row in ysp.CHANNELS[:8]]
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.state))
+        self.addCleanup(self.httpd.server_close)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.shutdown)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def _warm(self, slug: str):
+        req = urllib.request.Request(f"{self.base}/warm/{slug}")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read()
+
+    def test_accepted_immediately(self):
+        """必须回 202 且不阻塞：播放器在换台路径上等不起一次上游往返。"""
+        calls = []
+        with mock.patch.object(self.state.relay, "warm_async", side_effect=calls.append):
+            code, body = self._warm("cctv2")
+        self.assertEqual(code, 202)
+        self.assertEqual(body, b"")
+        self.assertEqual(calls, ["cctv2"])
+
+    def test_unknown_channel(self):
+        code, _ = self._warm("no-such-channel")
+        self.assertEqual(code, 404)
+
+    def test_accepts_m3u8_suffix(self):
+        """播放器最省事的写法是「把 /live/ 换成 /warm/」，扩展名会一起过来。"""
+        calls = []
+        with mock.patch.object(self.state.relay, "warm_async", side_effect=calls.append):
+            code, _ = self._warm("cctv2.m3u8")
+        self.assertEqual(code, 202)
+        self.assertEqual(calls, ["cctv2"])
+
+    def test_warm_is_not_scan(self):
+        """预热不算扫台：连发 8 个不该触发 429，也不影响随后的正常换台。"""
+        with mock.patch.object(self.state.relay, "warm_async", side_effect=lambda slug: None):
+            for slug in self.slugs:
+                code, _ = self._warm(slug)
+                self.assertEqual(code, 202, f"{slug} 的预热请求不该被挡")
+        self.assertEqual(self.state.scan_guard.blocked, 0)
+
+    def test_disabled_switch_still_returns_202(self):
+        """关掉开关时静默接受：播放器不用为这个开关改逻辑。"""
+        with mock.patch.object(
+            type(self.state.settings), "warm_next", new_callable=mock.PropertyMock, return_value=False
+        ), mock.patch.object(self.state.relay, "warm_async") as warm:
+            code, _ = self._warm("cctv2")
+        self.assertEqual(code, 202)
+        warm.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

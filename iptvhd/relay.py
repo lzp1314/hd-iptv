@@ -385,6 +385,22 @@ _PREFETCH_EVERY = 5.0      # 有人在看时，后台每隔这么久替播放器
 _ACTIVE_FOR = 15.0         # 这么久没人要清单就认为没人看，停止预取
 _FROZEN_AFTER = 10.0       # 分片序号这么久没往前滚，判定上游冻住
 
+# —— 换台预热 ——
+# 换到一个「没人看过」的台，第一份清单要现换票再取，两个串行往返约 0.3~0.6 秒，
+# 叠加播放器连本机、取首片、解码器初始化，就是换台那 1 秒的来源。这里让中转层
+# 提前替「下一个台」把票据和清单取回来，换过去时第一份清单直接命中缓存。
+#
+# 三条自律（缺一条就会把限流做大）：
+# * 必须稳定播够 _WARM_DELAY 才预热——连点换台时每个台都进不了「在看」状态，
+#   自然不会预热，而那正是最容易把出口打进限流的时刻；
+# * 出口余量不足 _WARM_MIN_TOKENS 直接放弃，不能为了下一个台挤掉在播台的刷新；
+# * 预热的清单只在 _WARM_VALID 内有效，过期即弃，不做续期（续期等于全天候盯着
+#   两个台刷新，成本翻倍）。
+_WARM_DELAY = 8.0
+_WARM_VALID = 45.0
+_WARM_MIN_GAP = 20.0
+_WARM_MIN_TOKENS = 5.0
+
 # 「真的有播放器在看」的判定：同一台两次请求的间隔落在 (MIN, WINDOW] 之间才算。
 # 播放器拿到清单后要隔两三秒才会再来（hls.js 按分片时长、libVLC 约 5 秒）；
 # 而「刷新预览图 / 检测可用性 / 失败自动换台」式的扫台每台只碰一次，或者毫秒级
@@ -935,6 +951,14 @@ class Relay:
         # 每个台上一次请求时刻。用来判断「真的有播放器在看」：两次请求间隔
         # 落在 (_PLAYING_MIN_GAP, _PLAYING_WINDOW] 才算，扫台碰不到这个区间。
         self._hits: dict[str, float] = {}
+        # ---- 换台预热 ----
+        # slug -> 订阅顺序里的下一个台。由 service 在拼订阅时注入（只有那里知道
+        # 真实顺序），relay 只负责「什么时候去取」。
+        self._neighbors: dict[str, str] = {}
+        self._warm_due: dict[str, tuple[float, str]] = {}   # 目标台 -> (到点时刻, 触发台)
+        self._warm_at: dict[str, float] = {}                # slug -> 上次尝试预热的时刻
+        self._warm_busy = False
+        self.warm_runs = 0                                  # 预热实际发起的次数（诊断用）
         # 这个台下次可以再敲上游的时刻。403 后按 ``_RETRY_DELAYS`` 逐次拉长，
         # 但只算「几秒级」——以前是 30 秒，窗口里的分片刚好被耗干。
         self._next_try: dict[str, float] = {}
@@ -1013,14 +1037,109 @@ class Relay:
           处理，这一次同步取清单，随后自然进入在播状态。
         """
         now = time.time()
+        entered = False
         with self._lock:
             previous = self._hits.get(slug)
             gap = now - previous if previous is not None else 0.0
             self._hits[slug] = now
             playing = _PLAYING_MIN_GAP < gap <= _PLAYING_WINDOW
             if playing:
+                entered = slug not in self._active
                 self._active[slug] = now
-            return playing
+        # 刚进入「有人在看」才排一次预热。判定「在播」要求同一个台被反复请求，
+        # 所以连点换台（每台只碰一次）永远走不到这里——那正是必须避免预热的时候。
+        if entered:
+            self._plan_warm(slug)
+        return playing
+
+    # ---------------- 换台预热 ----------------
+    def set_neighbor_map(self, mapping: dict[str, str] | None) -> None:
+        """注入「订阅顺序里下一个央视频台」。传空表示关闭预热。
+
+        顺序只有 service 知道（它在拼订阅时按模块分组排序），这里不猜。
+        """
+        with self._lock:
+            self._neighbors = dict(mapping or {})
+
+    def _plan_warm(self, slug: str) -> None:
+        """给这个台的「下一个台」排一次预热，延迟 _WARM_DELAY 执行。"""
+        with self._lock:
+            target = self._neighbors.get(slug)
+            if not target or target == slug:
+                return
+            now = time.time()
+            if now - self._warm_at.get(target, 0.0) < _WARM_MIN_GAP:
+                return
+            due = self._warm_due.get(target)
+            if due is not None and now < due[0]:
+                return
+            self._warm_due[target] = (now + _WARM_DELAY, slug)
+
+    def warm_async(self, slug: str) -> None:
+        """把预热丢到独立线程：它可能要等退避、也可能慢，不能拖住刷新循环。
+
+        已经在预热别的台时直接放弃——预热是锦上添花，不值得为它排队。
+        """
+        with self._lock:
+            if self._warm_busy:
+                return
+            self._warm_busy = True
+        threading.Thread(
+            target=self._warm_worker, args=(slug,), name="hd-iptv-warm", daemon=True
+        ).start()
+
+    def _warm_worker(self, slug: str) -> None:
+        try:
+            self.warm(slug)
+        except Exception:  # noqa: BLE001 - 预热失败只是回到原来的慢，不能影响别的台
+            pass
+        finally:
+            with self._lock:
+                self._warm_busy = False
+
+    def warm(self, slug: str) -> bool:
+        """替「还没人看」的台先把票据和清单取回来，返回是否真的取了。
+
+        - **不吃在播台的额度**：出口余量低于 ``_WARM_MIN_TOKENS`` 就不做；
+        - **失败不留痕**：不记失败计数、不设退避、不写运行日志（走 ``soft``），
+          否则一次预热失败会把目标台标成「刚被拒」，用户切过去反而被挡在门外；
+        - **不顶掉新鲜缓存**：45 秒内取过就什么都不做。
+        """
+        now = time.time()
+        with self._lock:
+            if now - self._warm_at.get(slug, 0.0) < _WARM_MIN_GAP:
+                return False
+            # 记「尝试」而不是「成功」：失败了也不该在 20 秒内反复试。
+            self._warm_at[slug] = now
+            window = self._windows.get(slug)
+            raw = self._raw.get(slug)
+            if window is not None and window.segs and now - window.at <= _WARM_VALID:
+                return False
+            if raw is not None and now - raw[0] <= _WARM_VALID:
+                return False
+            if now < self._next_try.get(slug, 0.0):
+                return False
+            if self._blackout.get(slug, 0.0) > now:
+                return False
+        if self._token_level() < _WARM_MIN_TOKENS:
+            return False
+        if not self._take_token(0):
+            return False
+        try:
+            text, base = self._fetch_raw(slug, soft=True)
+        except Exception:  # noqa: BLE001 - 预热失败不改变任何状态
+            return False
+        self._absorb(slug, text, base)
+        self.warm_runs += 1
+        return True
+
+    def _token_level(self) -> float:
+        """还剩几个出口配额（只做预测，不扣）。"""
+        with self._bucket_lock:
+            now = time.monotonic()
+            self._tokens = min(self._burst, self._tokens + (now - self._tokens_at) * self._rate)
+            self._tokens_at = now
+            return self._tokens
 
     # ---------------- 上游 ----------------
     def _call_resolver(self, slug: str, rotate: bool) -> tuple[str, str]:
@@ -1039,7 +1158,9 @@ class Relay:
             return self._resolver(slug, rotate=True)  # type: ignore[call-arg]
         return self._resolver(slug)
 
-    def upstream(self, slug: str, *, fresh: bool = False, rotate: bool = False) -> tuple[str, str]:
+    def upstream(
+        self, slug: str, *, fresh: bool = False, rotate: bool = False, soft: bool = False
+    ) -> tuple[str, str]:
         """取该频道当前可用的上游地址与 UA。
 
         ``fresh=True`` 表示「刚被上游拒绝，想换一个」，受冷却时间约束：
@@ -1048,6 +1169,9 @@ class Relay:
         ``rotate=True`` 是更重的一档：不只是换一张票，而是**换一条线路**。
         频道级 slug 下同一个台挂着好几条源，第一路 403 了就轮到第二路——
         这是「列表里只写一行」还不会「一挂就播不了」的关键。
+
+        ``soft=True`` 给预热用：失败不记统计、不设退避。预热只是「提前试试」，
+        失败后用户切过去会当场重试，不该被预热留下的退避挡在门外。
 
         三道闸，任何一道关着就**一枪不打上游**：
 
@@ -1146,16 +1270,21 @@ class Relay:
                 # 「上游失败」冷却 20 秒。否则用户点一次黑屏，20 秒内再点还是
                 # 同一句错误，看起来像永久坏了。解析闸门自己有 4 秒时限和 5 秒
                 # 失败缓存，重试不会失控。
-                if "DNS" not in message and "解析" not in message:
-                    self._failed[slug] = now
-                    # 取票接口本身失败（不是分发到 CDN 之后 403）：4 秒内别反复敲。
-                    # 比原来的 20 秒短得多。**DNS 解析失败不设退避**——那一个字节
-                    # 都没发到上游，挡它只会让用户点一次黑屏、再点还是同一句错。
-                    self._next_try[slug] = max(
-                        self._next_try.get(slug, 0.0), now + min(self._retry_gap, 4.0)
-                    )
-                self._errors[slug] = message
-                self.failures += 1
+                #
+                # soft（预热）失败一律不记账：`failures` 是面板上那个只增不减的
+                # 数字，`_next_try` 会真的把目标台挡住几秒——预热是「顺手提前
+                # 试一下」，不能让它的失败变成用户换台失败。
+                if not soft:
+                    if "DNS" not in message and "解析" not in message:
+                        self._failed[slug] = now
+                        # 取票接口本身失败（不是分发到 CDN 之后 403）：4 秒内别反复敲。
+                        # 比原来的 20 秒短得多。**DNS 解析失败不设退避**——那一个字节
+                        # 都没发到上游，挡它只会让用户点一次黑屏、再点还是同一句错。
+                        self._next_try[slug] = max(
+                            self._next_try.get(slug, 0.0), now + min(self._retry_gap, 4.0)
+                        )
+                    self._errors[slug] = message
+                    self.failures += 1
                 stale = self._cache.get(slug)
                 if _BLACKOUT in message:
                     # 版权停播要按节目冷却，而不是按「秒」重试。
@@ -1304,6 +1433,10 @@ class Relay:
             # 主动换票次数：票据用满 2 次就换，不等 403。正常播放每分钟 6~12 次
             # （一个台每十秒换一张）；这个数远大于 12 说明有台在反复重取。
             "ticket_rotations": self.ticket_rotations,
+            # 换台预热：实际发起的次数，以及当前知道多少个「下一个台」。
+            # 预热失败不计入 failures，也不写 recent——它只是提前试试。
+            "warm_runs": self.warm_runs,
+            "warm_next": len(self._neighbors),
             # 最近 40 条异常事件（新的在前）。面板据此显示「刚才到底发生了什么」，
             # 不用再靠三个累计计数猜。
             "recent": [
@@ -1661,6 +1794,19 @@ class Relay:
         for slug in due:
             self._prefetch(slug)
 
+        # 换台预热：到点、且触发台**还在被看**才真的去取。触发台已经没人看了
+        # （换走之后没回来），这次预热就没有对象，白花一次出口配额。
+        with self._lock:
+            ready = []
+            for target, (due_at, source) in list(self._warm_due.items()):
+                if due_at > now:
+                    continue
+                self._warm_due.pop(target, None)
+                if now - self._active.get(source, 0.0) <= _ACTIVE_FOR:
+                    ready.append(target)
+        for target in ready:
+            self.warm_async(target)
+
     def _prefetch(self, slug: str) -> None:
         """替正在观看的播放器去上游要一份新清单。所有调用方都不用等它。"""
         # 退避只挡这个台，而且只有几秒（见 _RETRY_DELAYS）。以前这里用的是
@@ -1740,12 +1886,15 @@ class Relay:
         self._note(f"[{slug}] {message}")
 
     def _fetch_raw(
-        self, slug: str, *, fresh: bool = False, rotate: bool = False
+        self, slug: str, *, fresh: bool = False, rotate: bool = False, soft: bool = False
     ) -> tuple[str, str]:
         """去上游取一份**原始**清单，连它的基准地址一起返回。
 
         为什么不在这里顺手改写：同一个台可能同时被内网和外网访问，改写结果
         依赖对外地址；存原文、发的时候再改写，一份缓存就够所有人用。
+
+        ``soft=True``（预热）：被拒不重试、失败不记账。预热的目的是「省下一次
+        换台的等待」，多花 1 秒重试反而比不预热更慢。
         """
         # 这个台刚被拒：退避期内一枪不打上游。``upstream()`` 在有旧地址时会
         # 「照旧返回」，光靠它挡不住——请求照样会打到上游再被拒一次，播放器的
@@ -1755,9 +1904,9 @@ class Relay:
         if cooling_channel and not fresh:
             raise RelayError("本台线路暂时受限，几秒后自动重试")
 
-        url, ua = self.upstream(slug, fresh=fresh, rotate=rotate)
+        url, ua = self.upstream(slug, fresh=fresh, rotate=rotate, soft=soft)
         status, _, body, final = self._fetch(url, ua)
-        if status in _GONE:
+        if status in _GONE and not soft:
             # 同一个清单地址连取几次就会被 CDN 拒（实测 2~5 次后开始 403，
             # 换张新票立刻恢复）。这里先安静 1 秒再换票重取——1 秒是实测能
             # 把「刚被拒」的窗口熬过去的最短时间，再短只会被拒得一样干脆。
@@ -1769,15 +1918,17 @@ class Relay:
             url, ua = self.upstream(slug, fresh=True, rotate=True)
             status, _, body, final = self._fetch(url, ua)
         if status != 200 or not body:
-            self._mark_failed(slug, f"上游返回 {status}")
-            # 这一条是「播不出来」的直接证据：面板上看到它密集出现，就是出口
-            # 真的在被拒；只有零星几条则属于正常换票开销。
-            self._event(slug, f"取清单失败：上游返回 {status}")
+            if not soft:
+                self._mark_failed(slug, f"上游返回 {status}")
+                # 这一条是「播不出来」的直接证据：面板上看到它密集出现，就是出口
+                # 真的在被拒；只有零星几条则属于正常换票开销。
+                self._event(slug, f"取清单失败：上游返回 {status}")
             raise RelayError(f"上游返回 {status}，取不到播放清单")
 
         text = body.decode("utf-8", "replace")
         if "#EXTM3U" not in text:
-            self._mark_failed(slug, "上游返回的不是 m3u8 清单")
+            if not soft:
+                self._mark_failed(slug, "上游返回的不是 m3u8 清单")
             raise RelayError("上游返回的不是 m3u8 清单")
         # 基准用**跳转之后**的地址：清单里的分片多是相对路径，拿原始地址拼会把
         # 播放器又指回那个还在下发 302 的域名（运营商 IPTV 就是这样）。
