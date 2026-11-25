@@ -277,6 +277,18 @@ class HttpClient:
     # 地址族三态：auto = 系统默认选路 + 403 时换族重试；ipv4/ipv6 = 只走该族。
     IP_MODES = ("auto", "ipv4", "ipv6")
 
+    # 「哪个域名用哪一族」的记忆：域名 → (族, 到期时刻)。
+    #
+    # 为什么必须有：央视频的清单接口对出口 IPv4 单独限流（实测同一条清单地址
+    # v4 一律 403、v6 一律 200）。没有这段记忆时，auto 每次请求都先撞一次 v4
+    # 的 403 再换 v6 —— 每一次「成功」都先垫一个 403，几分钟就能把内部的出口
+    # 冷却（连续 8 次 403 停 30 秒）顶出来，表现就是画面播一会儿卡一下。
+    #
+    # 记住之后，同一个域名下一次直接走能通的那一族，403 归零。TTL 到期自动失效，
+    # 上游换策略时最多难受十分钟。
+    _FAMILY_TTL = 600.0
+    _FAMILY_PREF: dict[str, tuple[str, float]] = {}
+
     def __init__(
         self,
         user_agent: str = "",
@@ -318,27 +330,88 @@ class HttpClient:
         读体加起来不能超过它。慢滴流的源靠 socket 超时判不出来（每 8 秒挤一点，
         永远不超时），必须给它一个总时限。
 
-        ip_mode=auto 时：先用系统默认选路；若拿到 403（CDN 边缘拒绝，常见于某个
-        出口地址被拉黑），换另一地址族重试一次。这是 Node.js autoSelectFamily
-        （RFC 8305）的简化版——不并发竞速，只在明确 403 时换一次，代价可控。
+        地址族策略（按顺序）：
+
+        1. 这个域名记住了「哪一族能通」，且当前配置是 auto、或配置的那一族正好
+           是记下来的坏族 → 直接走能通的那一族，不打无用的 403；
+        2. 否则按配置走一次；
+        3. 拿到 403（CDN 边缘拒绝，常见于某个出口地址被单独限流）→ 换另一族再试
+           一次。auto 与强制单族都适用：强制族被出口级拒绝时，死磕只会一直拿不
+           到数据，换族是唯一出路；
+        4. 成功一次就把「能通的族」记下来（10 分钟），下一次不再先撞 403。
         """
-        last = self._get_loop(
-            url, limit=limit, headers=headers, allow_redirect=allow_redirect, deadline=deadline
-        )
-        if self.ip_mode == "auto" and last.status == 403 and not self.proxy:
-            other = "ipv6" if last.family == socket.AF_INET else "ipv4"
-            switched = self._get_loop(
-                url,
-                limit=limit,
-                headers=headers,
-                allow_redirect=allow_redirect,
-                deadline=deadline,
-                forced_mode=other,
-            )
-            # 换族成功才采纳；换族仍失败就保留第一次的结果（保住原有错误文案）
-            if switched.status and switched.status < 400 and switched.body:
-                return switched
+        kw = dict(limit=limit, headers=headers, allow_redirect=allow_redirect, deadline=deadline)
+        host = (urlsplit(url).hostname or "").lower()
+        good, bad = ("", "") if self.proxy else self._family_memo(host)
+
+        # 已知能通的族优先：auto 就别每次先撞一遍 403；强制单族时若那一族已被
+        # 证明被拒，也不能一直撞。
+        if good and (self.ip_mode == "auto" or self.ip_mode == bad):
+            resp = self._get_loop(url, forced_mode=good, **kw)
+            if resp.status and resp.status < 400 and resp.body:
+                return resp
+            # 记忆过期（上游换了策略）：清掉，按配置重新来一次
+            self._family_memo_forget(host)
+
+        last = self._get_loop(url, **kw)
+        if last.status and last.status < 400 and last.body:
+            self._family_remember(host, self._family_of(last.family), "")
+            return last
+
+        if last.status == 403 and not self.proxy:
+            other = self._other_mode(last.family)
+            if other:
+                switched = self._get_loop(url, forced_mode=other, **kw)
+                # 换族成功才采纳；换族仍失败就保留第一次的结果（保住原有错误文案）
+                if switched.status and switched.status < 400 and switched.body:
+                    self._family_remember(host, other, self._family_of(last.family))
+                    return switched
         return last
+
+    # ------------------------------------------------------------------ #
+    # 地址族记忆：域名 → (能通的族, 被拒的族, 到期时刻)
+    def _family_memo(self, host: str) -> tuple[str, str]:
+        hit = self._FAMILY_PREF.get(host)
+        if not hit:
+            return "", ""
+        good, bad, until = hit
+        if time.monotonic() > until:
+            self._FAMILY_PREF.pop(host, None)
+            return "", ""
+        return good, bad
+
+    def _family_remember(self, host: str, good: str, bad: str) -> None:
+        if not host or not good:
+            return
+        if len(self._FAMILY_PREF) > 256:
+            self._FAMILY_PREF.clear()
+        self._FAMILY_PREF[host] = (good, bad, time.monotonic() + self._FAMILY_TTL)
+
+    def _family_memo_forget(self, host: str) -> None:
+        self._FAMILY_PREF.pop(host, None)
+
+    @staticmethod
+    def _family_of(family: int) -> str:
+        if family == socket.AF_INET:
+            return "ipv4"
+        if family == socket.AF_INET6:
+            return "ipv6"
+        return ""
+
+    def _other_mode(self, family: int) -> str:
+        """403 之后该换哪一族；没有可换的返回空串。"""
+        if self.ip_mode == "ipv4":
+            return "ipv6"
+        if self.ip_mode == "ipv6":
+            return "ipv4"
+        known = self._family_of(family)
+        if known == "ipv4":
+            return "ipv6"
+        if known == "ipv6":
+            return "ipv4"
+        # auto 且不知道实际用了哪一族：央视频的清单接口是 v4 被拒、v6 正常，
+        # 先试 v6 更可能一击命中。
+        return "ipv6"
 
     def _get_loop(
         self,

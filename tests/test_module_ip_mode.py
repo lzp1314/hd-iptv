@@ -8,6 +8,7 @@ from __future__ import annotations
 import http.client
 import os
 import socket
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -148,7 +149,11 @@ class ClientModeTest(unittest.TestCase):
 
 
 class SwitchOn403Test(unittest.TestCase):
-    """auto 模式拿到 403 时换另一族重试一次。"""
+    """拿到 403 时换另一族重试一次，并把「能通的族」记住。"""
+
+    def setUp(self):
+        # 家族记忆是进程级的（跨 HttpClient 实例共享），用例之间必须清干净
+        HttpClient._FAMILY_PREF.clear()
 
     def test_403_ipv6_switches_to_ipv4_success(self):
         c = HttpClient(ip_mode="auto")
@@ -174,13 +179,51 @@ class SwitchOn403Test(unittest.TestCase):
             c.get("https://x/y")
         self.assertEqual(calls, ["", "ipv6"])
 
-    def test_non_auto_never_switches(self):
+    def test_forced_mode_also_rescues_on_403(self):
+        """强制单族被出口级拒绝时也要换一次：死磕只会一直拿不到数据。
+
+        真实场景：央视频清单接口对该出口的 IPv4 一律 403、IPv6 正常，而面板里
+        这个模块被设成「仅 IPv4」——不换族就永远是「发旧清单顶着」。
+        """
         c = HttpClient(ip_mode="ipv4")
         first = Response(url="https://x/y", status=403, body=b"", family=socket.AF_INET)
+        second = Response(url="https://x/y", status=200, body=b"ok", family=socket.AF_INET6)
         calls = []
-        with mock.patch.object(c, "_get_loop", side_effect=lambda u, **kw: (calls.append(1), first)[1]):
+        def fake_loop(url, **kw):
+            calls.append(kw.get("forced_mode", ""))
+            return first if len(calls) == 1 else second
+        with mock.patch.object(c, "_get_loop", side_effect=fake_loop):
+            out = c.get("https://x/y")
+        self.assertEqual(out.status, 200)
+        self.assertEqual(calls, ["", "ipv6"])
+
+    def test_success_is_remembered_so_no_repeat_403(self):
+        """记住能通的族之后，第二次直接走它，不再先撞一次 403。
+
+        auto 模式下这次「先 403 再换族」如果每轮都发生，几分钟就能把内部的
+        出口冷却顶出来，表现就是播一会儿卡一下。
+        """
+        c = HttpClient(ip_mode="auto")
+        first = Response(url="https://x/y", status=403, body=b"", family=socket.AF_INET)
+        second = Response(url="https://x/y", status=200, body=b"ok", family=socket.AF_INET6)
+        with mock.patch.object(c, "_get_loop", side_effect=[first, second]):
+            self.assertEqual(c.get("https://x/y").status, 200)
+
+        calls = []
+        def only_v6(url, **kw):
+            calls.append(kw.get("forced_mode", ""))
+            return Response(url=url, status=200, body=b"ok", family=socket.AF_INET6)
+        with mock.patch.object(c, "_get_loop", side_effect=only_v6):
+            self.assertEqual(c.get("https://x/y").status, 200)
+        self.assertEqual(calls, ["ipv6"])
+
+    def test_memo_expires(self):
+        c = HttpClient(ip_mode="auto")
+        HttpClient._FAMILY_PREF["x"] = ("ipv6", "", time.monotonic() - 1)
+        calls = []
+        with mock.patch.object(c, "_get_loop", side_effect=lambda u, **kw: (calls.append(kw.get("forced_mode", "")), Response(url=u, status=200, body=b"ok"))[1]):
             c.get("https://x/y")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls, [""])
 
     def test_403_switch_failure_keeps_first(self):
         c = HttpClient(ip_mode="auto")
