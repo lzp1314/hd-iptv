@@ -465,6 +465,18 @@ function openModuleModal(name) {
   const radios = document.querySelectorAll('input[name="ipMode"]');
   radios.forEach((el) => { el.checked = el.value === (mode === "ipv4" && name === "运营商官方源" ? "auto" : mode); });
   if ($("ipModeNote")) $("ipModeNote").hidden = true;
+  // 央视频专有说明：地址族只管 NAS 取清单走哪一族，跟盒子自己的网络无关。
+  // 出口 IPv4 被央视频单独限流时（实测：v4 取清单一律 403、v6 正常），
+  // 选「仅 IPv4」会一直拿不到新清单，表现就是播一会儿报「源服务器返回错误」。
+  if ($("ipModeExtra")) {
+    const extra = name === "央视频";
+    $("ipModeExtra").hidden = !extra;
+    if (extra) {
+      $("ipModeExtra").textContent = "这一项只决定 NAS 去央视频取清单时走哪一族，跟盒子自己的网络无关——盒子只有 IPv4 也可以选「自适应」。"
+        + "实测：出口 IPv4 被央视频单独限流时（清单请求 v4 一律 403、v6 正常），选「仅 IPv4」会一直拿不到新清单，"
+        + "画面播一会儿就报「源服务器返回错误」；换成「自适应」会改用 IPv6 取清单，分片仍由盒子自己直连，不受影响。";
+    }
+  }
   // 抓到的频道：按分类列频道名
   const box = $("moduleChannels");
   if (box) {
@@ -487,11 +499,14 @@ function openModuleModal(name) {
       }).join("");
     }
   }
-  // 配置区：咪咕显示账号表单，其它模块显示说明
+  // 配置区：咪咕显示账号表单，央视频显示播放兼容，其它模块显示说明
   const miguCfg = $("miguConfig");
   const other = $("moduleOtherConfig");
   const isMigu = name === "咪咕视频";
+  const isYsp = name === "央视频";
   if (miguCfg) miguCfg.hidden = !isMigu;
+  if ($("yspConfig")) $("yspConfig").hidden = !isYsp;
+  if ($("yspNote")) $("yspNote").hidden = true;
   if (other) {
     other.hidden = isMigu;
     if (!isMigu) other.textContent = MODULE_INFO[name] || "这个模块没有单独配置项，开关即可控制是否参与。";
@@ -509,7 +524,7 @@ function closeModuleModal() {
 async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") {
   const btn = $(btnId);
   const note = $(noteId);
-  const payload = {
+  let payload = {
     play_mode: $("setPlayMode") ? $("setPlayMode").value : "direct",
     auto_region: $("setAutoRegion") ? $("setAutoRegion").value === "1" : true,
     region: $("setRegion") ? $("setRegion").value : "",
@@ -525,6 +540,11 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     // 空字符串是有意义的：表示把密码关掉
     secret: $("setSecret") ? $("setSecret").value.trim() : "",
   };
+  // 央视频模块弹窗只提交它自己那一项：别的表单控件虽在 DOM 里，用户在这一页
+  // 没动过，一起带上等于把别处还没保存的输入顺带写进去。
+  if (btnId === "btnYspSave") {
+    payload = { ysp_plain: $("setYspPlain") ? $("setYspPlain").checked : true };
+  }
   // 模块开关只在「源数据与订阅地址」页保存时提交，别的页不碰它。
   // 内置卡片(.builtin-toggle)和更多源(.module-row)的开关都带 data-module，
   // 统一往上找这个属性，不写死某一层容器。
@@ -603,6 +623,17 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
       const label = { auto: "自适应", ipv4: "仅 IPv4", ipv6: "仅 IPv6" }[value] || "自适应";
       note.hidden = false;
       note.textContent = `已保存：${currentModuleName} 的网络地址族为「${label}」。下一次点播这个模块的频道时生效。`;
+      fillSettings(st);
+    } else if (btnId === "btnYspSave") {
+      const st = d.settings || {};
+      const on = st.ysp_plain !== false;
+      const yn = $("yspNote");
+      if (yn) {
+        yn.hidden = false;
+        yn.textContent = on
+          ? "已保存：央视频分片按 http 下发，盒子不用做 TLS 握手。下次点播生效。"
+          : "已保存：央视频分片改回 https 下发（面板是 https 访问时本来也不会降级）。下次点播生效。";
+      }
       fillSettings(st);
     } else if (btnId === "btnMiguSave") {
       const st = d.settings || {};
@@ -1404,6 +1435,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if ($("btnRegionSave")) $("btnRegionSave").addEventListener("click", () => saveSettings("btnRegionSave", "regionSaveNote"));
   if ($("btnMiguSave")) $("btnMiguSave").addEventListener("click", () => saveSettings("btnMiguSave", "miguNote"));
   if ($("btnIpModeSave")) $("btnIpModeSave").addEventListener("click", () => saveSettings("btnIpModeSave", "ipModeNote"));
+  if ($("btnYspSave")) $("btnYspSave").addEventListener("click", () => saveSettings("btnYspSave", "yspNote"));
   if ($("btnModuleSave")) $("btnModuleSave").addEventListener("click", () => saveSettings("btnModuleSave", "moduleNote"));
   // 模块开关是动态渲染的，用事件委托标脏，避免被轮询覆盖
   if ($("moduleList")) $("moduleList").addEventListener("change", () => { settingsDirty = true; });
