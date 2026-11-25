@@ -368,10 +368,17 @@ class _SegmentCache:
 # 就是一片接一片的 403/404，表现是「播一两分钟卡住、然后跳回去」。攒窗口本身没错，
 # 错在攒的比上游留得还久。压到 6 片（约 30 秒）刚好盖住播放器起步要的缓冲
 # （hls.js 默认 maxBufferLength 30 秒），又稳稳落在 11 片留存之内。
-_WINDOW_SEGMENTS = 6       # 最多保留几片。上限 = 上游 CDN 留存（实测 11 片）的一半，留足安全边际
+_WINDOW_SEGMENTS = 9       # 最多保留几片。上游 CDN 实测留存 11 片（约 55 秒），
+                           # 9 片（约 45 秒）仍留 2 片安全边际。
+                           # 为什么不是原来的 6 片：ExoPlayer 的直播起播点默认落后
+                           # 3 个 target duration（一片 5~8 秒 → 落后 15~24 秒），
+                           # 6 片窗口只剩 6 秒余量，清单断档十几秒就吃干净，画面
+                           # 卡死不恢复。9 片把余量抬到 20 秒上下。
 _FRESH_AGE = 6.0           # 窗口超过这么久没更新，就不再当它是新鲜的（会去上游要一份新的）
                            # 实际取值 = max(这个, 预取间隔 + 2)，见 _fresh_age
-_STALE_MAX = 30.0          # 再旧也还能发给播放器：上游一时取不到时先顶着，别让画面断
+_STALE_MAX = 45.0          # 再旧也还能发给播放器：上游一时取不到时先顶着，别让画面断。
+                           # 与窗口总时长对齐（9 片约 45 秒）——顶住的这份本身就是
+                           # 45 秒内容，给超过它的年龄没有意义。
 _PREFETCH_EVERY = 5.0      # 有人在看时，后台每隔这么久替播放器去要一次清单
                            # 上游 5 秒滚一片，取更勤有一半是「同一份清单」的无效请求，
                            # 白白烧出口配额，反过来把自己打成限流
@@ -1546,6 +1553,26 @@ class Relay:
             if now - raw[0] > _STALE_MAX:
                 return None
             return self._rewrite(raw[1], raw[2], slug, prefix), stale, raw[3]
+        return None
+
+    def last_known(self, slug: str, prefix: str = "") -> tuple[str, bool, int] | None:
+        """最后一份清单，**不设年龄上限**。给 HTTP 层兜底用。
+
+        为什么要有这个东西：清单请求返回 5xx 会让 ExoPlayer 抛
+        PlaybackException（重试 5 次后停住，App 不重开就永远不动）、让 libVLC
+        直接放弃这个流——两者都不会回来问第二次。而返回一份旧清单，播放器顶多
+        是「取分片 404、过几秒再来问清单」，只要轮询链不断，上游一恢复就自动接上。
+
+        分片全都过期时画面当然还是不动，但「不动」和「死掉」的区别就在下一次
+        清单请求还发不发得出去。
+        """
+        with self._lock:
+            window = self._windows.get(slug)
+            raw = self._raw.get(slug)
+        if window is not None and window.segs:
+            return self._rewrite(window.text(), "", slug, prefix), True, window.first_out
+        if raw is not None:
+            return self._rewrite(raw[1], raw[2], slug, prefix), True, raw[3]
         return None
 
     def _absorb(self, slug: str, text: str, base: str) -> None:

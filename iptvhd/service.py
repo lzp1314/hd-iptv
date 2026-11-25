@@ -1002,11 +1002,24 @@ def make_handler(state: State):
             try:
                 text, stale, seq = state.relay.playlist_info(key, self._base())
             except RelayError as exc:
-                self._json({"error": str(exc), "channel": name}, 502)
-                return
+                # 有旧清单就发旧的，绝不回 5xx：ExoPlayer 重试 5 次后会报错停住、
+                # libVLC 直接放弃这个流，两者都不会再回来问第二次——那才是「卡死
+                # 不自恢复」。发旧清单至少让轮询链保持，上游一恢复就自动接上。
+                fallback = state.relay.last_known(key, self._base())
+                if fallback is None:
+                    self._json({"error": str(exc), "channel": name}, 502)
+                    return
+                text, stale, seq = fallback
+                stale = True
+                state.log(f"[{name}] 取不到新清单（{exc}），发最后一份顶住")
             except Exception as exc:  # noqa: BLE001 - 失败要给出可读原因
-                self._json({"error": f"{type(exc).__name__}: {exc}", "channel": name}, 502)
-                return
+                fallback = state.relay.last_known(key, self._base())
+                if fallback is None:
+                    self._json({"error": f"{type(exc).__name__}: {exc}", "channel": name}, 502)
+                    return
+                text, stale, seq = fallback
+                stale = True
+                state.log(f"[{name}] 取清单异常（{type(exc).__name__}: {exc}），发最后一份顶住")
             # VLC / libVLC 内核（观屿、Ceau 等）读到清单最后一项就停，最新一整片
             # 要等下一片列出来才播得上，上游出长片时就「停一两秒再自己顺回去」。
             # 给这类播放器垫一层空片，让末项永远是垫片、并压低 TARGETDURATION。

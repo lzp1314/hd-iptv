@@ -235,6 +235,48 @@ class SwitchOn403Test(unittest.TestCase):
         self.assertEqual(out.error, "原始拒绝")
 
 
+class SwitchOnAnyFailureTest(unittest.TestCase):
+    """换族不能只认 403。
+
+    踩过的坑：系统优先走 IPv6、而 IPv6 那条路是**超时**（不是 403）时，旧代码
+    不换族，整个模块取不到数据，用户只能去面板手选「仅 IPv4」。上游对 v4/v6 的
+    取舍还会变——同一台机器前几天 v4 被拒、过几天反过来——所以超时、连不上、
+    5xx 都必须换一次。
+    """
+
+    def setUp(self):
+        HttpClient._FAMILY_PREF.clear()
+
+    def _calls(self, first):
+        c = HttpClient(ip_mode="auto")
+        calls = []
+
+        def fake_loop(url, **kw):
+            calls.append(kw.get("forced_mode", ""))
+            if len(calls) == 1:
+                return first
+            return Response(url=url, status=200, body=b"ok", family=socket.AF_INET)
+
+        with mock.patch.object(c, "_get_loop", side_effect=fake_loop):
+            out = c.get("https://x/y")
+        return out, calls
+
+    def test_timeout_switches(self):
+        out, calls = self._calls(Response(url="https://x/y", status=0, error="timeout"))
+        self.assertEqual(out.status, 200)
+        self.assertEqual(calls, ["", "ipv4"], "建连都没成时优先试 v4")
+
+    def test_5xx_switches(self):
+        out, calls = self._calls(Response(url="https://x/y", status=503, body=b""))
+        self.assertEqual(out.status, 200)
+        self.assertEqual(len(calls), 2)
+
+    def test_normal_response_never_switches(self):
+        out, calls = self._calls(Response(url="https://x/y", status=200, body=b"ok"))
+        self.assertEqual(out.status, 200)
+        self.assertEqual(calls, [""])
+
+
 class YspPathTest(unittest.TestCase):
     def test_resolve_passes_ip_mode(self):
         captured = {}

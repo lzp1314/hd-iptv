@@ -358,7 +358,7 @@ class HttpClient:
             self._family_remember(host, self._family_of(last.family), "")
             return last
 
-        if last.status == 403 and not self.proxy:
+        if not self.proxy and self._worth_switch(last):
             other = self._other_mode(last.family)
             if other:
                 switched = self._get_loop(url, forced_mode=other, **kw)
@@ -367,6 +367,21 @@ class HttpClient:
                     self._family_remember(host, other, self._family_of(last.family))
                     return switched
         return last
+
+    @staticmethod
+    def _worth_switch(resp: Response) -> bool:
+        """这次失败值不值得换地址族再试一次。
+
+        原来只认 403，结果吃过一次亏：系统优先走 IPv6、而 IPv6 那条路是**超时**
+        而不是 403 时，代码不换族，整个模块直接取不到数据（用户只能去面板手选
+        「仅 IPv4」）。上游对 v4/v6 的取舍是会变的——同一台 NAS，前几天是 v4 被
+        拒、v6 正常，过几天反过来——所以换族不能绑死在某个状态码上。
+        """
+        if resp.status == 0:
+            return True                      # 连不上 / 超时 / DNS 失败
+        if resp.status in (403, 429):
+            return True                      # 边缘拒绝
+        return resp.status >= 500            # 上游 5xx
 
     # ------------------------------------------------------------------ #
     # 地址族记忆：域名 → (能通的族, 被拒的族, 到期时刻)
@@ -409,9 +424,9 @@ class HttpClient:
             return "ipv6"
         if known == "ipv6":
             return "ipv4"
-        # auto 且不知道实际用了哪一族：央视频的清单接口是 v4 被拒、v6 正常，
-        # 先试 v6 更可能一击命中。
-        return "ipv6"
+        # auto 且连建连都没成，不知道走的是哪一族：优先试 v4。家庭网络里 v4 是
+        # 保底可用的那一族，而「系统优先 v6 但 v6 是黑洞」正是最常见的一种失败。
+        return "ipv4"
 
     def _get_loop(
         self,

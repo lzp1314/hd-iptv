@@ -22,6 +22,7 @@ from iptvhd.relay import (
     RelayError,
     _BLACKOUT_COOLDOWN,
     _RETRY_DELAYS,
+    _STALE_MAX,
     _TICKET_BUDGET,
     _TICKET_REUSE,
     _WINDOW_SEGMENTS,
@@ -257,9 +258,30 @@ class StaleGraceTest(unittest.TestCase):
         relay.playlist("cctv1")
         relay._fetch = _Fetch(500)
         with relay._lock:
-            relay._windows["cctv1"].at = time.time() - 40
+            relay._windows["cctv1"].at = time.time() - (_STALE_MAX + 15)
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
+
+    def test_last_known_never_refuses_by_age(self):
+        """再旧也交得出来——HTTP 层靠它避免把 5xx 甩给播放器。
+
+        ExoPlayer 重试 5 次后会抛错停住、libVLC 直接放弃这个流，两者都不会再
+        回来问第二次。发一份过期清单，播放器顶多是取分片失败后重问清单；发
+        5xx，它就不问了。
+        """
+        relay, _ = _relay(_playlist(100))
+        relay.playlist("cctv1")
+        with relay._lock:
+            relay._windows["cctv1"].at = time.time() - (_STALE_MAX + 600)
+        out = relay.last_known("cctv1")
+        self.assertIsNotNone(out)
+        text, stale, _seq = out
+        self.assertTrue(stale)
+        self.assertIn("#EXTM3U", text)
+
+    def test_last_known_empty_when_nothing_cached(self):
+        relay, _ = _relay(_playlist(100))
+        self.assertIsNone(relay.last_known("never-played"))
 
 
 class StaleRefreshTest(unittest.TestCase):

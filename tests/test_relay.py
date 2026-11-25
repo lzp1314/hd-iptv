@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
-from iptvhd.relay import Relay, RelayError, allowed, decode, encode, parse_range
+from iptvhd.relay import Relay, RelayError, _STALE_MAX, allowed, decode, encode, parse_range
 from iptvhd.models import Channel, Stream
 from iptvhd.writers import write_m3u
 
@@ -274,15 +274,15 @@ class RelayPolicyTest(unittest.TestCase):
         """播放器批量扫台时，配额用完就绝不再撞上游。
 
         「一被限流连正在看的台也一起 403」的防线：请求量由本机控制，不由播放器
-        的扫台节奏决定。数据还在 _STALE_MAX（30 秒）内时根本走不到配额这一步
+        的扫台节奏决定。数据还在 _STALE_MAX 内时根本走不到配额这一步
         ——直接发手里的（见 test_stale_within_grace_keeps_serving）；这里测的是
         已经旧到没法再用、又没有配额的情况：如实报错，但一枪不打上游。
         """
         relay = CountingRelay()
         relay.playlist("cctv1")
         before = relay.calls
-        # 拨过 _STALE_MAX（30 秒）：再旧的清单发出去也没用，官方 CDN 只留 11 片
-        _expire(relay, seconds=40)                   # 缓存旧到不能再用，本来该去上游
+        # 拨过 _STALE_MAX：再旧的清单发出去也没用，官方 CDN 只留 11 片
+        _expire(relay, seconds=_STALE_MAX + 15)      # 缓存旧到不能再用，本来该去上游
         relay._take_token = lambda wait=0.0: False   # 配额用完
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
@@ -361,7 +361,7 @@ class RelayStabilityTest(unittest.TestCase):
         self.assertGreaterEqual(relay.stale_served, 1)
 
     def test_stale_beyond_grace_reports_failure(self):
-        """超过 30 秒就老实报错。
+        """超过 _STALE_MAX 就老实报错。
 
         再旧的清单发出去也是死链：分片早被 CDN 回收，而且内容已经不是现在播的
         了，继续回旧清单只会让人以为还在播。到点报错，播放器自己重试或换台。
@@ -369,7 +369,7 @@ class RelayStabilityTest(unittest.TestCase):
         relay = ToggleRelay()
         relay.playlist("cctv1")
         relay.down = True
-        _expire(relay, seconds=40)
+        _expire(relay, seconds=_STALE_MAX + 15)
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
 
