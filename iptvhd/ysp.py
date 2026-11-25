@@ -172,6 +172,16 @@ _deny_streak = 0
 _deny_until = 0.0
 _DENY_STREAK = 8
 _DENY_SECONDS = 30.0
+# 两类拒绝要分开看：接口级（play_info）403/429 才是真限流；清单地址的 403
+# 多数只是「这张票用旧了」——央视频一个清单地址连取 2~5 次就 403，换张票立刻
+# 恢复，是设计内行为。以前两者同权，正常换票就把出口冷却顶出来了：一冷却就
+# 停止换票、只发旧清单，于是画面播一会儿卡一下、换个台直接黑屏。
+#
+# 判断依据（实测）：出口 IPv4 对清单一律 403 的那段时间，同一个出口的
+# play_info 接口仍然 200 —— 说明清单 403 不是「整条出口被封」，不该触发冷却。
+# 所以清单 403 只用于本地的退避（见 resolve 里的 forbidden），不计入熔断。
+_DENY_WEIGHT = {"api": 3, "manifest": 0}
+_DENY_POINTS = _DENY_STREAK * 3
 
 
 def denied() -> bool:
@@ -179,12 +189,18 @@ def denied() -> bool:
     return time.time() < _deny_until
 
 
-def note_denied() -> None:
-    """记一次「被上游拒绝」。连续几次就认为整条出口被限，停一分钟。"""
+def note_denied(kind: str = "api") -> None:
+    """记一次「被上游拒绝」。按权重累计，够了就认为整条出口被限，停一会儿。
+
+    ``kind="manifest"`` 权重为 0：清单 403 是换票信号，不是出口被封。
+    """
     global _deny_streak, _deny_until
+    weight = _DENY_WEIGHT.get(kind, 1)
+    if weight <= 0:
+        return
     with _deny_lock:
-        _deny_streak += 1
-        if _deny_streak >= _DENY_STREAK:
+        _deny_streak += weight
+        if _deny_streak >= _DENY_POINTS:
             _deny_until = time.time() + _DENY_SECONDS
             _deny_streak = 0
 
@@ -510,7 +526,7 @@ def resolve(
             )
             if resp.status in (403, 429):
                 forbidden += 1
-                note_denied()
+                note_denied("manifest")
             elif resp.status == 200:
                 note_ok()
             if not _usable(resp) or not resp.body.lstrip().startswith(b"#EXTM3U"):

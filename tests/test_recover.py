@@ -244,6 +244,16 @@ class TestDenyBreaker(unittest.TestCase):
         self.ysp.note_denied()
         self.assertFalse(self.ysp.denied(), "成功一次就该重新计数")
 
+    def test_manifest_403_does_not_arm_cooldown(self):
+        """清单地址 403 是「票用旧了」，不是出口被封，不该触发冷却。
+
+        以前两者同权：正常换票就把冷却顶出来，一冷却就停止换票、只发旧清单，
+        画面播一会儿卡一下、换台直接黑屏。
+        """
+        for _ in range(60):
+            self.ysp.note_denied("manifest")
+        self.assertFalse(self.ysp.denied())
+
     def test_play_info_stops_calling_upstream_when_denied(self):
         for _ in range(self.ysp._DENY_STREAK):
             self.ysp.note_denied()
