@@ -314,6 +314,21 @@ class HttpClient:
         self._ssl.check_hostname = False
         self._ssl.verify_mode = ssl.CERT_NONE
 
+    def with_mode(self, mode: str) -> "HttpClient":
+        """同配置、换个地址族的新客户端。
+
+        地址族在 ``__init__`` 里定死，想换族只能另建一个。央视频按换票时的
+        出口地址族分配 CDN 节点，遇到坏节点时必须换族重来（见 ``ysp._round_mode``），
+        所以需要这个「只换族、其余设置照抄」的入口。
+        """
+        return HttpClient(
+            user_agent=self.user_agent,
+            timeout=self.timeout,
+            retries=self.retries,
+            proxy=self.proxy,
+            ip_mode=mode,
+        )
+
     # ------------------------------------------------------------------ #
     def get(
         self,

@@ -1983,7 +1983,13 @@ class Relay:
             # 多给一次机会，因为换线路确实可能绕开某一个域的限流。
             with self._lock:
                 streak = self._retry_hits.get(slug, 0)
-            if streak < 1 or (self._resolver_rotates and streak < 2):
+            # 央视频的解析器内部已经做过「本族换两张票 + 换族再试」，
+            # 它回来还带 403，就是这条链路此刻真不行了，在这里再重试一轮
+            # 等于把请求翻倍（3 轮 × 2），只会把出口敲得更死。
+            ysp_url = _is_ysp_url(url)
+            if not ysp_url and (
+                streak < 1 or (self._resolver_rotates and streak < 2)
+            ):
                 time.sleep(1.0)
                 url, ua = self.upstream(slug, fresh=True, rotate=True)
                 status, _, body, final = self._fetch(url, ua)

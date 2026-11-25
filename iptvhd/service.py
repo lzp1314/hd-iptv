@@ -389,7 +389,7 @@ def _ysp_resolver(slug: str, ip_mode: str = "auto") -> tuple[str, str]:
     row = ysp.CHANNEL_BY_SLUG.get(slug.lower())
     if row is None:
         raise RelayError(f"未知频道: {slug}")
-    url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=2, ip_mode=ip_mode)
+    url, _, _ = ysp.resolve(row[2], row[3], row[4], attempts=3, ip_mode=ip_mode)
     return url, ysp.UA
 
 

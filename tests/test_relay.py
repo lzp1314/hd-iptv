@@ -46,10 +46,9 @@ https://hlsliveali-cdn.ysp.cctv.cn/seg-2.ts
 class FakeRelay(Relay):
     """不联网的 Relay：把上游响应写死。"""
 
-    def __init__(self, pages: dict[str, tuple[int, str]], **options):
-        super().__init__(
-            lambda slug: ("https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8", "qqlive"), **options
-        )
+    def __init__(self, pages: dict[str, tuple[int, str]], url: str = "", **options):
+        base = url or "https://hlsliveali-cdn.ysp.cctv.cn/TOKEN/1.m3u8"
+        super().__init__(lambda slug: (base, "qqlive"), **options)
         self.pages = pages
         self.asked: list[str] = []
 
@@ -182,10 +181,20 @@ class RelayTest(unittest.TestCase):
         self.assertIn("/relay/", relay.playlist("cctv1"))
 
     def test_playlist_retries_once_on_403(self):
-        relay = FakeRelay({"1.m3u8": (403, "")})
+        # 非央视频的源：403 换一条线路确实可能绕开，保留这一次重试
+        relay = FakeRelay({"1.m3u8": (403, "")},
+                          url="https://cdn.example.com/TOKEN/1.m3u8")
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
         self.assertEqual(len(relay.asked), 2)  # 首次 + 换地址后重试
+
+    def test_ysp_403_is_not_retried_here(self):
+        # 央视频的地址：解析器内部已经换过族、换过票，这里再重试只会把
+        # 请求翻倍（3 轮 × 2），所以只打一次就退避。
+        relay = FakeRelay({"1.m3u8": (403, "")})
+        with self.assertRaises(RelayError):
+            relay.playlist("cctv1")
+        self.assertEqual(len(relay.asked), 1)
 
     def test_playlist_rejects_non_m3u8(self):
         relay = FakeRelay({"1.m3u8": (200, "<html>403</html>")})

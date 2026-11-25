@@ -470,6 +470,31 @@ def parse_segments(text: str) -> list[str]:
     return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
 
 
+def _round_mode(base: str, round_no: int) -> str:
+    """第 ``round_no`` 轮该用哪个地址族。
+
+    依据（2026-11-25 实测，同一台同一时刻）：
+
+        用 IPv4 出口换票 → 分到 live-dtocnc-cdn，取清单一律 403
+                          （换 IPv6 去取这个地址，照样 403）
+        用 IPv6 出口换票 → 分到 hlsliveali-cdn，取清单 200
+
+    也就是说，**play_info 按换票时的出口地址族分配 CDN 节点**，而某个节点
+    可能对这一批票整体拒绝。这种情况下同族重试多少次都还是同一个节点，
+    只有换地址族重新换一张票才能绕开。这就是过去「IPv4 怎么等都播不了、
+    改成 IPv6 立刻好」的真正原因——不是出口被限流。
+
+    顺序是「本族换一张新票 → 本族再来一张 → 换族」。先在本族重换，是因为
+    实测族到节点只是强相关、不是严格绑定（IPv6 偶尔也会分到 dtocnc），换张
+    票有时就落到另一个节点；两次都不行才说明这条链路整体不行，再换族。
+    """
+    if base == "ipv4":
+        return ("ipv4", "ipv4", "ipv6")[min(max(round_no, 0), 2)]
+    if base == "ipv6":
+        return ("ipv6", "ipv6", "ipv4")[min(max(round_no, 0), 2)]
+    return ("auto", "ipv6", "ipv6", "ipv4")[min(max(round_no, 0), 3)]
+
+
 def resolve(
     cnlid: str,
     livepid: str,
@@ -494,13 +519,23 @@ def resolve(
     传 ``meta`` 字典可以把顺手读到的清单信息带出来（分片时长等），
     用来从分片大小推算真实码率，不必为它多发一次请求。
     """
-    client = client or HttpClient(
-        user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=ip_mode
+    base_mode = "ipv4" if force_ipv4 else ip_mode
+    shared = client or HttpClient(
+        user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=base_mode
     )
     last = "获取播放信息失败"
     for round_no in range(max(1, attempts)):
+        mode = _round_mode(base_mode, round_no)
+        # 换族就必须换客户端：地址族在 HttpClient 创建时定死，复用同一个等于白换。
+        # 自定义客户端（测试替身、别人传进来的特殊实现）不换：我们不知道它内部
+        # 怎么选路，硬塞一个裸 HttpClient 反而会绕过它自己的行为。
+        use_client = shared
+        if mode != base_mode and isinstance(shared, HttpClient):
+            use_client = shared.with_mode(mode)
         try:
-            info = play_info(cnlid, livepid, defn, client, force_ipv4=force_ipv4, ip_mode=ip_mode)
+            info = play_info(
+                cnlid, livepid, defn, use_client, force_ipv4=force_ipv4, ip_mode=mode
+            )
         except YspUnavailable:
             raise
         except YspError as exc:
@@ -520,7 +555,7 @@ def resolve(
         forbidden = 0
         for url in urls:
             pace()
-            resp = client.get(
+            resp = use_client.get(
                 url, limit=131072, headers=HLS_HEADERS,
                 deadline=time.monotonic() + MANIFEST_TIMEOUT,
             )
@@ -546,7 +581,7 @@ def resolve(
             # 读不到**不算失败**——清单已经证明这条地址是活的，分片被拒多半只是
             # 出口限流（403），拿它否掉一条能播的流是过去「好多台没拉到」的主因。
             pace()
-            probe = client.get(
+            probe = use_client.get(
                 first, limit=SAMPLE_BYTES, headers=HLS_HEADERS,
                 deadline=time.monotonic() + MANIFEST_TIMEOUT * 2,
             )
@@ -559,9 +594,9 @@ def resolve(
             return url, info, first
 
         if round_no + 1 < attempts:
-            # 主备 CDN 全 403 = 本机出口正被上游限流，等久一点再换，
-            # 马上重试只会把限流拖得更长。
-            all_forbidden = bool(urls) and forbidden == len(urls)
-            time.sleep(pause if not all_forbidden else pause + 3.0 * (round_no + 1))
+            # 下一轮换的是**另一条出口链路上的另一个节点**，不是在原地继续敲
+            # 同一个被拒的节点，所以不再需要「越等越久」的惩罚性等待——那样
+            # 只会让换台多等 3~9 秒。留一点间隔让节拍器收尾即可。
+            time.sleep(min(pause, 0.4))
 
     raise YspError(last)
