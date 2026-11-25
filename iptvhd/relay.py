@@ -423,6 +423,21 @@ _PLAYING_WINDOW = 15.0
 # 每一轮都在缓冲撑得住的范围里，403 一恢复立刻就能接上。
 _RETRY_DELAYS = (1.0, 2.0, 3.0, 5.0)
 
+# 窗口**已经死透**时的退避曲线（秒）。上面那条 5 秒封顶只适用于「窗口里还有
+# 活分片、画面还在走」的情况：那时短退避确实能几秒内接上。
+#
+# 但窗口一旦超过 ``_STALE_MAX``（45 秒），里面的分片地址已经超出 CDN 留存
+# （实测 11 片约 55 秒），无论多快重取都好不了——播放器手上没有一片能播，
+# 只能报错、重开。这时再用 5 秒退避就是纯自杀：
+#
+#   实测（2026-11-25，用户 NAS）：上游对出口 IP 惩罚性限流期间，播放器每 4~5
+#   秒重开一次，每次都触发一次同步取清单，每次两发（403 后还会换票重试一次）。
+#   退避 5 秒封顶等于给这个循环发通行证，403 计数一小时涨几百，而惩罚期被
+#   我们自己一轮轮续着——这就是「越要越死」。
+#
+# 所以窗口已死时按分钟级退避：先给上游留出解封时间，恢复一次立刻回到 5 秒。
+_RETRY_DELAYS_DEAD = (5.0, 15.0, 30.0, 60.0)
+
 # 官方回「应版权方要求，暂停提供直播信号」后，这个台冷却一会儿再问。
 # 版权按节目走，一档节目没版权时整档都是这句话，换节目才可能恢复。
 _BLACKOUT_COOLDOWN = 180.0
@@ -678,6 +693,25 @@ class _Window:
     def first_out(self) -> int:
         """这份清单第一片对外的序号，也就是下发给播放器的 MEDIA-SEQUENCE。"""
         return self.out[0] if self.out else max(0, self.seq0)
+
+
+    def shrink_to_last(self) -> None:
+        """窗口里的分片全过期时，只留最后一片。
+
+        为什么要真的裁掉，而不是「只在正文里少写几行」：下发的 MEDIA-SEQUENCE
+        取的是 ``out[0]``。如果正文只发最后一片的序号、窗口却还留着 9 片，等
+        上游恢复、新片接在窗口后面，``first_out`` 又会回到那个更小的序号——
+        播放器看到序号**回退**，会认定这份清单比手里的旧，直接丢在一边，
+        卡在 buffering 永不恢复（ExoPlayer #2872 的结论，也是「卡住不动、
+        不自恢复」的老病根）。裁到最后一片，序号就只会往前。
+
+        裁掉的内容本来就是死地址（超出 CDN 留存），丢掉不影响播放。
+        """
+        if len(self.segs) > 1:
+            lost = len(self.segs) - 1
+            self.segs = self.segs[-1:]
+            self.out = self.out[-1:]
+            self.seq0 += lost
 
 
     def text(self) -> str:
@@ -1388,7 +1422,22 @@ class Relay:
             if "403" in message:
                 hits = self._retry_hits.get(slug, 0)
                 self._retry_hits[slug] = hits + 1
-                delay = _RETRY_DELAYS[min(hits, len(_RETRY_DELAYS) - 1)]
+                # 退避多久，取决于「窗口里还有没有能播的分片」：
+                # 有 → 短退避（几秒内接上，画面不耗干）；
+                # 没有（已经超过 _STALE_MAX，分片地址全过期）→ 长退避，别续着
+                # 上游的惩罚期。判定放在这里是因为只有失败时才知道窗口死没死。
+                #
+                # **冷启动（从来没有过窗口）不算「死」**：那种台手上一片都没有，
+                # 没有画面可等，快速重试对用户更友好（点开就想播）；长退避留给
+                # 「刚还在播、突然全过期」这种真正的限流信号。
+                window = self._windows.get(slug)
+                dead = bool(
+                    window is not None
+                    and window.segs
+                    and now - window.at > _STALE_MAX
+                )
+                table = _RETRY_DELAYS_DEAD if dead else _RETRY_DELAYS
+                delay = table[min(hits, len(table) - 1)]
                 self._next_try[slug] = now + delay
                 # 面板上那一格「出口退避」只用来告诉人「现在在等」，跟着按台
                 # 的退避走；不再让它去挡别的台的同步取（那只伤及无辜）。
@@ -1680,7 +1729,15 @@ class Relay:
             raw = self._raw.get(slug)
         if window is not None and window.segs:
             if now - window.at > _STALE_MAX:
-                return None
+                # 分片已经全过期（超出 CDN 留存，取哪片都 404）。这里**不再发
+                # 一份「每一片都取不到」的清单**——那正是「卡在同一个片段反复
+                # 重播」的剧本：播放器取片失败 → 报错重开 → 又要清单 → 我们
+                # 再发同一份死清单 → 回到同一位置。改发只剩最后一片的那份，
+                # 播放器播完就安静等，不再触发 onError 重开，上游的请求频率
+                # 也就从「跟着播放器重开走」回到我们自己的退避节奏。
+                with self._lock:
+                    window.shrink_to_last()
+                return self._rewrite(window.text(), "", slug, prefix), True, window.first_out
             return self._rewrite(window.text(), "", slug, prefix), stale, window.first_out
         if raw is not None:
             if now - raw[0] > _STALE_MAX:
@@ -1702,6 +1759,10 @@ class Relay:
         with self._lock:
             window = self._windows.get(slug)
             raw = self._raw.get(slug)
+            if window is not None and window.segs and time.time() - window.at > _STALE_MAX:
+                # 和 _cached 同一个理由：死清单只留最后一片，别让播放器在
+                # 「取片失败→重开→再取同一份」里绕圈。
+                window.shrink_to_last()
         if window is not None and window.segs:
             return self._rewrite(window.text(), "", slug, prefix), True, window.first_out
         if raw is not None:
@@ -1914,9 +1975,18 @@ class Relay:
             # 这里顺手 rotate：一个台挂着好几条源时，「这条 403 了」最常见的
             # 原因就是这条线路本身不行，换条路比死磕同一个域名划算得多。
             # 只有一条线路时 resolver 会原地返回同一个地址，退化成原来的行为。
-            time.sleep(1.0)
-            url, ua = self.upstream(slug, fresh=True, rotate=True)
-            status, _, body, final = self._fetch(url, ua)
+            #
+            # **但连续被拒时不再重试。** 换票只对「同一张票据用旧了」有效；
+            # 一旦是出口 IP 被惩罚性限流，换票也是 100% 403。这时重试的代价是
+            # 三份：403 计数翻倍（面板上那个数字直接误导判断）、多烧一张换票
+            # 预算、以及我们自己把惩罚期一轮轮续着。多线路的源（``_resolver_rotates``）
+            # 多给一次机会，因为换线路确实可能绕开某一个域的限流。
+            with self._lock:
+                streak = self._retry_hits.get(slug, 0)
+            if streak < 1 or (self._resolver_rotates and streak < 2):
+                time.sleep(1.0)
+                url, ua = self.upstream(slug, fresh=True, rotate=True)
+                status, _, body, final = self._fetch(url, ua)
         if status != 200 or not body:
             if not soft:
                 self._mark_failed(slug, f"上游返回 {status}")

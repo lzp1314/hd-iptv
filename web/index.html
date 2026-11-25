@@ -116,7 +116,8 @@
         <span class="hint">聚合源地址会过期，外网使用建议 4~6 小时</span>
       </label>
       <label>清单刷新（秒，越小越实时）
-        <input id="setTtl" type="number" min="0.5" max="5" step="0.5">
+        <input id="setTtl" type="number" min="0.5" max="15" step="0.5">
+        <span class="hint">央视频一份清单只给 3 片（约 15 秒），5 秒取一次等于取了 3 倍的货，容易撞限流；调到 10~12 秒既够用又省配额</span>
       </label>
       <label>分片缓存（MB，仅转发模式）
         <input id="setCache" type="number" min="0" max="4096" step="8">

@@ -22,6 +22,7 @@ from iptvhd.relay import (
     RelayError,
     _BLACKOUT_COOLDOWN,
     _RETRY_DELAYS,
+    _RETRY_DELAYS_DEAD,
     _STALE_MAX,
     _TICKET_BUDGET,
     _TICKET_REUSE,
@@ -217,6 +218,43 @@ class CooldownTest(unittest.TestCase):
         self.assertLessEqual(delays[0], 2, "第一轮要快，别让画面先等")
         self.assertLessEqual(max(delays), 6, "退避不能超过播放器缓冲（约 8 秒）")
 
+    def test_repeated_403_stops_rebuying_tickets(self):
+        """连续被拒时不再「换票重试」：换票治不了出口 IP 的惩罚性限流。
+
+        一张票用第 3 次必 403 是「票用旧了」，换票有效；但出口被限流时换票
+        也是 100% 403。以前每轮失败都固定「睡 1 秒 + 换票 + 再取一次」，限流
+        期等于请求数翻倍、换票预算双倍烧，还把我们自己按在惩罚期里出不来。
+        """
+        relay, fetch = _relay(403)
+        with self.assertRaises(RelayError):
+            relay.playlist("cctv1")
+        first = fetch.calls
+        self.assertEqual(first, 2, "第一次被拒值得换票再试一把")
+        with relay._lock:
+            relay._next_try.pop("cctv1", None)
+        with self.assertRaises(RelayError):
+            relay.playlist("cctv1")
+        self.assertEqual(fetch.calls - first, 1, "连续第二次被拒就不再换票重试")
+
+    def test_dead_window_backs_off_in_minutes(self):
+        """窗口已经死透（分片全过期）时按分钟级退避，别续着上游的惩罚期。
+
+        窗口还活着时短退避是对的（几秒内接上）；但分片全过期之后，无论多快
+        重取都好不了，播放器只能报错重开——这时 5 秒封顶等于给「重开→再打
+        上游→再被拒」这个循环发通行证。
+        """
+        relay, _ = _relay(_playlist(100))
+        relay.playlist("cctv1")
+        with relay._lock:
+            relay._windows["cctv1"].at = time.time() - (_STALE_MAX + 15)
+        relay._fetch = _Fetch(403)
+        relay.playlist_info("cctv1")                # 拿不到新的，降级发最后一片
+        remaining = relay._next_try.get("cctv1", 0.0) - time.time()
+        self.assertGreaterEqual(
+            remaining, _RETRY_DELAYS_DEAD[0] - 1.0,
+            "死窗口要按分钟级退避，不能用 5 秒那一档",
+        )
+
     def test_cooling_one_channel_does_not_block_others(self):
         relay, fetch = _relay(403)
         with self.assertRaises(RelayError):
@@ -240,7 +278,7 @@ class CooldownTest(unittest.TestCase):
 
 
 class StaleGraceTest(unittest.TestCase):
-    """旧清单能顶多久：30 秒内顶住，超过就老实报错。"""
+    """旧清单能顶多久：45 秒内原样顶住，超过就降级成「只剩最后一片」再顶。"""
 
     def test_stale_served_within_grace(self):
         relay, _ = _relay(_playlist(100))
@@ -253,14 +291,54 @@ class StaleGraceTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertGreaterEqual(relay.stale_served, 1)
 
-    def test_stale_beyond_grace_raises(self):
+    def test_stale_beyond_grace_degrades_to_last_segment(self):
+        """超过 _STALE_MAX 时降级成「只剩最后一片」的撑住清单，不再抛错。
+
+        为什么要改（实测 2026-11-25）：分片全都超出 CDN 留存之后，继续发一份
+        正常清单等于给播放器一个「每一片都取不到」的剧本——它报错、重开、
+        又要清单，我们每次都发同一份死清单，于是「卡在同一个片段反复重播」。
+        只留最后一片：它播完就安静等，不再触发 onError 重开，上游请求频率也
+        就从「跟着播放器重开走」回到我们自己的退避节奏。
+        """
         relay, _ = _relay(_playlist(100))
         relay.playlist("cctv1")
+        seq_before = relay._windows["cctv1"].first_out
         relay._fetch = _Fetch(500)
         with relay._lock:
             relay._windows["cctv1"].at = time.time() - (_STALE_MAX + 15)
-        with self.assertRaises(RelayError):
-            relay.playlist("cctv1")
+        text, stale, seq = relay.playlist_info("cctv1")
+        self.assertTrue(stale, "过期的那份必须标成旧的")
+        self.assertEqual(text.count("#EXTINF"), 1, "死窗口只留最后一片，别让播放器逐片 404")
+        self.assertNotIn("#EXT-X-START", text, "不能让它再跳回窗口前面重播")
+        self.assertGreaterEqual(seq, seq_before, "对外序号不许回退")
+        with relay._lock:
+            self.assertEqual(
+                len(relay._windows["cctv1"].segs), 1,
+                "窗口必须真的裁到一片：只改正文的话，上游恢复时序号会回退，播放器卡死",
+            )
+
+    def test_dead_window_recovers_with_monotonic_sequence(self):
+        """死窗口只留最后一片后，上游恢复时序号必须继续往前，不能回退。
+
+        裁窗口正是为了这个：只改正文不改窗口的话，恢复时 ``first_out`` 会回到
+        窗口最前面那个更小的序号，播放器认定「比手里的旧」就卡死在 buffering
+        （ExoPlayer #2872）。
+        """
+        relay, fetch = _relay(_playlist(100))
+        relay.playlist("cctv1")
+        last_out = relay._windows["cctv1"].out[-1]
+        relay._fetch = _Fetch(500)
+        with relay._lock:
+            relay._windows["cctv1"].at = time.time() - (_STALE_MAX + 15)
+        _, _, dead_seq = relay.playlist_info("cctv1")
+        self.assertEqual(dead_seq, last_out, "裁到只剩最后一片，序号停在它上面")
+
+        relay._fetch = fetch
+        fetch.bodies = [_playlist(140)]           # 上游恢复，而且一下跳了几十片
+        text, stale, seq = relay.playlist_info("cctv1")
+        self.assertFalse(stale)
+        self.assertGreaterEqual(seq, dead_seq, "恢复后对外序号不许回退")
+        self.assertIn("seg/140.ts", text)
 
     def test_last_known_never_refuses_by_age(self):
         """再旧也交得出来——HTTP 层靠它避免把 5xx 甩给播放器。
