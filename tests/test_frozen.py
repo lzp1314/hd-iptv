@@ -77,7 +77,9 @@ class TestWindow(unittest.TestCase):
         text, stale, seq = relay.playlist_info("cctv1")
 
         self.assertFalse(stale)
-        self.assertEqual(seq, 100)
+        # 返回值是「下发给播放器的首片序号」，必须与清单里那一行一致；
+        # 它不再等于上游序号（上游换 CDN 时会回退，见 _Window.out）。
+        self.assertIn(f"#EXT-X-MEDIA-SEQUENCE:{seq}", text)
         self.assertEqual(fetch.calls, 1)
         self.assertIn("https://cdn.example.com/live/a/100.ts", text)
 
@@ -94,7 +96,7 @@ class TestWindow(unittest.TestCase):
         relay._prefetch("cctv1")
 
         text, _, seq = relay.playlist_info("cctv1")
-        self.assertEqual(seq, 100)
+        self.assertIn(f"#EXT-X-MEDIA-SEQUENCE:{seq}", text)
         self.assertEqual(text.count("#EXTINF"), 6, "3 片 + 3 片，拼成 30 秒")
         self.assertIn("100.ts", text)
         self.assertIn("105.ts", text)
@@ -120,7 +122,8 @@ class TestWindow(unittest.TestCase):
         relay._prefetch("cctv1")
 
         text, _, seq = relay.playlist_info("cctv1")
-        self.assertEqual(seq, 500)
+        self.assertGreater(seq, 1, "上游序号跳变后，对外序号要继续往前，不能回退或归零")
+        self.assertIn(f"#EXT-X-MEDIA-SEQUENCE:{seq}", text)
         self.assertEqual(text.count("#EXTINF"), 3, "序号接不上就以新清单为准，不能拼出错位的窗口")
         self.assertIn("502.ts", text)
 
@@ -175,9 +178,9 @@ class TestFrozen(unittest.TestCase):
         relay._prefetch("cctv1")
 
         text, _stale, seq = relay.playlist_info("cctv1")
-        self.assertEqual(seq, 200, "换票换到了新序号，就该用新的")
+        self.assertIn("200.ts", text, "换票换到了新序号，就该用新的")
+        self.assertIn(f"#EXT-X-MEDIA-SEQUENCE:{seq}", text)
         self.assertEqual(fetch.calls, 2)
-        self.assertIn("200.ts", text)
 
     def test_frozen_is_reported(self):
         relay, _ = _relay([_playlist(100)])   # 换多少张票都是同一份
@@ -199,7 +202,7 @@ class TestFrozen(unittest.TestCase):
         text, stale, seq = relay.playlist_info("cctv1")
 
         self.assertTrue(stale, "取不到新的就把旧窗口发出去，总比让播放器跳台好")
-        self.assertEqual(seq, 100)
+        self.assertIn(f"#EXT-X-MEDIA-SEQUENCE:{seq}", text)
         self.assertIn("#EXTM3U", text)
 
     def test_playlist_wrapper_returns_text(self):

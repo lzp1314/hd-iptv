@@ -85,6 +85,28 @@ _REFERER = "https://live.cctv.cn/"
 # 不经过 NAS，因此不会把本机出口打成高频请求（转发正是因此被平台回 403）。
 _PLAIN_SUFFIX = (".ysp.cctv.cn",)
 
+# 一张清单票据最多能用几次。**实测（2026-11-25，NAS 出口）：央视频 CDN 的同一个
+# 媒体清单地址，第 1、2 次 200，第 3 次就 403**；换一张新票立刻恢复。
+#
+# 以前只按 ``addr_ttl``（默认 300 秒）复用地址，等于一张票要用到被拒为止：后台
+# 每 5 秒取一次清单，第 10 秒必然撞 403，撞完还要退避 1~5 秒。几次叠加就是 20~30
+# 秒断档，而窗口总共只有 6 片（约 30 秒）内容——刚好在这段断档里被耗干。于是
+# 「播一分多钟卡住、不自恢复」，换台时没有旧窗口可顶就是「黑屏」。
+#
+# 所以用满 2 次就主动换新票，把「被拒」换成「主动换」：换票次数不变（反正第 3 次
+# 一定废），但 403 和不必要的退避都消失了。只对央视频 CDN 生效——运营商源的一张
+# 票能拉很多次，跟着换会白白烧掉换票预算。
+_TICKET_REUSE = 2
+
+
+def _is_ysp_url(url: str) -> bool:
+    """这个地址是不是央视频 CDN（票据只能用两三次的那一家）。"""
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host.endswith(_PLAIN_SUFFIX)
+
 
 def _ipv6_host(url: str) -> str:
     """地址里的主机是 IPv6 字面量就返回它，否则返回空串。"""
@@ -523,7 +545,7 @@ class _Window:
     免得窗口里的序号和内容错位——那会让播放器直接报错。
     """
 
-    __slots__ = ("head", "segs", "seq0", "at", "moved_at", "target")
+    __slots__ = ("head", "segs", "seq0", "at", "moved_at", "target", "out", "next_out")
 
     def __init__(self) -> None:
         self.head: list[str] = []
@@ -534,6 +556,14 @@ class _Window:
         # 上游一片有多长（秒）。不同源的差别很大：聚合源常见 3~6 秒，运营商
         # IPTV 官方源是 10 秒。「多久没滚才算冻住」必须跟着它走，写死就会误判。
         self.target = 0.0
+        # 下发给播放器的序号（与 segs 一一对应）。**不直接用上游序号**：央视频
+        # 换票时会在两个 CDN 域名之间跳，两边的序号基准差 1~2 片（实测回退过 -1）。
+        # 上游序号一旦倒退，下发的 MEDIA-SEQUENCE 也跟着倒退，播放器会认定这是
+        # 一份「更旧的清单」而丢在一边——ExoPlayer #2872 里这种现象的结论是
+        # 「卡在 buffering 且永不恢复」，正是用户报的「卡住不动、不自恢复」。
+        # 所以对外序号自己维护，只增不减；内容仍按上游序号对齐。
+        self.out: list[int] = []
+        self.next_out = 1
 
     @property
     def frozen_after(self) -> float:
@@ -564,9 +594,9 @@ class _Window:
             if longest > 0:
                 self.target = longest
 
-        if not self.segs or seq < 0:
-            self.segs = list(segs)
+        if not self.segs or seq < 0 or not self.out:
             self.seq0 = max(0, seq)
+            self._rebase(segs)
             self.moved_at = now
             return True
 
@@ -575,7 +605,7 @@ class _Window:
             # 中间缺了好几片，接不上：直接以新清单为准。序号跳变本身就意味着
             # 内容不连续（预告片切回正片、上游序号重置都走这里），给新窗口第一
             # 片补一个断点标记，让播放器重置解码器，而不是拿旧缓冲里的画面回跳。
-            self.segs = list(segs)
+            self._rebase(segs)
             if self.segs:
                 duration, uri, stamp, _disc = self.segs[0]
                 self.segs[0] = (duration, uri, stamp, True)
@@ -583,11 +613,17 @@ class _Window:
             self.moved_at = now
             return True
 
+        # 序号**回退**（``seq < seq0``）不再当成错误：央视频换票会在两个 CDN 域名
+        # 之间跳，两边的序号基准差 1~2 片。这时窗口里的内容其实比新清单更靠后，
+        # 所以只接收落在窗口内的那片（顺带把地址换成新域名的那份，票据更新鲜），
+        # 比窗口还旧的直接忽略——等它追上来。对外序号不受影响，一直往前。
         added = False
         for index, seg in enumerate(segs):
             pos = seq + index - self.seq0
             if pos >= len(self.segs):
                 self.segs.append(seg)
+                self.out.append(self.next_out)
+                self.next_out += 1
                 added = True
             elif pos >= 0:
                 old = self.segs[pos]
@@ -600,8 +636,26 @@ class _Window:
             self.moved_at = now
         while len(self.segs) > _WINDOW_SEGMENTS:
             self.segs.pop(0)
+            self.out.pop(0)
             self.seq0 += 1
         return added
+
+    def _rebase(self, segs) -> None:
+        """整窗重建：内容换成这一份，对外序号从 ``next_out`` 起继续递增。
+
+        **不归零、不回退**。上游换了个 CDN 序号基准时，如果我们跟着把对外序号
+        退回去，播放器会认为这份清单比手里的旧，直接丢弃并卡在 buffering。
+        """
+        self.segs = list(segs)
+        base = self.next_out
+        self.out = [base + i for i in range(len(self.segs))]
+        self.next_out = base + len(self.segs)
+
+    @property
+    def first_out(self) -> int:
+        """这份清单第一片对外的序号，也就是下发给播放器的 MEDIA-SEQUENCE。"""
+        return self.out[0] if self.out else max(0, self.seq0)
+
 
     def text(self) -> str:
         # TARGETDURATION 按**窗口里实际的**分片时长重算。上游那份是「最新 3 片」的
@@ -619,7 +673,9 @@ class _Window:
             out.append(line)
         if longest > 0:
             out.append(f"#EXT-X-TARGETDURATION:{math.ceil(longest)}")
-        out.append(f"#EXT-X-MEDIA-SEQUENCE:{max(0, self.seq0)}")
+        # 对外序号取自己维护的那串，不用 seq0：上游换 CDN 时序号会回退 1~2 片，
+        # 跟着下发会让播放器认定「这份比手里的旧」而卡在 buffering（见 __init__）。
+        out.append(f"#EXT-X-MEDIA-SEQUENCE:{self.first_out}")
         # 告诉播放器「从末尾往前数 3 片开始播」。窗口是 6 片，不写这一行的话
         # VLC / 观屿这类外挂播放器会从窗口最前面开始，等于凭空多落后 15 秒；
         # hls.js 自己有 liveSyncDurationCount，会忽略这行。
@@ -844,6 +900,13 @@ class Relay:
         self._stale_max = stale_max
         self._lock = threading.Lock()
         self._cache: dict[str, tuple[float, str, str]] = {}   # slug -> (时间, 地址, UA)
+        # 这张票已经被用了几次。央视频一张票只能用 2 次，用满就主动换，见 _TICKET_REUSE。
+        self._ticket_uses: dict[str, int] = {}
+        # 最近发生的「异常事件」（环形缓冲，新的在后）。面板和日志都读它。
+        # 在这之前服务端一条运行日志都没有：用户说「卡了」，手上只有三个累计
+        # 计数，分不清是上游拒、本地退避还是窗口没推进，只能靠猜。
+        self._events: deque[tuple[float, str, str]] = deque(maxlen=40)
+        self.ticket_rotations = 0   # 主动换票次数（票据用满 2 次就换，不等 403）
         # 最近一次失败的时刻。**只做诊断**，调度看的是下面的 _next_try：
         # 「失败过」不代表「现在不能试」，这行区别是这一版的核心。
         self._failed: dict[str, float] = {}
@@ -1025,8 +1088,17 @@ class Relay:
         if hit and not fresh:
             # 地址用久了要主动换票。CDN 对同一张票据上的重复请求会越来越容易
             # 回 403（换一个 token 就正常），所以别一直抱着同一张用。
-            if now - hit[0] <= self._addr_ttl:
-                return hit[1], hit[2]
+            #
+            # 央视频这类源还有更硬的限制：一张票只能用 2 次。只按 TTL 复用会
+            # 在第 3 次必撞 403，所以要按「用了几次」主动换，见 _TICKET_REUSE。
+            with self._lock:
+                uses = self._ticket_uses.get(slug, 0)
+                limited = _is_ysp_url(hit[1])
+                if now - hit[0] <= self._addr_ttl and (not limited or uses < _TICKET_REUSE):
+                    self._ticket_uses[slug] = uses + 1
+                    return hit[1], hit[2]
+                if limited and uses >= _TICKET_REUSE:
+                    self.ticket_rotations += 1
             fresh = True
 
         if retry_at > now and not fresh:
@@ -1093,6 +1165,8 @@ class Relay:
 
         with self._lock:
             self._cache[slug] = (now, url, ua)
+            # 新票已经算用掉一次（马上要拿它去取清单）。
+            self._ticket_uses[slug] = 1
             self._failed.pop(slug, None)
             self._errors.pop(slug, None)
         return url, ua
@@ -1101,6 +1175,7 @@ class Relay:
         """丢掉地址与清单缓存，下次请求时换新地址。"""
         with self._lock:
             self._cache.pop(slug, None)
+            self._ticket_uses.pop(slug, None)
             self._windows.pop(slug, None)
             self._raw.pop(slug, None)
             self._active.pop(slug, None)
@@ -1219,6 +1294,15 @@ class Relay:
             # 这一分钟已经用掉的换票额度（上限 _TICKET_BUDGET）
             "tickets": tickets,
             "ticket_budget": _TICKET_BUDGET,
+            # 主动换票次数：票据用满 2 次就换，不等 403。正常播放每分钟 6~12 次
+            # （一个台每十秒换一张）；这个数远大于 12 说明有台在反复重取。
+            "ticket_rotations": self.ticket_rotations,
+            # 最近 40 条异常事件（新的在前）。面板据此显示「刚才到底发生了什么」，
+            # 不用再靠三个累计计数猜。
+            "recent": [
+                {"ago": round(now - at, 1), "slug": slug, "msg": msg}
+                for at, slug, msg in list(self._events)[::-1]
+            ],
             # 域名解析闸门的计数。取票全挂时先看这里：timeouts 一直涨就是解析
             # 卡住（不是上游 403），这时改 DNS 或重启服务才有意义。
             "dns": dns_stats(),
@@ -1360,7 +1444,7 @@ class Relay:
 
         # 新鲜的：直接发。
         if window is not None and window.segs and now - window.at <= self._fresh_age:
-            return self._rewrite(window.text(), "", slug, prefix), False, window.seq0
+            return self._rewrite(window.text(), "", slug, prefix), False, window.first_out
         if raw is not None and now - raw[0] <= self._fresh_age:
             return self._rewrite(raw[1], raw[2], slug, prefix), False, raw[3]
 
@@ -1457,7 +1541,7 @@ class Relay:
         if window is not None and window.segs:
             if now - window.at > _STALE_MAX:
                 return None
-            return self._rewrite(window.text(), "", slug, prefix), stale, window.seq0
+            return self._rewrite(window.text(), "", slug, prefix), stale, window.first_out
         if raw is not None:
             if now - raw[0] > _STALE_MAX:
                 return None
@@ -1504,7 +1588,7 @@ class Relay:
                 return
             self._stuck_note[slug] = now
         last_seq = window.seq0 + len(window.segs) - 1
-        self._note(f"{slug} 的清单停在分片 {last_seq}，已经 {int(idle)} 秒没往前滚")
+        self._event(slug, f"清单停在分片 {last_seq}，{int(idle)} 秒没往前滚", gap=30.0)
 
     # ---------------- 后台预取 ----------------
     def _ensure_ticker(self) -> None:
@@ -1610,6 +1694,24 @@ class Relay:
             except Exception:  # noqa: BLE001 - 记日志不能反过来搞崩播放
                 pass
 
+    def _event(self, slug: str, message: str, gap: float = 10.0) -> None:
+        """记一条诊断事件：进「最近事件」环形缓冲，同时写到运行日志。
+
+        只放**真的需要人看**的事（取不到清单、窗口冻住、换线路），不要放每次
+        取票成功这种噪声——四十条的位置很快就被淹掉了。
+
+        ``gap`` 秒内同一个台的同一条消息只记一次：403 是每十秒一次的正常开销，
+        不限流的话四十条缓冲三分钟就被它冲干净，反而看不到真正的问题。
+        """
+        now = time.time()
+        with self._lock:
+            if self._events:
+                at, last_slug, last_msg = self._events[-1]
+                if last_slug == slug and last_msg == message and now - at < gap:
+                    return
+            self._events.append((now, slug, message))
+        self._note(f"[{slug}] {message}")
+
     def _fetch_raw(
         self, slug: str, *, fresh: bool = False, rotate: bool = False
     ) -> tuple[str, str]:
@@ -1641,6 +1743,9 @@ class Relay:
             status, _, body, final = self._fetch(url, ua)
         if status != 200 or not body:
             self._mark_failed(slug, f"上游返回 {status}")
+            # 这一条是「播不出来」的直接证据：面板上看到它密集出现，就是出口
+            # 真的在被拒；只有零星几条则属于正常换票开销。
+            self._event(slug, f"取清单失败：上游返回 {status}")
             raise RelayError(f"上游返回 {status}，取不到播放清单")
 
         text = body.decode("utf-8", "replace")

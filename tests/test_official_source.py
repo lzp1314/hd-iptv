@@ -102,8 +102,10 @@ class WindowSessionTest(unittest.TestCase):
         text = window.text()
         self.assertIn("SESS-B", text)
         self.assertNotIn("seg-57524.ts\n", text)
-        # 序号和片数不能被这次替换搞乱
-        self.assertIn("#EXT-X-MEDIA-SEQUENCE:57524", text)
+        # 序号和片数不能被这次替换搞乱。序号是**对外序号**（自己维护、只增不减），
+        # 不是上游那一串；替换同一片时它必须原地不动。
+        self.assertIn(f"#EXT-X-MEDIA-SEQUENCE:{window.first_out}", text)
+        self.assertEqual(window.first_out, 1, "替换同一片不该推进对外序号")
         self.assertEqual(text.count("#EXTINF"), 2)
 
 

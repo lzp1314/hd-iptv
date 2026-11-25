@@ -23,6 +23,7 @@ from iptvhd.relay import (
     _BLACKOUT_COOLDOWN,
     _RETRY_DELAYS,
     _TICKET_BUDGET,
+    _TICKET_REUSE,
     _WINDOW_SEGMENTS,
 )
 
@@ -78,22 +79,34 @@ class WindowCapTest(unittest.TestCase):
         )
 
     def test_media_sequence_matches_first_segment(self):
-        """拼出来的窗口里，MEDIA-SEQUENCE 必须等于第一片的真实序号。
+        """下发的 MEDIA-SEQUENCE 必须与清单内容对应，且**只增不减**。
 
-        对不上时播放器按序号算地址，取到的就是隔壁那一片——表现是花屏、卡顿，
-        或者干脆 404。
+        上游序号会因为换 CDN 域名而回退 1~2 片（实测）。如果照着下发，播放器
+        会认为这份清单比手里的旧，直接丢在一边并卡在 buffering——ExoPlayer
+        #2872 的结论是「永不恢复」，正是「卡住不动」那个现象。
         """
         bodies = [_playlist(seq) for seq in range(100, 112)]
         relay, _ = _relay(bodies)
-        first_seq = 100
-        for i, body in enumerate(bodies):
+        seen = []
+        for body in bodies:
             relay._absorb("cctv1", body.decode(), "https://cdn.example.com/live/")
-        window = relay._windows["cctv1"]
-        text = window.text()
-        self.assertIn(f"#EXT-X-MEDIA-SEQUENCE:{window.seq0}", text)
-        # 窗口首片应该就是 seq0 那一支
-        self.assertIn(f"seg/{window.seq0}.ts", text.splitlines()[0] if False else text)
-        self.assertGreaterEqual(window.seq0, first_seq)
+            window = relay._windows["cctv1"]
+            text = window.text()
+            seq = window.first_out
+            self.assertIn(f"#EXT-X-MEDIA-SEQUENCE:{seq}", text)
+            seen.append(seq)
+        self.assertEqual(seen, sorted(seen), "对外序号不能回退")
+
+    def test_sequence_regression_does_not_rewind_output(self):
+        """上游序号回退（换了 CDN 域名）时，对外序号必须原地不动，不能跟着退。"""
+        relay, _ = _relay([_playlist(100), _playlist(99)])
+        base = "https://cdn.example.com/live/"
+        relay._absorb("cctv1", _playlist(100).decode(), base)
+        before = relay._windows["cctv1"].first_out
+        relay._absorb("cctv1", _playlist(99).decode(), base)
+        self.assertGreaterEqual(
+            relay._windows["cctv1"].first_out, before, "序号倒退会让播放器卡在 buffering"
+        )
 
     def test_targetduration_recomputed_and_range_tag_dropped(self):
         """TARGETDURATION 按窗口里实际的片长重算，上游的留存范围标签不带出去。"""
@@ -356,6 +369,72 @@ class PlaylistContractTest(unittest.TestCase):
         relay, _ = _relay(_playlist(100))
         text = relay.playlist("cctv1")
         self.assertNotIn("#EXT-X-START", text)
+
+
+class TicketReuseTest(unittest.TestCase):
+    """央视频的票据只能用 2 次，第 3 次必 403。
+
+    所以要在**用满之前**主动换票，而不是抱着同一张一直用、等它被拒。只按
+    ``addr_ttl``（300 秒）复用的话，后台每 5 秒取一次清单，第 10 秒就必然撞
+    403，撞完还要退避 1~5 秒，几次叠加就是 20~30 秒断档——窗口总共就 30 秒
+    内容，正好被耗干，于是「播一分多钟卡住、不自恢复」。
+    """
+
+    def _relay_with(self, host):
+        calls = []
+
+        def resolver(slug):
+            calls.append(slug)
+            return f"https://{host}/live/index.m3u8?t={len(calls)}", "qqlive"
+
+        return Relay(resolver, warm=False), calls
+
+    def test_ysp_ticket_rotates_after_two_uses(self):
+        relay, calls = self._relay_with("live-dtocnc-cdn.ysp.cctv.cn")
+        relay.upstream("cctv1")   # 冷启动，向接口要第一张票
+        relay.upstream("cctv1")   # 第二次，复用同一张
+        relay.upstream("cctv1")   # 已经用满 2 次：主动换票，不等它 403
+        self.assertEqual(len(calls), 2, "第 3 次必须换票，否则这里就是一次 403")
+
+    def test_other_hosts_keep_reusing(self):
+        """运营商源的一张票能拉很多次，不能跟着央视频的节奏换，那会烧光换票预算。"""
+        relay, calls = self._relay_with("cdn.example.com")
+        for _ in range(5):
+            relay.upstream("cctv1")
+        self.assertEqual(len(calls), 1)
+
+    def test_no_403_when_tickets_rotate(self):
+        """按「用满 2 次就换」跑 20 轮，一次 403 都不该撞上。
+
+        假的 CDN 严格复现实测规则：同一个地址第 1、2 次 200，第 3 次起 403。
+        改之前（只按 300 秒 TTL 复用）这里会稳定撞出一串 403，每次还要退避
+        1~5 秒——那正是 20~30 秒断档的来源。
+        """
+        counter = {"n": 0}
+        seen = {}
+
+        def resolver(slug):
+            counter["n"] += 1
+            return f"https://live-dtocnc-cdn.ysp.cctv.cn/live/index.m3u8?t={counter['n']}", "qqlive"
+
+        relay = Relay(resolver, warm=False)
+        fetch = _Fetch(_playlist(100))
+        relay._fetch = fetch
+
+        def fake_fetch(url, ua, *, timeout=None):
+            n = seen[url] = seen.get(url, 0) + 1
+            if n > _TICKET_REUSE:
+                return 403, {}, b"", url
+            return fetch(url, ua, timeout=timeout)
+
+        relay._fetch = fake_fetch
+        # 取票预算（burst 10）在这里不补，跑 8 轮足够覆盖「同一张票被复用 2 次」
+        # 和「用满就换」两个分支，又不至于被预算拦住。
+        for _ in range(8):
+            relay._prefetch("cctv1")
+
+        self.assertEqual(relay.failures, 0, "主动换票之后不该再撞 403")
+        self.assertEqual(relay.stale_served, 0, "清单一直在推进，不需要拿旧清单顶")
 
 
 if __name__ == "__main__":
