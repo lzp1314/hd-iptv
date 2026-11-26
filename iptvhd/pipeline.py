@@ -126,6 +126,13 @@ def load_sources(settings: Settings, log: Logger | None = None) -> list[dict]:
             if not p.is_absolute():
                 item["path"] = str(settings.root / p)
 
+    # 用户自定义源（面板「自定义源」里填的）。单独存 config/custom_sources.json：
+    # 重写 sources.toml 会把用户手写的注释和顺序全冲掉，那是他自己的文件，
+    # 不该由程序改写。关掉的那几条照样注入（enabled=False），面板才能列出来重开。
+    from . import custom as custom_store
+
+    sources.extend(custom_store.as_source_dicts(custom_store.load(settings)))
+
     # 面板关掉的模块就地标成 disabled：build_collectors 会跳过它，不采集；
     # 列表仍保留这条（只是 enabled=False），面板才能列出并让用户重新打开。
     for item in sources:
@@ -439,6 +446,12 @@ def _filter(streams: list[Stream], settings: Settings) -> list[Stream]:
             # 运营商源仍然排在它前面。
             kept.append(s)
             continue
+        if s.custom:
+            # 自定义源（rtp2http / 本地列表）没有多档画质可选，也报不出分辨率：
+            # 裸流能下到字节就说明能用，套 720P 门槛会把整组台全筛掉。
+            # 「不可用」在探测阶段已经挡过了（ok=False 在上面）。
+            kept.append(s)
+            continue
         if s.height:
             if s.height < min_h:
                 continue
@@ -490,6 +503,11 @@ def _drop_shared_endpoints(streams: list[Stream], log: Logger) -> int:
     """
     endpoints: dict[str, set[str]] = {}
     for s in streams:
+        if s.custom:
+            # 自定义源的地址形态不受我们控制（rtp2http 的 /udp/<组播>、?ch=N 都有），
+            # 「一址多台」在这类源上可能只是把组播参数放在 query 里。用户自己加的
+            # 源，误杀比放过更让人难受。
+            continue
         if s.final_url:
             endpoints.setdefault(_endpoint(s.final_url), set()).add(s.channel)
 
@@ -499,6 +517,8 @@ def _drop_shared_endpoints(streams: list[Stream], log: Logger) -> int:
 
     dropped = 0
     for s in streams:
+        if s.custom:
+            continue
         if s.final_url and _endpoint(s.final_url) in bad:
             s.ok = False
             s.error = "同一个地址被多个台共用（广告/占位源）"
@@ -609,6 +629,10 @@ def _route_through_relay(streams: list[Stream]) -> tuple[int, int]:
         if s.slug or not s.url:
             # 已经有 slug（央视频那类只有频道名、播放时现换票），或者根本没地址
             continue
+        if s.direct:
+            # 裸 TS（rtp2http 那类）：本机转发层只认 m3u8，包成 /live/xxx.m3u8
+            # 就是 100% 打不开，只能原地址下发让播放器直连。
+            continue
         if s.trusted or needs_relay(s.final_url or s.url):
             s.slug = static_slug(s.url)
             official += 1
@@ -652,6 +676,8 @@ def _rows_to_channels(rows: list[dict]) -> list[Channel]:
                     source=str(item.get("source") or ""),
                     stale=bool(item.get("stale")),
                     note=str(item.get("note") or ""),
+                    custom=bool(item.get("custom")),
+                    direct=bool(item.get("direct")),
                 )
             )
         name = str(row.get("name") or "")

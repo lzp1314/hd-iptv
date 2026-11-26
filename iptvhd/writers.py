@@ -263,6 +263,10 @@ def write_json(channels: list[Channel], path: Path, report: RunReport | None = N
                         # 本轮上游没响应、沿用上一轮条目：中转层播放时会重新换地址
                         "stale": s.stale,
                         "note": s.note,
+                        # 自定义源的两个标记必须落盘：增量更新时别的模块条目会从
+                        # 这里还原再回写，丢了 direct 就会被包成 /live/ 而打不开
+                        "custom": s.custom,
+                        "direct": s.direct,
                     }
                     for s in ch.streams
                 ],

@@ -149,6 +149,9 @@ def _channels_from_result(result: dict) -> list[Channel]:
                     width=int(item.get("width") or 0),
                     # 编码要带上：面板据此避开 H.265（浏览器解不了）
                     codec=str(item.get("codec") or ""),
+                    # 自定义源：直连标记决定 _play_url 用原地址还是 /live/<slug>
+                    custom=bool(item.get("custom")),
+                    direct=bool(item.get("direct")),
                 )
             )
         name = str(row.get("name") or "")
@@ -1373,6 +1376,16 @@ def make_handler(state: State):
                 )
             elif path == "/api/settings":
                 self._json({"settings": state.current_settings(load_result(settings) or {}), "epg": state.epg.stats()})
+            elif path == "/api/custom_sources":
+                from . import custom as custom_store
+
+                items = custom_store.load(settings)
+                self._json({
+                    "sources": [x.to_dict() for x in items],
+                    "modes": [{"value": k, "label": v} for k, v in custom_store.MODE_LABELS.items()],
+                    "path": str(custom_store.store_path(settings)),
+                    "max": custom_store.MAX_SOURCES,
+                })
             elif path == "/api/region/options":
                 from .region import ISP_NAMES, PROVINCES
 
@@ -1508,6 +1521,42 @@ def make_handler(state: State):
                 }
                 state.log(f"[设置] 已更新 {', '.join(f'{k}={v}' for k, v in shown.items())}")
                 self._json({"ok": True, "settings": updated})
+            elif path == "/api/custom_sources":
+                values = self._body()
+                if values is None:
+                    return
+                from . import custom as custom_store
+
+                try:
+                    items = custom_store.parse_payload(values)
+                    custom_store.save(settings, items)
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                names = "、".join(x.name for x in items) or "（空）"
+                state.log(f"[自定义源] 已保存 {len(items)} 条：{names}")
+                self._json({"ok": True, "sources": [x.to_dict() for x in items]})
+            elif path == "/api/custom_sources/test":
+                values = self._body()
+                if values is None:
+                    return
+                url = str(values.get("url") or "").strip()
+                if not url.lower().startswith(("http://", "https://")):
+                    self._json({"ok": False, "error": "请填 http:// 或 https:// 开头的地址"}, 400)
+                    return
+                from . import custom as custom_store
+                from .net import HttpClient
+
+                client = HttpClient(
+                    user_agent=str(values.get("ua") or "").strip() or settings.user_agent,
+                    timeout=8, retries=1, ip_mode="auto",
+                )
+                result = custom_store.classify(
+                    client, url,
+                    ua=str(values.get("ua") or "").strip(),
+                    mode=str(values.get("mode") or "auto"),
+                )
+                self._json(result)
             elif path == "/api/region/probe":
                 values = self._body()
                 if values is None:

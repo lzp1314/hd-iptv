@@ -285,8 +285,68 @@ class WebpageCollector(Collector):
         return self._tag(streams)
 
 
+class CustomCollector(Collector):
+    """用户自定义源：本地列表、rtp2http、任意订阅地址。
+
+    三种填法都能吃：给一个列表地址（M3U / TXT，程序自己识别）、给一条裸流
+    地址（rtp2http 的 ``/udp/239.x.x.x:port``）、或者逐行手填「名称,地址」。
+
+    **判定落在每条流上**：一个 ``/playlist.m3u`` 里可能整份都是裸 TS，也可能
+    混着 HLS。按整个源判会判错，所以这里只负责采到流，走直连还是走本机转发
+    由 ``custom.apply_mode`` 逐条打标。
+    """
+
+    kind = "custom"
+
+    def collect(self, client: HttpClient) -> list[Stream]:
+        from . import custom
+
+        mode = custom.coerce_mode(self.config.get("mode"))
+        ua = str(self.config.get("ua") or "").strip()
+        headers = {"User-Agent": ua} if ua else None
+        lines = str(self.config.get("lines") or "").strip()
+        url = str(self.config.get("url") or "").strip()
+
+        if lines:
+            streams = parse_list(lines)
+            if not streams:
+                raise RuntimeError("逐行内容里没有可识别的「频道名,地址」")
+            return custom.apply_mode(self._tag(streams), mode, self.name, ua)
+
+        if not url:
+            return []
+
+        try:
+            resp = client.get(url, headers=headers, limit=262144)
+        except Exception as exc:  # noqa: BLE001 - 采集失败要能报人话
+            raise RuntimeError(f"取不到内容：{type(exc).__name__}: {exc}") from exc
+        if not resp.body:
+            raise RuntimeError(f"取不到内容：{resp.error or f'HTTP {resp.status}'}")
+
+        base = resp.url or url
+        head = resp.body[:64].lstrip()
+        if head.startswith(b"#EXTM3U"):
+            streams = parse_m3u(resp.text)
+        elif resp.body[:1] == b"\x47":
+            # MPEG-TS 同步字节：这就是一路裸流，别拿去当文本列表解析
+            streams = []
+        else:
+            streams = parse_txt(resp.text)
+
+        if not streams:
+            # 不是列表 → 整条地址就是一路流。名字用源名兜底，播放器里至少不是空标题。
+            streams = [Stream(url=base, raw_name=self.name)]
+
+        for s in streams:
+            # 清单里可能写相对路径（rtp2http 的 /playlist.m3u 就常见），补全才能播
+            if s.url and not s.url.lower().startswith(("http://", "https://", "rtmp://", "rtsp://")):
+                s.url = urljoin(base, s.url)
+        return custom.apply_mode(self._tag(streams), mode, self.name, ua)
+
+
 _REGISTRY = {
     SubscriptionCollector.kind: SubscriptionCollector,
+    CustomCollector.kind: CustomCollector,
     LocalCollector.kind: LocalCollector,
     ApiCollector.kind: ApiCollector,
     WebpageCollector.kind: WebpageCollector,

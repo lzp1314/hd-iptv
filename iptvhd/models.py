@@ -101,6 +101,8 @@ class Stream:
     note: str = ""              # 补充说明，不参与过滤
     trusted: bool = False       # 运营商官方源：串行慢探，别跟聚合源一起并发打
     final_url: str = ""         # 探测时跟随跳转后的最终地址，用来抓「多个台同流」的广告农场
+    custom: bool = False        # 用户自定义源：不套画质/速率门槛（本地源没有多档可选）
+    direct: bool = False        # 播放器直连上游：不加 slug，原地址写进列表
 
     # ---- 探测结果 ----
     ok: bool = False

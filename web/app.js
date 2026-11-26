@@ -1412,6 +1412,229 @@ function playerErrorText(data) {
   return detail || data.type || "未知错误";
 }
 
+// ---------------- 自定义源 ----------------
+// 源名就是订阅里的分组名。裸流（rtp2http 那类）原样下发、播放器直连，
+// 所以面板只标「直连 / 转发」，不给「播放方式」做 CDN 那种二选——本地源前面没有 CDN。
+let customSources = [];
+let customModes = [];
+let editingCustomId = "";
+
+function customNote(text, error = false) {
+  const el = $("customStatus");
+  if (!el) return;
+  el.hidden = !text;
+  el.textContent = text || "";
+  el.style.color = error ? "#c0392b" : "";
+}
+
+function fillCustomModes() {
+  const sel = $("customMode");
+  if (!sel || sel.dataset.filled === "1") return;
+  sel.innerHTML = "";
+  const modes = customModes.length ? customModes : [{ value: "auto", label: "自动识别" }];
+  modes.forEach((m) => {
+    const opt = document.createElement("option");
+    opt.value = m.value;
+    opt.textContent = m.label;
+    sel.appendChild(opt);
+  });
+  sel.dataset.filled = "1";
+}
+
+async function loadCustomSources() {
+  try {
+    const r = await fetch("api/custom_sources", { cache: "no-store" });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    customSources = Array.isArray(d.sources) ? d.sources : [];
+    customModes = Array.isArray(d.modes) ? d.modes : [];
+    fillCustomModes();
+    renderCustomSources();
+  } catch (e) {
+    customNote(`读取自定义源失败：${e.message}`, true);
+  }
+}
+
+function renderCustomSources() {
+  const box = $("customList");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!customSources.length) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "还没有自定义源。填一条地址点「添加」，更新一轮后订阅里就会多一个分组。";
+    box.appendChild(empty);
+    return;
+  }
+
+  customSources.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "module-row";
+
+    const main = document.createElement("div");
+    main.className = "custom-row-main";
+    const name = document.createElement("span");
+    name.className = "custom-row-name";
+    name.textContent = item.name;
+    const meta = document.createElement("span");
+    meta.className = "custom-row-meta";
+    const modeLabel = (customModes.find((m) => m.value === item.mode) || {}).label || "自动识别";
+    const lines = String(item.lines || "");
+    const where = lines ? `逐行 ${lines.split("\n").length} 条` : (item.url || "（没填地址）");
+    meta.textContent = `${modeLabel} · ${where}`;
+    main.append(name, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "custom-row-actions";
+
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.checked = item.enabled !== false;
+    toggle.title = "关掉后这个分组不再出现在订阅里";
+    toggle.addEventListener("change", () => {
+      const next = customSources.map((x) => (x.id === item.id ? { ...x, enabled: toggle.checked } : x));
+      saveCustomSources(next, `已${toggle.checked ? "启用" : "停用"}「${item.name}」`);
+    });
+
+    const edit = document.createElement("button");
+    edit.className = "btn";
+    edit.type = "button";
+    edit.textContent = "编辑";
+    edit.addEventListener("click", () => startEditCustom(item));
+
+    const del = document.createElement("button");
+    del.className = "btn";
+    del.type = "button";
+    del.textContent = "删除";
+    del.addEventListener("click", () => {
+      if (!window.confirm(`删除「${item.name}」？订阅里这个分组会消失。`)) return;
+      saveCustomSources(customSources.filter((x) => x.id !== item.id), `已删除「${item.name}」`);
+    });
+
+    actions.append(toggle, edit, del);
+    row.append(main, actions);
+    box.appendChild(row);
+  });
+}
+
+async function saveCustomSources(list, okText) {
+  try {
+    const r = await fetch("api/custom_sources", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sources: list }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    customSources = Array.isArray(d.sources) ? d.sources : list;
+    renderCustomSources();
+    customNote(`${okText || "已保存"}。点一次「立即更新源」，订阅里才会出现新分组。`);
+  } catch (e) {
+    customNote(`保存失败：${e.message}`, true);
+  }
+}
+
+function startEditCustom(item) {
+  editingCustomId = item.id;
+  $("customName").value = item.name || "";
+  $("customUrl").value = item.url || "";
+  $("customMode").value = item.mode || "auto";
+  $("customUa").value = item.ua || "";
+  $("customLines").value = item.lines || "";
+  $("btnCustomAdd").textContent = "保存修改";
+  $("btnCustomCancel").hidden = false;
+  customNote(`正在编辑「${item.name}」，改完点「保存修改」`);
+}
+
+function resetCustomForm(keepNote = false) {
+  editingCustomId = "";
+  ["customName", "customUrl", "customUa", "customLines"].forEach((id) => {
+    if ($(id)) $(id).value = "";
+  });
+  if ($("customMode")) $("customMode").value = "auto";
+  $("btnCustomAdd").textContent = "添加";
+  $("btnCustomCancel").hidden = true;
+  // 保存成功后的提示要留着给用户看，所以只有「取消」才清空
+  if (!keepNote) customNote("");
+}
+
+async function submitCustom() {
+  const name = $("customName").value.trim();
+  const url = $("customUrl").value.trim();
+  const lines = $("customLines").value.trim();
+  if (!name) {
+    customNote("先给这个源起个名字——它会成为订阅里的分组名", true);
+    return;
+  }
+  if (!url && !lines) {
+    customNote("地址和逐行内容至少填一个", true);
+    return;
+  }
+  const payload = {
+    name,
+    url,
+    lines,
+    mode: $("customMode").value,
+    ua: $("customUa").value.trim(),
+    enabled: true,
+  };
+  if (editingCustomId) {
+    if (customSources.some((x) => x.id !== editingCustomId && x.name === name)) {
+      customNote(`已经有一个叫「${name}」的源了，换个名字`, true);
+      return;
+    }
+    const list = customSources.map((x) => (x.id === editingCustomId ? { ...x, ...payload } : x));
+    await saveCustomSources(list, `已保存「${name}」`);
+    resetCustomForm(true);
+    return;
+  }
+  if (customSources.some((x) => x.name === name)) {
+    customNote(`已经有一个叫「${name}」的源了，换个名字，或者点它的「编辑」`, true);
+    return;
+  }
+  await saveCustomSources(customSources.concat([payload]), `已添加「${name}」`);
+  resetCustomForm(true);
+}
+
+async function testCustom() {
+  const url = $("customUrl").value.trim();
+  if (!url) {
+    customNote("先填一个列表 / 流地址再测试（逐行手填的不发请求，直接添加即可）", true);
+    return;
+  }
+  const btn = $("btnCustomTest");
+  btn.disabled = true;
+  customNote("正在取这个地址…");
+  try {
+    const r = await fetch("api/custom_sources/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url,
+        ua: $("customUa").value.trim(),
+        mode: $("customMode").value,
+      }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "取不到内容");
+    if (d.kind === "playlist") {
+      const sample = (d.sample || []).join("、");
+      customNote(
+        `能取到：${d.channels} 个台（直连 ${d.direct} 条，经 NAS 转发 ${d.relay} 条）`
+        + (sample ? `；例如：${sample}` : "")
+      );
+    } else if (d.kind === "raw") {
+      customNote("能取到：这是一条裸流（TS）。会原样写进订阅、由播放器直连，电视端能播，网页预览播不了。");
+    } else {
+      customNote("能取到内容，但看不出是列表还是裸流。先按「自动识别」添加，播不了再改成「强制直连」。");
+    }
+  } catch (e) {
+    customNote(`测试失败：${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function refresh() {
   await loadStatus();
   await loadChannels();
@@ -1445,6 +1668,16 @@ document.addEventListener("DOMContentLoaded", () => {
   if ($("btnIpModeSave")) $("btnIpModeSave").addEventListener("click", () => saveSettings("btnIpModeSave", "ipModeNote"));
   if ($("btnYspSave")) $("btnYspSave").addEventListener("click", () => saveSettings("btnYspSave", "yspNote"));
   if ($("btnModuleSave")) $("btnModuleSave").addEventListener("click", () => saveSettings("btnModuleSave", "moduleNote"));
+  if ($("btnCustomAdd")) $("btnCustomAdd").addEventListener("click", submitCustom);
+  if ($("btnCustomTest")) $("btnCustomTest").addEventListener("click", testCustom);
+  if ($("btnCustomCancel")) $("btnCustomCancel").addEventListener("click", () => resetCustomForm());
+  if ($("customSourcesBox")) {
+    // 展开时才去拉：既不拖慢首屏，也不让"别人刚改过的"显示成旧的
+    $("customSourcesBox").addEventListener("toggle", () => {
+      if ($("customSourcesBox").open) loadCustomSources();
+    });
+  }
+  loadCustomSources();
   // 模块开关是动态渲染的，用事件委托标脏，避免被轮询覆盖
   if ($("moduleList")) $("moduleList").addEventListener("change", () => { settingsDirty = true; });
   // 内置模块卡片：点「配置 ›」打开该模块的独立弹窗；开关变化标脏。

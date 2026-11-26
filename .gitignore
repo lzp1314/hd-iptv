@@ -25,6 +25,9 @@ config/local/
 # 面板设置（本机运行期参数，不入库）
 config/panel.json
 
+# 面板里自己加的自定义源（含内网地址，不入库）
+config/custom_sources.json
+
 # 本机自用配置（host 网络 + 私有路径），不进仓库
 docker-compose.feishu.yml
 

@@ -471,6 +471,32 @@ code {
 .more-sources > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
 .more-sources > summary .hint { font-weight: 400; }
 .more-sources .module-list { margin-top: 12px; }
+
+/* 自定义源：一行一条（名称 + 地址 + 操作），沿用两列网格会挤成一团 */
+.custom-sources { margin-top: 12px; }
+.custom-list { grid-template-columns: 1fr; }
+.custom-list .module-row { cursor: default; align-items: flex-start; }
+.custom-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.custom-row-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.custom-row-meta {
+  font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.custom-row-actions { display: flex; gap: 6px; flex: none; }
+.custom-actions { display: flex; gap: 8px; margin-top: 10px; }
+.custom-add { margin-top: 10px; }
+.form .wide { grid-column: 1 / -1; }
+.form textarea {
+  width: 100%; min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: 13px/1.5 inherit;
+  color: var(--text);
+  background: #fbfcfd;
+  resize: vertical;
+}
+.form textarea:focus { outline: none; border-color: var(--accent); background: #fff; }
 .module-config {
   margin-top: 14px; padding: 14px;
   border: 1px solid var(--line); border-radius: 10px;

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import tempfile
 import threading
@@ -245,6 +246,99 @@ enabled = true
             settings = load_settings(root)
             report = run_update(settings, log=lambda _m: None)
             self.assertEqual(report.published, 1)
+
+
+class TestCustomSourceEndToEnd(unittest.TestCase):
+    """自定义源跑完整管线：rtp2http 那种裸流必须原样下发，不能被包成 /live/。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.fixture = _FixtureServer()
+        base = cls.fixture.base
+        cls.fixture.routes.update(
+            {
+                # 典型的 rtp2http 列表：每条都是裸 TS，第二条还是相对路径
+                "/local/list.m3u": (
+                    (
+                        "#EXTM3U\n"
+                        "#EXTINF:-1,本地新闻\n"
+                        f"{base}/udp/239.1.1.1:1234\n"
+                        "#EXTINF:-1,本地体育\n"
+                        "/udp/239.1.1.2:1234\n"
+                    ).encode(),
+                    "audio/x-mpegurl",
+                ),
+                "/udp/239.1.1.1:1234": (b"\x47" * 300_000, "video/mp2t"),
+                "/udp/239.1.1.2:1234": (b"\x47" * 300_000, "video/mp2t"),
+            }
+        )
+        cls.fixture.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.fixture.stop()
+
+    def test_raw_streams_stay_direct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir(parents=True, exist_ok=True)
+            (root / "config" / "config.toml").write_text(
+                """
+[app]
+data_dir = "output"
+
+[update]
+interval_hours = 0
+run_on_start = false
+
+[fetch]
+timeout = 5
+retries = 1
+
+[probe]
+enabled = true
+concurrency = 2
+sample_bytes = 262144
+min_speed_mbps = 0.01
+min_height = 720
+max_per_channel = 3
+""",
+                encoding="utf-8",
+            )
+            (root / "config" / "channels.txt").write_text(
+                "本地,#genre#\n本地新闻\n本地体育\n", encoding="utf-8"
+            )
+            (root / "config" / "sources.toml").write_text("# 只用自定义源\n", encoding="utf-8")
+            (root / "config" / "custom_sources.json").write_text(
+                json.dumps({
+                    "version": 1,
+                    "sources": [{
+                        "id": "t1",
+                        "name": "本地组播",
+                        "url": f"{self.fixture.base}/local/list.m3u",
+                        "mode": "auto",
+                        "enabled": True,
+                    }],
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(root)
+            report = run_update(settings, log=lambda _m: None)
+            # 画质门槛 720：裸流报不出分辨率，靠 custom 豁免才留得下来
+            self.assertEqual(report.published, 2)
+
+            m3u = (root / "output" / "result.m3u").read_text(encoding="utf-8")
+            self.assertIn('group-title="本地组播"', m3u)
+            self.assertIn("本地新闻", m3u)
+            # 裸流必须写原地址：包成 /live/xxx.m3u8 转发层只认 m3u8，必挂
+            self.assertIn(f"{self.fixture.base}/udp/239.1.1.1:1234", m3u)
+            self.assertNotIn("/live/", m3u)
+            # 相对路径要按列表地址补全，否则播放器拿到的是一条没法解析的路径
+            self.assertIn(f"{self.fixture.base}/udp/239.1.1.2:1234", m3u)
+
+            txt = (root / "output" / "result.txt").read_text(encoding="utf-8")
+            self.assertIn("本地组播,#genre#", txt)
 
 
 if __name__ == "__main__":

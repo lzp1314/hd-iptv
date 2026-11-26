@@ -151,6 +151,43 @@
           <summary>更多源 <span class="hint">（sources.toml 里的其它条目，各自独立开关）</span></summary>
           <div id="moduleList" class="module-list"></div>
         </details>
+        <details class="more-sources" id="customSourcesBox">
+          <summary>自定义源 <span class="hint">（rtp2http / 自建源，自己填地址；源名就是订阅里的分组名）</span></summary>
+          <div class="custom-sources">
+            <p class="hint">
+              三种都能填：<b>列表地址</b>（M3U / TXT，程序自己识别）、<b>一条裸流地址</b>
+              （rtp2http 的 <code>/udp/239.x.x.x:端口</code>）、或<b>逐行「频道名,地址」</b>。
+              裸流会原样写进订阅、由播放器直连——电视端（观屿 / 自研播放器）能播，网页预览播不了，
+              这是播放器差异，不是配置错了。
+              能不能看到这些台取决于你填的地址：填 <code>192.168.</code> 开头就只有同一局域网的设备能看。
+            </p>
+            <div id="customList" class="module-list custom-list"></div>
+            <div class="form custom-add">
+              <label>源名（订阅里的分组名）
+                <input id="customName" maxlength="40" placeholder="本地组播">
+              </label>
+              <label>播放方式
+                <select id="customMode"></select>
+              </label>
+              <label>UA（可选，留空用默认）
+                <input id="customUa" placeholder="okhttp/3.12.0">
+              </label>
+              <label class="wide">列表 / 流地址
+                <input id="customUrl" placeholder="http://192.168.1.10:7080/playlist.m3u">
+              </label>
+              <label class="wide">或逐行手填「频道名,地址」（每行一条，和上面地址二选一）
+                <textarea id="customLines" rows="3"
+                          placeholder="CCTV1,http://192.168.1.10:7080/udp/239.1.1.1:1234"></textarea>
+              </label>
+            </div>
+            <div class="custom-actions">
+              <button id="btnCustomTest" class="btn" type="button">测试这个地址</button>
+              <button id="btnCustomAdd" class="btn primary" type="button">添加</button>
+              <button id="btnCustomCancel" class="btn" type="button" hidden>取消编辑</button>
+            </div>
+            <p class="hint result" id="customStatus" hidden></p>
+          </div>
+        </details>
         <p class="hint" id="moduleNote">
           模块把 sources.toml 里相关的源归到一组管理：官方直连已并入「运营商官方源」，
           聚合源三条并入「第三方聚合源」，央视频的两条接口并入「央视频」。
