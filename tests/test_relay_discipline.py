@@ -537,5 +537,49 @@ class TicketReuseTest(unittest.TestCase):
         self.assertEqual(relay.stale_served, 0, "清单一直在推进，不需要拿旧清单顶")
 
 
+class LocalDnsFailTest(unittest.TestCase):
+    """本机 DNS 失败不能算成「上游拒绝」。
+
+    请求一个字节都没发出去，却让面板说「上游拒绝过 1 次」，会把人引向
+    「等解封 / 换 IP」；真正该查的是 NAS 自己的 DNS。
+    """
+
+    @staticmethod
+    def _boom(slug):  # noqa: ANN001
+        raise RuntimeError("获取播放信息失败：域名解析失败")
+
+    def test_counted_separately_from_upstream(self):
+        relay, _ = _relay(_playlist(100), resolver=self._boom)
+        with self.assertRaises(RelayError):
+            relay.playlist("cctv1")
+        stats = relay.stats()
+        self.assertEqual(stats["failures"], 0, "上游一次都没被请求，不能记成上游拒绝")
+        self.assertEqual(stats["dns_failures"], 1)
+        self.assertIn("cctv1", stats["dns_errors"])
+        self.assertEqual(stats["errors"], {}, "上游错误列表里不该出现本机解析错误")
+
+    def test_does_not_set_cooldown(self):
+        relay, _ = _relay(_playlist(100), resolver=self._boom)
+        with self.assertRaises(RelayError):
+            relay.playlist("cctv1")
+        self.assertNotIn(
+            "cctv1", relay.stats()["cooling"],
+            "DNS 抖动不该把这个台挡几秒——用户点一次黑屏、再点还是同一句错",
+        )
+
+
+class DnsFailCacheTest(unittest.TestCase):
+    """失败缓存不能把一次抖动放大成分钟级故障。"""
+
+    def test_fail_cache_stays_short(self):
+        from iptvhd import net
+
+        self.assertLessEqual(
+            net._DNS_FAIL_TTL, 30.0,
+            "失败缓存过长 = 一次 DNS 抖动让这个域名几十秒到两分钟不可用",
+        )
+        self.assertEqual(net._DNS_TTL, 600.0, "成功缓存不该跟着缩短")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -254,6 +254,14 @@ async function loadStatus() {
           (proxy
             ? "当前是「经 NAS 转发」模式，分片也从本机走，被平台判成异常流量的概率高——建议把播放方式切回「直连」。"
             : "分片由播放器直连 CDN，不受影响；偶尔切台失败重试一次即可。");
+      } else if (relay.dns_failures > 0) {
+        // 本机解析失败和上游拒绝是两件事：请求一个字节都没发出去，
+        // 等解封、换 IP 都没有用，该查的是 NAS 自己的 DNS。
+        const detail = (relay.dns_errors && relay.dns_errors[0]) ? `（${relay.dns_errors[0]}）` : "";
+        banner.hidden = false;
+        banner.textContent =
+          `本机域名解析异常 ${relay.dns_failures} 次${detail}——这不是上游限流，请求还没发出去。` +
+          "通常是 NAS 的 DNS 或路由器解析抽风，15 秒内会自动重试；一直这样就把容器的 DNS 换成 223.5.5.5 或 119.29.29.29。";
       } else {
         banner.hidden = true;
       }

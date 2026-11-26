@@ -179,60 +179,9 @@ _DENY_SECONDS = 30.0
 #
 # 判断依据（实测）：出口 IPv4 对清单一律 403 的那段时间，同一个出口的
 # play_info 接口仍然 200 —— 说明清单 403 不是「整条出口被封」，不该触发冷却。
-# 所以清单 403 只用于本地的退避（见 resolve 里的 forbidden），不计入熔断。
+# 所以清单 403 只用于本地的退避，不触发出口熔断。
 _DENY_WEIGHT = {"api": 3, "manifest": 0}
 _DENY_POINTS = _DENY_STREAK * 3
-
-
-# ---- 出口轮换 ---------------------------------------------------------- #
-#
-# 上游按**出口 IP** 计限额。这台机器同时有 IPv4 和 IPv6，是两条独立的出口，
-# 所以轮流用它们换票，等于把单条 IP 的请求压力摊掉一半，撑得更久才被限。
-#
-# 前提是交替取到的清单能无缝衔接——实测（同一台、同一时刻）：
-#     IPv6 换票 → MEDIA-SEQUENCE=1793134241，片 4241/4242/4243
-#     IPv4 换票 → MEDIA-SEQUENCE=1793134242，片 4242/4243/4244
-# 同一套序号体系、同样的分片命名，只差两秒时间，播放器不会看到序号跳变。
-#
-# 某一族刚失败过就暂时跳过它（默认 3 分钟），避免每次换票都先白撞一次。
-_turn_lock = threading.Lock()
-_turn_next = "ipv6"
-_turn_bad: dict[str, float] = {}
-_TURN_TTL = 180.0
-
-
-def reset_turn() -> None:
-    """测试用：恢复轮换起点。"""
-    global _turn_next
-    with _turn_lock:
-        _turn_next = "ipv6"
-        _turn_bad.clear()
-
-
-def note_mode_bad(mode: str) -> None:
-    """记一次「这条出口这一轮不行」，轮换时先避开它。"""
-    if mode in ("ipv4", "ipv6"):
-        with _turn_lock:
-            _turn_bad[mode] = time.time()
-
-
-def next_mode(preferred: str = "auto") -> str:
-    """给这次换票挑一条出口。
-
-    面板显式锁了某一族就照办（那是用户自己的判断）；``auto`` 才轮换。
-    两族都在冷却期就交回 ``auto``，让底层按自己的家族记忆去挑。
-    """
-    global _turn_next
-    if preferred in ("ipv4", "ipv6"):
-        return preferred
-    now = time.time()
-    with _turn_lock:
-        for _ in range(2):
-            mode = _turn_next
-            _turn_next = "ipv4" if mode == "ipv6" else "ipv6"
-            if now - _turn_bad.get(mode, 0.0) > _TURN_TTL:
-                return mode
-    return "auto"
 
 
 def denied() -> bool:
@@ -570,11 +519,17 @@ def resolve(
     传 ``meta`` 字典可以把顺手读到的清单信息带出来（分片时长等），
     用来从分片大小推算真实码率，不必为它多发一次请求。
     """
+    # auto 一律交给底层自己挑（它有家族记忆和降级），**不再主动轮换两条出口**。
+    #
+    # 曾经试过「v6/v4 交替，把请求分摊到两个 IP」，理由是上游按 IP 计数。
+    # 现场实测推翻了这条理由：v4 看十几分钟被限、切 v6 又十几分钟被限，两条
+    # 都被记账 —— 上游不是纯按 IP 算配额（我们带固定 guid，很可能按设备指纹
+    # 或账号累计）。交替不但没减负，还把「一条被限、另一条还干净」这层容错
+    # 拆掉了，两条一起进惩罚期，恢复反而更慢。
+    #
+    # 所以回到「单族主用 + 清单 403 时换族重换票」（见 _round_mode）。换族只在
+    # 真被拒时发生，属于兜底，不是常态分配。
     base_mode = "ipv4" if force_ipv4 else ip_mode
-    if base_mode == "auto":
-        # auto 下轮换两条出口：两个 IP 各自计限额，轮流取等于把单条 IP 的压力
-        # 摊掉一半。序号体系一致（实测），切换不会让播放器重缓冲。
-        base_mode = next_mode("auto")
     shared = client or HttpClient(
         user_agent=UA, timeout=10, retries=2, force_ipv4=force_ipv4, ip_mode=base_mode
     )
@@ -607,7 +562,6 @@ def resolve(
             time.sleep(pause)
             continue
 
-        forbidden = 0
         for url in urls:
             pace()
             resp = use_client.get(
@@ -615,7 +569,6 @@ def resolve(
                 deadline=time.monotonic() + MANIFEST_TIMEOUT,
             )
             if resp.status in (403, 429):
-                forbidden += 1
                 note_denied("manifest")
             elif resp.status == 200:
                 note_ok()
@@ -647,10 +600,6 @@ def resolve(
                     meta["speed_mbps"] = probe.speed_mbps
                     meta["ttfb_ms"] = probe.ttfb_ms
             return url, info, first
-
-        # 这一轮所有候选地址都被拒 → 记下这条出口不行，下一轮换票时先避开它。
-        if urls and forbidden >= len(urls):
-            note_mode_bad(mode)
 
         if round_no + 1 < attempts:
             # 下一轮换的是**另一条出口链路上的另一个节点**，不是在原地继续敲

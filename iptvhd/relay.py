@@ -443,6 +443,16 @@ _RETRY_DELAYS_DEAD = (5.0, 15.0, 30.0, 60.0)
 _BLACKOUT_COOLDOWN = 180.0
 _BLACKOUT = "版权"
 
+
+def _is_local_dns(message: str) -> bool:
+    """这条错误是「本机解析不出来」还是「上游真的拒了」。
+
+    区别很重要：DNS 失败时请求一个字节都没发出去，既不该按上游失败退避，
+    也不该进面板那句「上游拒绝过 N 次」——那会让人往错的方向查（去等解封、
+    去换 IP，而真正该做的是看一眼 NAS 的 DNS）。
+    """
+    return "DNS" in message or "解析" in message
+
 # 换票预算：整台实例每分钟最多换这么多张票（只管「冷启动」和「403 换票重取」，
 # 抱着旧地址续播不计）。一个台正常播放每分钟只换 1~2 张；被拒时重取一次算一张。
 # 把六十多个公开频道扫一遍会在第 31 个被拦住——那正是把出口打进限流的典型动作。
@@ -1006,7 +1016,11 @@ class Relay:
         self._refreshing: set[str] = set()
         self._segments = _SegmentCache(cache_bytes, cache_ttl)
         self._notify = None                                   # 日志出口，由 service 接上
-        self.failures = 0                                     # 累计失败次数
+        self.failures = 0                                     # 累计失败次数（只算上游）
+        # 本机 DNS 解析失败：请求一个字节都没发出去，和「上游拒绝」是两件事。
+        # 以前混在 failures 里，面板会说「上游拒绝过 1 次（域名解析失败）」，
+        # 让人以为是上游在拒——实际是 NAS 的 DNS 或路由器抽风。
+        self.dns_failures = 0
         self.stale_served = 0                                 # 用旧清单兜住的次数
         # 面板上「出口退避」那一格的数字，跟着按台的退避一起动。
         # **只给面板看，不再参与调度**：以前它会让一个台被拒就停掉所有台的
@@ -1299,6 +1313,8 @@ class Relay:
             url, ua = self._call_resolver(slug, rotate)
         except Exception as exc:  # noqa: BLE001 - 解析失败要能兜住
             message = str(exc) or type(exc).__name__
+            # 本机 DNS 失败 ≠ 上游拒绝。分开放两个计数，面板才能分别说清楚。
+            local_dns = _is_local_dns(message)
             with self._lock:
                 # 域名解析失败是**本机**的事，一个字节都没发到上游去：不该按
                 # 「上游失败」冷却 20 秒。否则用户点一次黑屏，20 秒内再点还是
@@ -1309,7 +1325,7 @@ class Relay:
                 # 数字，`_next_try` 会真的把目标台挡住几秒——预热是「顺手提前
                 # 试一下」，不能让它的失败变成用户换台失败。
                 if not soft:
-                    if "DNS" not in message and "解析" not in message:
+                    if not local_dns:
                         self._failed[slug] = now
                         # 取票接口本身失败（不是分发到 CDN 之后 403）：4 秒内别反复敲。
                         # 比原来的 20 秒短得多。**DNS 解析失败不设退避**——那一个字节
@@ -1318,7 +1334,10 @@ class Relay:
                             self._next_try.get(slug, 0.0), now + min(self._retry_gap, 4.0)
                         )
                     self._errors[slug] = message
-                    self.failures += 1
+                    if local_dns:
+                        self.dns_failures += 1
+                    else:
+                        self.failures += 1
                 stale = self._cache.get(slug)
                 if _BLACKOUT in message:
                     # 版权停播要按节目冷却，而不是按「秒」重试。
@@ -1465,8 +1484,12 @@ class Relay:
             # 正在被观看、后台在替它预取的台
             "active": active,
             "segments": seg,
-            "errors": dict(self._errors),
+            "errors": {k: v for k, v in self._errors.items() if not _is_local_dns(v)},
+            # 本机 DNS 解析失败的台。单独列出，面板据此说「本机解析异常」，
+            # 而不是把它算进「上游拒绝」。
+            "dns_errors": {k: v for k, v in self._errors.items() if _is_local_dns(v)},
             "failures": self.failures,
+            "dns_failures": self.dns_failures,
             "stale_served": self.stale_served,
             # 出口预算用光的次数：说明播放器在批量扫台，不是故障
             "throttled": self.throttled,

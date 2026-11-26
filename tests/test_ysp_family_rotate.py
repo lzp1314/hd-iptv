@@ -22,37 +22,6 @@ def _manifest() -> bytes:
     return b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.000,\nseg1.ts\n"
 
 
-class TurnTest(unittest.TestCase):
-    """auto 模式下轮换两条出口，把请求分摊到两个 IP。"""
-
-    def setUp(self):
-        ysp.reset_turn()
-
-    def tearDown(self):
-        ysp.reset_turn()
-
-    def test_alternates_between_families(self):
-        seq = [ysp.next_mode("auto") for _ in range(4)]
-        self.assertEqual(seq, ["ipv6", "ipv4", "ipv6", "ipv4"])
-
-    def test_locked_family_is_respected(self):
-        self.assertEqual(ysp.next_mode("ipv4"), "ipv4")
-        self.assertEqual(ysp.next_mode("ipv6"), "ipv6")
-        # 锁定族不改动轮换指针
-        self.assertEqual(ysp.next_mode("auto"), "ipv6")
-
-    def test_bad_family_is_skipped(self):
-        ysp.note_mode_bad("ipv6")
-        seq = [ysp.next_mode("auto") for _ in range(3)]
-        self.assertNotIn("ipv6", seq, "刚失败过的出口应被暂时跳过")
-        self.assertEqual(seq[0], "ipv4")
-
-    def test_both_bad_falls_back_to_auto(self):
-        ysp.note_mode_bad("ipv6")
-        ysp.note_mode_bad("ipv4")
-        self.assertEqual(ysp.next_mode("auto"), "auto")
-
-
 class RoundModeTest(unittest.TestCase):
     """轮换顺序：本族先换两张票，再换族。"""
 

@@ -1347,11 +1347,13 @@ def make_handler(state: State):
                         "relay": {
                             "mode": relay_stats.get("mode", "direct"),
                             "failures": relay_stats["failures"],
+                            "dns_failures": relay_stats.get("dns_failures", 0),
                             "stale_served": relay_stats["stale_served"],
                             "throttled": relay_stats.get("throttled", 0),
                             "blocked_for": relay_stats.get("blocked_for", 0),
                             "plays": len(relay_stats["cached"]),
                             "errors": list(relay_stats["errors"].values())[:3],
+                            "dns_errors": list(relay_stats.get("dns_errors", {}).values())[:3],
                             "segments": relay_stats["segments"],
                         },
                         "endpoints": {
