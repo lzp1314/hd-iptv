@@ -118,18 +118,16 @@ class RelayTest(unittest.TestCase):
         self.assertNotIn("=", encode(url))  # 放进路径里不能带填充符
         self.assertEqual(decode("!!!not-base64!!!"), "")
 
-    def test_playlist_direct_by_default(self):
-        """默认 direct：清单里换成上游绝对地址，分片让播放器直连 CDN。
+    def test_playlist_relays_ysp_by_default(self):
+        """默认 direct 下，央视频分片仍经本机转发（见 test_ysp_plain.py）。
 
-        实测全代理时本机去拉分片会被平台回 403（每片一次裸请求，被判成异常
-        流量），只有清单经本机、分片直连才稳定——所以这是默认，不能随手改回去。
+        实测：播放器自己直连 CDN 会被立刻 403，而本机这一层有族记忆和 403 换族，
+        所以央视频是「清单和分片都经本机」，其它源仍是分片直连。
         """
         relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)})
         text = relay.playlist("cctv1")
-        # 默认还会把央视频分片降成 http（老旧电视盒子的 TLS 兼容，见
-        # tests/test_ysp_plain.py），所以这里只断言「域名+票据在、且没有 /relay/」。
-        self.assertIn("ysp.cctv.cn/TOKEN/index.m3u8", text)
-        self.assertNotIn("/relay/", text)
+        self.assertIn("/relay/cctv1/p/", text)
+        self.assertNotIn("ysp.cctv.cn", text)  # 播放器不该看到上游域名
         self.assertNotIn("\nindex.m3u8", text)  # 相对地址必须换成绝对地址
         self.assertEqual(relay.stats()["mode"], "direct")
 
@@ -176,9 +174,10 @@ class RelayTest(unittest.TestCase):
     def test_switch_mode_clears_cached_playlists(self):
         """切换播放方式要清掉已改写的清单，否则面板改了设置却不生效。"""
         relay = FakeRelay({"1.m3u8": (200, MASTER), "index.m3u8": (200, MEDIA)})
-        self.assertNotIn("/relay/", relay.playlist("cctv1"))
-        relay.configure(mode="proxy")
+        # 默认就是 /relay/（央视频强制转发）；切成 relay_ysp=False 才回到直连
         self.assertIn("/relay/", relay.playlist("cctv1"))
+        relay.configure(relay_ysp=False)
+        self.assertNotIn("/relay/", relay.playlist("cctv1"))
 
     def test_playlist_retries_once_on_403(self):
         # 非央视频的源：403 换一条线路确实可能绕开，保留这一次重试

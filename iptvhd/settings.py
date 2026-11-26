@@ -310,6 +310,8 @@ def coerce_panel(raw: dict) -> dict:
             out[key] = as_bool(value)
         elif key == "auto_switch":
             out[key] = as_bool(value)
+        elif key == "ysp_relay":
+            out[key] = as_bool(value)
         elif key == "ysp_plain":
             # 央视频分片直连时降成 http：老旧电视盒子的 TLS 栈握手不了，
             # 而 CDN 的 http / https 返回同一份字节。面板可随时关掉。
@@ -674,6 +676,34 @@ class Settings:
         if raw is not None and str(raw).strip():
             return as_bool(raw)
         return as_bool(self.get("ysp", "ipv4", False))
+
+    @property
+    def ysp_relay(self) -> bool:
+        """央视频分片是否经本机转发（默认**开**）。
+
+        2026-11-26 用户现场四端对比（手机自研播放器 / 观屿 TV / 电视自研播放器 /
+        观屿播放器，同一台设备）：
+
+            分片直连 → 立刻被拒，卡顿、无法播放
+            经本机转发 → 稳定播放
+
+        原因不在「播放器差」，而在**换地址族的能力只存在于本机这一层**：同一个
+        分片地址，v4 能取、v6 回 403（实测裸连接在 v6 上无论带什么头都 403），
+        我们的 HttpClient 有「族记忆 + 403 自动换族」，播放器没有——它按系统
+        偏好建连，落到被拒的那一族就一路 403，用户看到的就是「刚开播就限流」。
+
+        代价是那台设备自己替这一路流做一次转发（1080p 约 2~4 Mbps）。这是
+        单人观看的量，家庭宽带完全吃得下，换来的是「打开就能播」。
+
+        面板 > 默认开。关掉才回到「播放器直连 CDN」的老行为。
+        """
+        panel = self.panel_get("ysp_relay")
+        if panel is not None:
+            return as_bool(panel)
+        raw = os.environ.get("HDIPTV_YSP_RELAY")
+        if raw is not None and str(raw).strip():
+            return as_bool(raw)
+        return as_bool(self.get("ysp", "relay", True))
 
     @property
     def ysp_plain(self) -> bool:

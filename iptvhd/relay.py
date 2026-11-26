@@ -1044,6 +1044,7 @@ class Relay:
         warm: bool = True,
         upstream_denied=None,
         plain_http: bool = True,
+        relay_ysp: bool = True,
         ysp_ip_mode: str = "auto",
     ):
         self._resolver = resolver
@@ -1058,9 +1059,12 @@ class Relay:
         except (TypeError, ValueError):
             self._resolver_rotates = False
         self._mode = mode if mode in ("direct", "proxy") else "direct"
-        # 央视频分片直连时是否降成 http（见 _PLAIN_SUFFIX）。默认开：不占本机
-        # 带宽、不增加本机对上游的请求，只影响「播放器自己怎么连 CDN」。
+        # 央视频分片直连时是否降成 http（见 _PLAIN_SUFFIX）。**只在关掉转发时才
+        # 有意义**：转发之后播放器连的是本机，不存在播放器做 TLS 握手这回事。
         self._plain_http = bool(plain_http)
+        # 央视频分片是否经本机转发（默认开）。见 target() 的说明：这一层是唯一
+        # 能纠正「地址族选错就被 403」的地方，播放器自己直连做不到。
+        self._relay_ysp = bool(relay_ysp)
         # 央视频取清单用哪条地址族：跟面板上「央视频 → 地址族」那个下拉一致。
         # 以前这里写死 auto，面板选「仅 IPv4」只管住了换票，取清单仍旧先试 IPv6
         # ——设置和实际行为对不上，出故障时连用它排除都做不到。
@@ -1137,6 +1141,11 @@ class Relay:
         # 正在后台补货的台：同一个台不重复开线程
         self._refreshing: set[str] = set()
         self._segments = _SegmentCache(cache_bytes, cache_ttl)
+        # 同一片正在向上游取时的「取货中」标记：后来者等它取完直接命中缓存，
+        # 不发第二个请求。多台设备同时播同一个台时，这一条决定出口会不会被
+        # 判成并发过高（见 resource()）。
+        self._inflight_lock = threading.Lock()
+        self._inflight: dict[str, threading.Event] = {}
         self._notify = None                                   # 日志出口，由 service 接上
         self.failures = 0                                     # 累计失败次数（只算上游）
         # 本机 DNS 解析失败：请求一个字节都没发出去，和「上游拒绝」是两件事。
@@ -1596,6 +1605,7 @@ class Relay:
         mode: str | None = None,
         auto_switch: bool | None = None,
         plain_http: bool | None = None,
+        relay_ysp: bool | None = None,
         ysp_ip_mode: str | None = None,
     ) -> None:
         """面板上改了参数后立刻生效，不用重启容器。
@@ -1623,6 +1633,12 @@ class Relay:
             self._auto_switch = bool(auto_switch)
             with self._lock:
                 self._stuck_streak.clear()
+        if relay_ysp is not None and bool(relay_ysp) != self._relay_ysp:
+            # 这一项决定清单里写的是「本机转发」还是「上游直连」，已改写的清单
+            # 必须作废，否则播放器还会拿着旧写法播一整轮。
+            self._relay_ysp = bool(relay_ysp)
+            with self._lock:
+                self._playlists.clear()
         if plain_http is not None:
             # 只影响「下一次改写清单时写成什么 scheme」，缓存里的原文不用清；
             # 但已改写好的清单（_playlists）是旧 scheme，要丢掉重写。
@@ -1823,24 +1839,34 @@ class Relay:
     def target(self, slug: str, url: str, prefix: str = "") -> str:
         """这一行最终写给播放器的地址。
 
-        direct 模式直接给上游绝对地址（分片由播放器直连 CDN，最流畅）；
-        proxy 模式换成 ``/relay/...``，由本机转手。
+        direct 模式给上游绝对地址（分片由播放器直连 CDN）；proxy 模式换成
+        ``/relay/...``，由本机转手。
 
-        例外：**上游落在 IPv6 上的，direct 模式也要转手**。运营商 IPTV 的直播
-        边缘只下发 IPv6 单播地址（实测移动湖北：强制 IPv4 取清单，302 还是往
-        ``[2409:8087:...]`` 跳），而电视盒子、老播放器一大半没有 IPv6——把这种
-        地址原样写进清单，播放器连不上就报「格式不支持」。本机有这么一路 IPv6
-        出口就够了，让分片从本机过一手，播放端有没有 IPv6 都无所谓。
+        三类地址即使 direct 也强制转手：
+
+        * **央视频**（``relay_ysp``，默认开）。2026-11-26 用户四端实测：分片直连
+          立刻被拒、卡死；改经本机转发就稳。差别不在播放器，而在「谁能换地址
+          族」——同一个分片地址 v4 能取、v6 回 403，本机这一层有族记忆和 403
+          换族，播放器只按系统偏好建连，落错族就一路 403。转发是唯一能纠正它
+          的地方，所以默认不让播放器直连。
+        * **上游落在 IPv6 上的**。运营商 IPTV 的直播边缘只下发 IPv6 单播地址
+          （实测移动湖北：强制 IPv4 取清单，302 还是往 ``[2409:8087:...]`` 跳），
+          而电视盒子、老播放器一大半没有 IPv6——原样写进清单就报「格式不支持」。
+        * **咪咕**。最终节点清单不带 CORS 头且是 http，浏览器 hls.js 直连会被拦
+          （VLC 也常取不到）；走 /relay/ 同源下发可绕开 CORS 和混合内容。
         """
-        # 咪咕地址即使 direct 模式也要经本机转发：最终节点清单不带 CORS 头、
-        # 且是 http，浏览器 hls.js 直连会被拦（VLC 也常取不到）。让子清单和
-        # 分片走 /relay/ 同源下发，播放器只连本机，绕开 CORS 和混合内容。
         try:
             host = (urllib.parse.urlsplit(url).hostname or "").lower()
         except ValueError:
             host = ""
         is_migu = host.endswith("miguvideo.com")
-        if self._mode == "direct" and not _ipv6_host(url) and not is_migu:
+        is_ysp = bool(host) and host.endswith(_PLAIN_SUFFIX) and self._relay_ysp
+        if (
+            self._mode == "direct"
+            and not _ipv6_host(url)
+            and not is_migu
+            and not is_ysp
+        ):
             return self._plain(url, prefix)
         return self.wrap(slug, url, prefix)
 
@@ -2330,10 +2356,30 @@ class Relay:
         # 清单类的地址会随直播推进而变化（上面带 svrtime），不能长期缓存；
         # 分片地址一一对应固定内容，可以放心缓存。
         is_playlist_url = urllib.parse.urlsplit(url).path.lower().endswith((".m3u8", ".m3u"))
+        waiter: threading.Event | None = None
         if not is_playlist_url:
             hit = self._segments.get(url)
             if hit is not None:
                 return self._slice(*hit, range_spec)
+            # **同一片只向上游要一次**：两台电视同时播同一个台时，它们会几乎同时
+            # 请求同一片；没有合并就会各发一次，出口瞬间 2~3 个并发请求，CDN 按
+            # IP 判并发/速率直接 403——用户看到的是「加一台设备就开始跳限流」。
+            # 后来的请求在这里等前一个取完，然后命中缓存。
+            with self._inflight_lock:
+                waiter = self._inflight.get(url)
+                if waiter is None:
+                    waiter = threading.Event()
+                    self._inflight[url] = waiter
+                    owner = True
+                else:
+                    owner = False
+            if not owner:
+                waiter.wait(self._seg_timeout + 2.0)
+                hit = self._segments.get(url)
+                if hit is not None:
+                    return self._slice(*hit, range_spec)
+                # 前一个请求失败了：自己再试一次（退化成原来的「各取各的」）
+                waiter = None
 
         # slug 只用来做失效清理，未知频道也能转（分片地址自带上游签名）
         try:
@@ -2341,11 +2387,17 @@ class Relay:
         except RelayError:
             ua = "qqlive"
 
-        status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
-        if status in _GONE:
-            # 上游偶发拒绝很常见，稍等一下再试一次，通常就过了
-            time.sleep(_RETRY_PAUSE)
+        try:
             status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
+            if status in _GONE:
+                # 上游偶发拒绝很常见，稍等一下再试一次，通常就过了
+                time.sleep(_RETRY_PAUSE)
+                status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
+        finally:
+            if waiter is not None:
+                with self._inflight_lock:
+                    self._inflight.pop(url, None)
+                waiter.set()
         if status in _GONE:
             self._mark_failed(slug, f"分片被拒（{status}）")
             raise RelayError(f"上游返回 {status}")

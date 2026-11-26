@@ -279,8 +279,11 @@
             <span class="hint">只影响央视频下发出去的播放地址，其它模块不受影响。改完立即生效，不用重建容器。</span>
           </div>
           <div class="form">
-            <label class="chk"><input id="setYspPlain" type="checkbox"> 分片走 http（老旧电视盒子兼容）
-              <span class="hint">盒子直连 https 分片报「网络连接错误」时保持勾选：央视频 CDN 的 http 与 https 返回同一份内容，降级后盒子不用做 TLS 握手，分片仍由盒子直连、不占 NAS 带宽。面板本身是 https 访问时不会降级（会被浏览器按混合内容拦掉）。</span>
+            <label class="chk"><input id="setYspRelay" type="checkbox"> 分片经本机转发（推荐）
+              <span class="hint">实测（手机/电视 × 自研播放器与观屿，共四种组合）：让播放器自己直连央视频 CDN，几乎一开播就被拒、卡死；改成经本机转发就稳定。差别在于同一个分片地址这一族能取、另一族回 403，本机这一层会在被拒后自动换族，播放器自己不会换。代价是这台设备替这一路流做一次转发，1080p 约 2~4 Mbps/路。</span>
+            </label>
+            <label class="chk"><input id="setYspPlain" type="checkbox"> 分片走 http（老旧电视盒子兼容，仅在关掉转发时生效）
+              <span class="hint">盒子直连 https 分片报「网络连接错误」时保持勾选：央视频 CDN 的 http 与 https 返回同一份内容，降级后盒子不用做 TLS 握手。面板本身是 https 访问时不会降级（会被浏览器按混合内容拦掉）。</span>
             </label>
           </div>
           <div class="btn-row">

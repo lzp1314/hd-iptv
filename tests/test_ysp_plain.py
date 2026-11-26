@@ -1,12 +1,13 @@
-"""央视频分片 http 降级：老旧电视盒子的 TLS 兼容。
+"""央视频分片的交付方式：默认经本机转发，关掉才让播放器直连。
 
-背景（2026-11-25 实测）：同一台盒子播运营商源、咪咕（走本机转发）都正常，
-只有央视频报「网络连接错误」——它是唯一让盒子自己做 TLS 握手去直连 CDN 的源。
-而央视频 CDN 的同一个分片地址 https 与 http 返回**逐字节相同**的内容
-（2072324 字节，http 不被 302 回 https），所以直连时把 scheme 降成 http 即可，
-分片仍由播放器直连 CDN，不占本机带宽、不增加本机对上游的请求。
+背景（2026-11-26 用户四端实测，手机自研播放器 / 观屿 TV / 电视自研播放器 /
+观屿播放器）：分片让播放器直连 CDN，立刻被拒、卡死；改成经本机转发就稳。
 
-这几条锁住「什么时候该降、什么时候绝不能降」。
+差别不在播放器，而在「谁能换地址族」：同一个分片地址，v4 能取、v6 回 403；
+本机这一层有族记忆和 403 换族，播放器只按系统偏好建连，落错族就一路 403。
+所以默认不让播放器直连。
+
+``relay_ysp=False`` 保留老行为（分片直连、http 降级），供排查用。
 """
 
 from __future__ import annotations
@@ -20,51 +21,51 @@ PREFIX = "http://192.168.1.2:8080"
 
 
 def _relay(**kwargs) -> Relay:
-    relay = Relay(lambda slug: ("https://cdn.example.com/a.m3u8", "qqlive"), warm=False, **kwargs)
-    return relay
+    return Relay(lambda slug: ("https://cdn.example.com/a.m3u8", "qqlive"), warm=False, **kwargs)
 
 
-class YspPlainTest(unittest.TestCase):
-    def test_direct_http_panel_downgrades_ysp_segment(self):
+class YspDeliveryTest(unittest.TestCase):
+    def test_ysp_segment_goes_through_relay_by_default(self):
+        """默认：央视频分片换成 /relay/，播放器不直连 CDN。"""
         relay = _relay()
         out = relay.target("cctv1", SEG, PREFIX)
-        self.assertTrue(out.startswith("http://live-dtocnc-cdn.ysp.cctv.cn/"))
-        # 路径与查询串必须原样保留（票据在查询串里，改了就 403）
-        self.assertIn("/ABCDEF/seg-1.ts", out)
-        self.assertIn("pid=600001859&cdn=5505", out)
+        self.assertTrue(out.startswith(PREFIX + "/relay/"), out)
+        self.assertNotIn("ysp.cctv.cn", out)
 
-    def test_switch_off_keeps_https(self):
-        relay = _relay(plain_http=False)
-        self.assertEqual(relay.target("cctv1", SEG, PREFIX), SEG)
-
-    def test_https_panel_never_downgrades(self):
-        """https 面板里往 http 分片发请求会被浏览器按混合内容拦掉。"""
-        relay = _relay()
-        self.assertEqual(relay.target("cctv1", SEG, "https://tv.example.com"), SEG)
-
-    def test_other_hosts_untouched(self):
+    def test_other_hosts_still_direct(self):
+        """只有央视频强制转发；其它源在 direct 模式下照旧直连。"""
         relay = _relay()
         other = "https://cdn.example.com/live/seg-1.ts"
         self.assertEqual(relay.target("cctv1", other, PREFIX), other)
 
+    def test_relay_off_restores_http_downgrade(self):
+        relay = _relay(relay_ysp=False)
+        out = relay.target("cctv1", SEG, PREFIX)
+        self.assertTrue(out.startswith("http://live-dtocnc-cdn.ysp.cctv.cn/"), out)
+        # 路径与查询串必须原样保留（票据在查询串里，改了就 403）
+        self.assertIn("/ABCDEF/seg-1.ts", out)
+        self.assertIn("pid=600001859&cdn=5505", out)
+
+    def test_relay_off_keeps_https_when_switch_off(self):
+        relay = _relay(relay_ysp=False, plain_http=False)
+        self.assertEqual(relay.target("cctv1", SEG, PREFIX), SEG)
+
+    def test_relay_off_https_panel_never_downgrades(self):
+        """https 面板里往 http 分片发请求会被浏览器按混合内容拦掉。"""
+        relay = _relay(relay_ysp=False)
+        self.assertEqual(relay.target("cctv1", SEG, "https://tv.example.com"), SEG)
+
     def test_proxy_mode_still_wraps(self):
         relay = _relay(mode="proxy")
-        out = relay.target("cctv1", SEG, PREFIX)
-        self.assertIn("/relay/", out)
-        self.assertNotIn("ysp.cctv.cn", out)
+        self.assertIn("/relay/", relay.target("cctv1", SEG, PREFIX))
 
-    def test_plain_url_untouched(self):
+    def test_configure_toggles_relay(self):
         relay = _relay()
-        plain = "http://live-dtocnc-cdn.ysp.cctv.cn/ABCDEF/seg-1.ts?pid=1"
-        self.assertEqual(relay.target("cctv1", plain, PREFIX), plain)
-
-    def test_configure_toggles_switch(self):
-        relay = _relay()
+        self.assertIn("/relay/", relay.target("cctv1", SEG, PREFIX))
+        relay.configure(relay_ysp=False)
         self.assertTrue(relay.target("cctv1", SEG, PREFIX).startswith("http://"))
-        relay.configure(plain_http=False)
-        self.assertEqual(relay.target("cctv1", SEG, PREFIX), SEG)
-        relay.configure(plain_http=True)
-        self.assertTrue(relay.target("cctv1", SEG, PREFIX).startswith("http://"))
+        relay.configure(relay_ysp=True)
+        self.assertIn("/relay/", relay.target("cctv1", SEG, PREFIX))
 
 
 if __name__ == "__main__":

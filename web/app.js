@@ -296,7 +296,8 @@ function fillSettings(s) {
   if ($("setRegion")) $("setRegion").value = s.region || "";
   if ($("setIsp")) $("setIsp").value = s.isp || "";
   if ($("setAutoSwitch")) $("setAutoSwitch").value = s.auto_switch === false ? "0" : "1";
-  // 缺省视为开：老部署没有这个字段时按推荐值勾上
+  // 缺省视为开：缺这个字段的老部署按推荐值勾上
+  if ($("setYspRelay")) $("setYspRelay").checked = s.ysp_relay !== false;
   if ($("setYspPlain")) $("setYspPlain").checked = s.ysp_plain !== false;
   if ($("setPublicUrl")) $("setPublicUrl").value = s.public_url || "";
   if ($("setInterval")) $("setInterval").value = s.interval_hours != null ? s.interval_hours : "";
@@ -561,7 +562,9 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
     region: $("setRegion") ? $("setRegion").value : "",
     isp: $("setIsp") ? $("setIsp").value : "",
     auto_switch: $("setAutoSwitch") ? $("setAutoSwitch").value === "1" : true,
-    // 央视频分片降 http：默认开，只有明确取消勾选才关
+    // 央视频分片经本机转发：默认开，只有明确取消勾选才关
+    ysp_relay: $("setYspRelay") ? $("setYspRelay").checked : true,
+    // 直连时才用得上的 http 降级，默认开
     ysp_plain: $("setYspPlain") ? $("setYspPlain").checked : true,
     public_url: $("setPublicUrl").value.trim(),
     interval_hours: Number($("setInterval").value || 0),
@@ -574,7 +577,10 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
   // 央视频模块弹窗只提交它自己那一项：别的表单控件虽在 DOM 里，用户在这一页
   // 没动过，一起带上等于把别处还没保存的输入顺带写进去。
   if (btnId === "btnYspSave") {
-    payload = { ysp_plain: $("setYspPlain") ? $("setYspPlain").checked : true };
+    payload = {
+      ysp_relay: $("setYspRelay") ? $("setYspRelay").checked : true,
+      ysp_plain: $("setYspPlain") ? $("setYspPlain").checked : true,
+    };
   }
   // 模块开关只在「源数据与订阅地址」页保存时提交，别的页不碰它。
   // 内置卡片(.builtin-toggle)和更多源(.module-row)的开关都带 data-module，
@@ -657,13 +663,16 @@ async function saveSettings(btnId = "btnSaveSettings", noteId = "settingsNote") 
       fillSettings(st);
     } else if (btnId === "btnYspSave") {
       const st = d.settings || {};
+      const relayed = st.ysp_relay !== false;
       const on = st.ysp_plain !== false;
       const yn = $("yspNote");
       if (yn) {
         yn.hidden = false;
-        yn.textContent = on
-          ? "已保存：央视频分片按 http 下发，盒子不用做 TLS 握手。下次点播生效。"
-          : "已保存：央视频分片改回 https 下发（面板是 https 访问时本来也不会降级）。下次点播生效。";
+        yn.textContent = relayed
+          ? "已保存：央视频分片经本机转发。播放器只连本机，地址族选错了本机会自动换。下次点播生效。"
+          : on
+            ? "已保存：央视频分片由播放器直连 CDN，按 http 下发。若播放器报错或卡顿，建议重新打开「经本机转发」。"
+            : "已保存：央视频分片由播放器直连 CDN，按 https 下发。下次点播生效。";
       }
       fillSettings(st);
     } else if (btnId === "btnMiguSave") {

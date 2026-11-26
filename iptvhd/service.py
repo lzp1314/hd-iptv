@@ -536,6 +536,7 @@ class State:
             auto_switch=settings.auto_switch,
             upstream_denied=_ysp_cooling,
             plain_http=settings.ysp_plain,
+            relay_ysp=settings.ysp_relay,
             ysp_ip_mode=settings.module_ip_mode("央视频"),
         )
         self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
@@ -701,7 +702,9 @@ class State:
             "playlist_ttl": s.playlist_ttl,
             "cache_mb": int(s.relay_cache_mb),
             "play_mode": s.play_mode,
-            # 央视频分片直连降 http（老旧电视盒子 TLS 兼容），面板可开关
+            # 央视频分片经本机转发（默认开）。关掉才回到播放器直连 CDN。
+            "ysp_relay": s.ysp_relay,
+            # 直连时把分片降成 http（老旧电视盒子 TLS 兼容）；转发时无意义。
             "ysp_plain": s.ysp_plain,
             "auto_region": s.auto_region,
             "region": s.region_hint,
@@ -789,6 +792,7 @@ class State:
                 mode=self.settings.play_mode,
                 auto_switch=self.settings.auto_switch,
                 plain_http=self.settings.ysp_plain,
+                relay_ysp=self.settings.ysp_relay,
                 ysp_ip_mode=self.settings.module_ip_mode("央视频"),
             )
             if "epg_source" in clean:

@@ -684,5 +684,61 @@ class BridgeSkippedTest(unittest.TestCase):
         self.assertEqual(len(window.segs), 3)
 
 
+class SegmentSingleFlightTest(unittest.TestCase):
+    """同一片被多台设备同时要，只向上游发一次。
+
+    现场症状（2026-11-26 用户实测）：转发模式下两台设备同时播没问题，加第三台
+    就开始跳限流。三台设备几乎同时请求同一片，如果各发一次上游请求，出口在
+    一瞬间就是 2~3 个并发，CDN 按 IP 判并发/速率直接 403。合并之后后来的请求
+    等第一个取完、直接命中缓存。
+    """
+
+    class _Slow(Relay):
+        def __init__(self):
+            super().__init__(
+                lambda slug: ("https://live-dtocnc-cdn.ysp.cctv.cn/TOK/i.m3u8", "qqlive"),
+                warm=False,
+            )
+            self.calls = 0
+
+        def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001 - 测试替身
+            self.calls += 1
+            time.sleep(0.15)  # 让并发请求真的叠在一起
+            return 200, {"Content-Type": "video/mp2t"}, b"x" * 4096, url
+
+    def test_concurrent_requests_hit_upstream_once(self):
+        from iptvhd.relay import encode
+
+        relay = self._Slow()
+        token = encode("https://live-dtocnc-cdn.ysp.cctv.cn/TOK/2024078603-100.ts?pid=1")
+        codes: list[int] = []
+        errors: list[str] = []
+
+        def worker():
+            try:
+                codes.append(relay.resource("cctv1", token)[0])
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(relay.calls, 1, "三台设备要同一片，上游只该被请求一次")
+        self.assertEqual(codes, [200, 200, 200])
+
+    def test_cached_segment_skips_upstream(self):
+        from iptvhd.relay import encode
+
+        relay = self._Slow()
+        token = encode("https://live-dtocnc-cdn.ysp.cctv.cn/TOK/2024078603-200.ts?pid=1")
+        relay.resource("cctv1", token)
+        relay.resource("cctv1", token)
+        self.assertEqual(relay.calls, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
