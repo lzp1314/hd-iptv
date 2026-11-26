@@ -35,3 +35,6 @@ docker-compose.feishu.yml
 add-hubei-channels.sh
 config/hubei-mobile.m3u
 config/*.bak-*
+
+# 本地工作区：排查用的探针脚本、临时输出、笔记（不进仓库）
+.workbuddy/
