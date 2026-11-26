@@ -1377,6 +1377,10 @@ def make_handler(state: State):
                             "throttled": relay_stats.get("throttled", 0),
                             "blocked_for": relay_stats.get("blocked_for", 0),
                             "plays": len(relay_stats["cached"]),
+                            # 三台同看时用来看「是不是同一条流」：在播几条、每分钟
+                            # 打了几次上游分片。一条流约 15 次/分。
+                            "active_streams": relay_stats.get("active_streams", 0),
+                            "up_per_min": relay_stats.get("up_per_min", 0),
                             "errors": list(relay_stats["errors"].values())[:3],
                             "dns_errors": list(relay_stats.get("dns_errors", {}).values())[:3],
                             "segments": relay_stats["segments"],

@@ -39,6 +39,8 @@ import base64
 import http.client
 import inspect
 import math
+import os
+import queue
 import re
 import threading
 import time
@@ -383,6 +385,19 @@ class _SegmentCache:
             self._data.move_to_end(key)
             self.hits += 1
             return ctype, body
+
+    def peek(self, key: str) -> bool:
+        """只看有没有、不算命中也不算未命中。
+
+        预取线程用它判断「这片是不是已经有了」，不能污染面板上的命中率。
+        """
+        if self.max_bytes <= 0:
+            return False
+        with self._lock:
+            hit = self._data.get(key)
+            if hit is None:
+                return False
+            return time.time() - hit[0] <= self.ttl
 
     def put(self, key: str, ctype: str, body: bytes) -> None:
         if self.max_bytes <= 0 or not body or len(body) > self.max_bytes:
@@ -1146,6 +1161,30 @@ class Relay:
         # 判成并发过高（见 resource()）。
         self._inflight_lock = threading.Lock()
         self._inflight: dict[str, threading.Event] = {}
+        # ---- 分片预取 ----
+        # 「同一片并发合并」只对**恰好同一片**有效。三台设备看同一个台时，它们的
+        # 播放进度天然错开 1~2 片，于是变成三条互不相干的请求流，出口速率直接 ×3
+        # ——用户现场就是「一台没事、两台没事、第三台开始两分钟被限流」。
+        #
+        # 预取把「客户端正在看的下一片」提前取好放进缓存：谁先到就替所有人取一次，
+        # 后面来的直接命中。稳态下上游请求固定 **1 次/片**，与设备数无关，三台
+        # 和一台对上游长得一样。
+        #
+        # 预取只由「客户端真的请求了某片」触发，取它的下一片，绝不沿预取结果继续
+        # 往前推——那样会一路取到直播边缘之外，换回一堆 404，还白白多打请求。
+        self._prefetch_q: queue.Queue = queue.Queue(maxsize=8)
+        self._prefetch_queued: set[str] = set()
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_thread: threading.Thread | None = None
+        self._prefetch_pause_until = 0.0    # 预取碰到 403 就先停一会儿，别加剧
+        self.prefetched = 0                 # 预取成功放进缓存的次数（诊断）
+        self.prefetch_failed = 0            # 预取失败次数（只统计，不算进的 failures）
+        self._prefetch_on = str(os.environ.get("HDIPTV_SEG_PREFETCH", "1")).strip() not in ("0", "off", "false")
+        # 最近向上游要分片的时刻（只记真正发出去的，命中缓存不算）。
+        # 面板上「上游取片/分」就是它的长度：一台设备正常播放约 15 次/分，
+        # 三台同看如果还是十几，说明缓存和合并真的在干活；如果到了 45，
+        # 那就是三条独立的流（不同线路/清晰度），不是同一路被放大了。
+        self._up_times: deque[float] = deque(maxlen=1024)
         self._notify = None                                   # 日志出口，由 service 接上
         self.failures = 0                                     # 累计失败次数（只算上游）
         # 本机 DNS 解析失败：请求一个字节都没发出去，和「上游拒绝」是两件事。
@@ -1719,17 +1758,29 @@ class Relay:
             playlists = {k: round(now - v.at, 1) for k, v in self._windows.items()}
             playlists.update({k: round(now - v[0], 1) for k, v in self._raw.items()})
             active = sorted(self._active)
+            # 最近一分钟真正打到上游的分片请求（命中缓存的不算）
+            up_min = len([t for t in self._up_times if now - t <= 60.0])
             cooling = {k: round(v - now, 1) for k, v in self._next_try.items() if v > now}
             blackout = {k: round(v - now) for k, v in self._blackout.items() if v > now}
             tickets = len(self._ticket_times)
         seg = self._segments.stats()
         seg.update({"hits": self._segments.hits, "misses": self._segments.misses})
+        seg.update({
+            "prefetched": self.prefetched,
+            "prefetch_failed": self.prefetch_failed,
+            "prefetch_paused": max(0, round(self._prefetch_pause_until - time.time())),
+        })
         return {
             "mode": self._mode,
             "cached": cached,
             "playlists": playlists,
             # 正在被观看、后台在替它预取的台
             "active": active,
+            # 判断「三台到底是不是同一条流」的两个数：
+            # active 数量 = 同时在播几条流；up_min = 最近一分钟打了几次上游分片。
+            # 一条流约 15 次/分；三台同看一条流也应该是十几，翻三倍就说明是三路。
+            "active_streams": len(active),
+            "up_per_min": up_min,
             "segments": seg,
             "errors": {k: v for k, v in self._errors.items() if not _is_local_dns(v)},
             # 本机 DNS 解析失败的台。单独列出，面板据此说「本机解析异常」，
@@ -2360,6 +2411,7 @@ class Relay:
         if not is_playlist_url:
             hit = self._segments.get(url)
             if hit is not None:
+                self._queue_prefetch(slug, url)
                 return self._slice(*hit, range_spec)
             # **同一片只向上游要一次**：两台电视同时播同一个台时，它们会几乎同时
             # 请求同一片；没有合并就会各发一次，出口瞬间 2~3 个并发请求，CDN 按
@@ -2377,6 +2429,7 @@ class Relay:
                 waiter.wait(self._seg_timeout + 2.0)
                 hit = self._segments.get(url)
                 if hit is not None:
+                    self._queue_prefetch(slug, url)
                     return self._slice(*hit, range_spec)
                 # 前一个请求失败了：自己再试一次（退化成原来的「各取各的」）
                 waiter = None
@@ -2388,6 +2441,7 @@ class Relay:
             ua = "qqlive"
 
         try:
+            self._up_times.append(time.time())
             status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
             if status in _GONE:
                 # 上游偶发拒绝很常见，稍等一下再试一次，通常就过了
@@ -2413,7 +2467,118 @@ class Relay:
 
         ctype = headers.get("Content-Type") or _guess_type(url)
         self._segments.put(url, ctype, body)
+        # 替「下一片」先取好：三台设备进度错开时，谁先到谁就把后面那片备好，
+        # 后来者命中缓存，上游固定 1 次/片。
+        self._queue_prefetch(slug, url)
         return self._slice(ctype, body, range_spec)
+
+    # ---------------- 分片预取 ----------------
+    def _queue_prefetch(self, slug: str, url: str) -> None:
+        """把「这一片的下一片」排进预取队列。
+
+        只由客户端真实请求触发（命中缓存也算），找不到下一片就什么都不做。
+        同一个地址只排一次；队列满了直接放弃——丢一片预取不影响播放，
+        积压起来反而会把出口挤爆。
+        """
+        if not self._prefetch_on or time.time() < self._prefetch_pause_until:
+            return
+        window = self._windows.get(slug)
+        if window is None or not window.segs:
+            return
+        nxt = ""
+        for index, seg in enumerate(window.segs):
+            if seg[1] == url:
+                if index + 1 < len(window.segs):
+                    nxt = window.segs[index + 1][1]
+                break
+        if not nxt or nxt == url:
+            return
+        if self._segments.peek(nxt):
+            return
+        queued = False
+        with self._prefetch_lock:
+            if nxt in self._prefetch_queued:
+                return
+            # 前台正在取这片 → 它马上就有了，别再排一遍
+            if nxt in self._inflight:
+                return
+            self._prefetch_queued.add(nxt)
+            try:
+                self._prefetch_q.put_nowait((slug, nxt))
+                queued = True
+            except queue.Full:
+                self._prefetch_queued.discard(nxt)
+        if queued:
+            self._ensure_prefetch_worker()
+
+    def _ensure_prefetch_worker(self) -> None:
+        if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
+            return
+        with self._prefetch_lock:
+            if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
+                return
+            self._prefetch_thread = threading.Thread(
+                target=self._prefetch_worker, name="relay-prefetch", daemon=True
+            )
+        self._prefetch_thread.start()
+
+    def _prefetch_worker(self) -> None:
+        while True:
+            slug, url = self._prefetch_q.get()
+            try:
+                with self._prefetch_lock:
+                    self._prefetch_queued.discard(url)
+                if self._prefetch_on and time.time() >= self._prefetch_pause_until:
+                    self._prefetch_one(slug, url)
+            except Exception:                      # 预取出错不许影响播放
+                self.prefetch_failed += 1
+            finally:
+                self._prefetch_q.task_done()
+
+    def _prefetch_one(self, slug: str, url: str) -> None:
+        """取一片放进缓存。失败只记账，不触发按台退避。"""
+        if self._segments.peek(url):
+            return
+        waiter = threading.Event()
+        with self._inflight_lock:
+            if url in self._inflight:              # 前台已经在取，让它去取
+                return
+            self._inflight[url] = waiter
+        try:
+            try:
+                _, ua = self.upstream(slug)
+            except RelayError:
+                ua = "qqlive"
+            self._up_times.append(time.time())
+            status, headers, body, _final = self._fetch(url, ua, timeout=self._seg_timeout)
+            if status in _GONE:
+                self.prefetch_failed += 1
+                # 出口被拒：立刻停一轮，别把正在播的人一起拖下水
+                self._prefetch_pause_until = time.time() + _FORBIDDEN_COOLDOWN
+                self._drain_prefetch()
+                return
+            if status != 200 or not body:
+                self.prefetch_failed += 1
+                return
+            ctype = headers.get("Content-Type") or _guess_type(url)
+            self._segments.put(url, ctype, body)
+            self.prefetched += 1
+        except Exception:
+            self.prefetch_failed += 1
+        finally:
+            with self._inflight_lock:
+                self._inflight.pop(url, None)
+            waiter.set()
+
+    def _drain_prefetch(self) -> None:
+        while True:
+            try:
+                _slug, url = self._prefetch_q.get_nowait()
+            except queue.Empty:
+                return
+            with self._prefetch_lock:
+                self._prefetch_queued.discard(url)
+            self._prefetch_q.task_done()
 
     @staticmethod
     def _slice(ctype: str, body: bytes, range_spec: str) -> tuple[int, str, bytes, dict]:

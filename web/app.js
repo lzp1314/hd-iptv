@@ -188,6 +188,14 @@ function fillOverview(d) {
 
   put("ovAutoRegion", s.auto_region === false ? "关闭" : "开启");
   put("ovPlayMode", s.play_mode === "proxy" ? "经本机转发" : "直连 CDN");
+  // 三台同看时用来判断「是不是同一条流」：一条流约 15 次/分，
+  // 三台同看一条流也应该是十几；到四五十就是三路各自在拉。
+  const rl = d.relay || {};
+  if (rl.active_streams != null) {
+    put("ovRelayLoad", `${rl.active_streams} 条流 · ${rl.up_per_min || 0} 次/分`);
+  } else {
+    put("ovRelayLoad", "-");
+  }
 
   const iv = Number(s.interval_hours);
   put("ovInterval", !iv ? "关闭（只手动更新）" : iv + " 小时");
@@ -252,8 +260,8 @@ async function loadStatus() {
         banner.textContent =
           `取清单时上游拒绝过 ${relay.failures} 次${detail}，其中 ${relay.stale_served || 0} 次用上一份清单顶住了。` +
           (proxy
-            ? "当前是「经 NAS 转发」模式，分片也从本机走，被平台判成异常流量的概率高——建议把播放方式切回「直连」。"
-            : "分片由播放器直连 CDN，不受影响；偶尔切台失败重试一次即可。");
+            ? "当前是「经本机转发」模式。被拒基本是出口速率超了——把「清单刷新」调到 10~12 秒、别连着切台，比改播放方式有用。"
+            : "分片由播放器直连 CDN；央视频、咪咕仍按模块设置走本机转发，不受这里影响。");
       } else if (relay.dns_failures > 0) {
         // 本机解析失败和上游拒绝是两件事：请求一个字节都没发出去，
         // 等解封、换 IP 都没有用，该查的是 NAS 自己的 DNS。

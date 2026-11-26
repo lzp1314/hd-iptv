@@ -740,5 +740,89 @@ class SegmentSingleFlightTest(unittest.TestCase):
         self.assertEqual(relay.calls, 1)
 
 
+class SegmentPrefetchTest(unittest.TestCase):
+    """请求第 N 片时，后台把第 N+1 片取好。
+
+    现场（2026-11-26）：三台设备同看一个央视频频道，两分钟被限流。单飞合并只对
+    「恰好同一片」有效，而三台播放进度天然错开 1~2 片，实际是三条独立请求流，
+    出口速率 ×3。预取让「下一片」提前备好，后来者命中缓存，上游固定 1 次/片。
+    """
+
+    class _Relay(Relay):
+        def __init__(self, block_next: bool = False):
+            super().__init__(
+                lambda slug: ("https://live-dtocnc-cdn.ysp.cctv.cn/TOK/i.m3u8", "qqlive"),
+                warm=False,
+            )
+            self.block_next = block_next
+            self.seg_calls: list[str] = []
+
+        def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001 - 测试替身
+            if url.endswith(".m3u8"):
+                return 200, {}, b"#EXTM3U\n", url
+            self.seg_calls.append(url)
+            # 只让「下一片」（预取的目标）被拒，模拟出口只对那一枪限流
+            if self.block_next and "101" in url:
+                return 403, {}, b"", url
+            return 200, {"Content-Type": "video/mp2t"}, b"x" * 2048, url
+
+    def _prepared(self, block_next: bool = False):
+        from iptvhd.relay import encode
+
+        relay = self._Relay(block_next)
+        relay._absorb("cctv1", _playlist(100).decode(), "https://live-dtocnc-cdn.ysp.cctv.cn/TOK/")
+        window = relay._windows["cctv1"]
+        self.assertGreaterEqual(len(window.segs), 3)
+        return relay, encode
+
+    def test_next_segment_is_prefetched(self):
+        relay, encode = self._prepared()
+        window = relay._windows["cctv1"]
+        first, second = window.segs[0][1], window.segs[1][1]
+        relay.resource("cctv1", encode(first))
+        deadline = time.time() + 3
+        while time.time() < deadline and not relay._segments.peek(second):
+            time.sleep(0.02)
+        self.assertTrue(relay._segments.peek(second), "请求第 1 片后第 2 片应已进缓存")
+        self.assertEqual(relay.prefetched, 1)
+
+    def test_second_device_hits_prefetched_segment(self):
+        """第二台设备晚一步要同一片 → 命中预取，不再打上游。"""
+        relay, encode = self._prepared()
+        window = relay._windows["cctv1"]
+        first, second = window.segs[0][1], window.segs[1][1]
+        relay.resource("cctv1", encode(first))
+        deadline = time.time() + 3
+        while time.time() < deadline and not relay._segments.peek(second):
+            time.sleep(0.02)
+        before = len(relay.seg_calls)
+        relay.resource("cctv1", encode(second))
+        self.assertEqual(len(relay.seg_calls), before, "第二台设备应该直接命中预取")
+
+    def test_does_not_chain_beyond_one_segment(self):
+        """预取不沿预取结果继续往前推，否则会取到直播边缘之外。"""
+        relay, encode = self._prepared()
+        window = relay._windows["cctv1"]
+        first, second, third = window.segs[0][1], window.segs[1][1], window.segs[2][1]
+        relay.resource("cctv1", encode(first))
+        deadline = time.time() + 3
+        while time.time() < deadline and not relay._segments.peek(second):
+            time.sleep(0.02)
+        self.assertTrue(relay._segments.peek(second))
+        self.assertFalse(relay._segments.peek(third), "只预取一片，再往后就是浪费")
+
+    def test_forbidden_pauses_prefetch(self):
+        """预取撞 403 就先停一轮，别把正在播的人一起拖下水。"""
+        relay, encode = self._prepared(block_next=True)
+        window = relay._windows["cctv1"]
+        first = window.segs[0][1]
+        relay.resource("cctv1", encode(first))
+        deadline = time.time() + 3
+        while time.time() < deadline and relay.prefetch_failed == 0:
+            time.sleep(0.02)
+        self.assertGreaterEqual(relay.prefetch_failed, 1)
+        self.assertGreater(relay._prefetch_pause_until, time.time())
+
+
 if __name__ == "__main__":
     unittest.main()
