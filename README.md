@@ -2,119 +2,89 @@
 
 **自部署的 IPTV 播放列表管理工具：整理、测速、聚合与分发节目清单，供个人与家庭内网使用。零第三方依赖，一条命令跑在 NAS 上。**
 
-[![Version](https://img.shields.io/badge/version-0.9.25-blue.svg)](https://github.com/lzp1314/hd-iptv)
+[![Version](https://img.shields.io/badge/version-0.11.3-blue.svg)](https://github.com/lzp1314/hd-iptv)
 [![CI](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml/badge.svg)](https://github.com/lzp1314/hd-iptv/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/image-ghcr.io-blue?logo=docker)](https://github.com/lzp1314/hd-iptv/pkgs/container/hd-iptv)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
-> 仅供个人学习与家庭内网自用，详见文末[免责声明](#免责声明)与 [DISCLAIMER.md](DISCLAIMER.md)。
+> 仅供个人学习与家庭内网自用，详见 [DISCLAIMER.md](DISCLAIMER.md)。
 
-## 部署
+## 一、先选部署文件
 
-### 先选一份部署文件
-
-| 你的宽带 | 用哪份 |
+| 你的宽带 | 用哪一份 |
 |---|---|
 | **湖北省内 · 移动宽带** | `docker-compose.hubei.yml` |
 | **其他所有网络**（省外、电信 / 联通 / 广电、机房、海外） | `docker-compose.yml` |
 
-非湖北省内用户，用通用版 `docker-compose.yml` 就行，什么都不用改。
+两份都是预构建镜像版，不依赖源码、不需要 `Dockerfile`，只有这段文本也能跑，可以直接贴进飞牛 / 群晖的 Docker 面板。
 
-这两份都是**预构建镜像版**：不依赖源码、不需要 `Dockerfile`，只有 compose 文本也能跑，
-可以直接贴进飞牛 / 群晖的 Docker 面板。要本地构建改代码，另用
-`docker-compose.build.yml`（见「方式二」）。
+选错了不会坏，只是会有部分频道出不来；改回来就是换一个文件。拿不准先用通用版，启动后看面板顶部那行「本机宽带」——显示湖北移动，再换成湖北版。
 
-选错了也不会坏，只是有部分频道出不来；改起来就是换一个 compose 文件。拿不准自己
-是哪种，先用通用版跑起来，再看面板顶部那行「本机宽带」——显示湖北移动就换成另一份。
+## 二、部署
 
-### 方式一：预构建镜像（推荐，不用 clone 源码）
-
-任何能跑 Docker 的机器都适用：群晖、威联通、飞牛、极空间、绿联、Unraid、
-树莓派 / Armbian、普通 Linux 服务器，以及装了 Docker Desktop 的 Windows / macOS。
-不需要 Python 环境，依赖全在镜像里，多架构（`amd64` / `arm64` / `armv7`）自动匹配。
-
-三步：建一个空目录进去 → 把下面的内容存成 `docker-compose.yml` → `docker compose up -d`。
-`config/`、`output/` 会自动创建，不用手工建。
-
-下面这段可以直接贴进 Docker 面板：`${...}` 变量都填成了默认值，另外把常用的
-`HDIPTV_LINES_PER_CHANNEL` 也一并写出来。仓库根目录的 `docker-compose.yml` 保留了
-变量，方便用 `.env` 调端口、目录和镜像标签，两者效果一样。
+### 1. 建目录
 
 ```bash
 mkdir -p ~/hd-iptv && cd ~/hd-iptv
-# 把下面这段存成这个目录里的 docker-compose.yml
 ```
 
-```yaml
-# hd-iptv —— 通用部署文件（预构建镜像版）
-# 存成 docker-compose.yml，与 config/、output/ 同级
-#
-# 非湖北省内用户用这一份。湖北省内移动宽带请改用 docker-compose.hubei.yml。
-# 不需要源码、不需要 Dockerfile，只有这段文本也能跑。
+### 2. 拿 compose 文件
 
+能直连 GitHub 就用命令：
+
+湖北省内移动宽带：
+
+```bash
+curl -fsSL -O https://raw.githubusercontent.com/lzp1314/hd-iptv/main/docker-compose.hubei.yml
+```
+
+其他所有网络：
+
+```bash
+curl -fsSL -O https://raw.githubusercontent.com/lzp1314/hd-iptv/main/docker-compose.yml
+```
+
+拉不下来（国内网络访问 `raw.githubusercontent.com` 经常超时）就手工建文件，把下面**对应那一份**完整复制进去，文件名按小标题里写的存。
+
+两份只有一行不同，就是 `HDIPTV_SKIP_SOURCES`。
+
+#### 外省版 · `docker-compose.yml`
+
+```yaml
 services:
   hd-iptv:
-    # 预构建多架构镜像（amd64 / arm64 / armv7），自动匹配你的机器
-    # 想锁死版本写 :0.9.25；想跟着修 bug 写 :latest
-    image: ghcr.io/lzp1314/hd-iptv:latest
-    container_name: hd-iptv
+    image: ghcr.io/lzp1314/hd-iptv:${HDIPTV_IMAGE_TAG:-latest}
+    container_name: ${CONTAINER_NAME:-hd-iptv}
     restart: unless-stopped
 
     ports:
-      # 左边是宿主机端口（冲突了改左边），右边固定 9797 不要动
-      - "9797:9797"
+      - "${HOST_PORT:-9797}:9797"
 
     volumes:
-      # 配置：频道模板 channels.txt、采集源 sources.toml、config.toml、
-      # 面板设置 panel.json。建议换成自己盘上的绝对路径，例如
-      #   /vol2/1000/docker/hd-iptv/config:/app/config
-      - ./config:/app/config
-      # 结果：playlist.m3u、txt、json、台标缓存 logos/
-      - ./output:/app/output
+      - ${CONFIG_DIR:-./config}:/app/config
+      - ${OUTPUT_DIR:-./output}:/app/output
 
     environment:
-      TZ: Asia/Shanghai
-
-      # 按名字跳过源，逗号分隔。这里跳过「运营商官方源」——它只服务湖北省内移动宽带。
-      # 湖北省内移动宽带请直接贴 docker-compose.hubei.yml；一定要在这份上改，
-      # 就把下面这行写成 "聚合源-公开转播,聚合源-精简线路"，别留空。
-      HDIPTV_SKIP_SOURCES: "运营商官方源"
-
-      # 自动刷新间隔（小时）。上游按 IP 限频，别调太勤；0 = 关掉定时刷新。
-      # 播放地址是按需换票的，列表过期不影响正在看的人。
-      HDIPTV_INTERVAL_HOURS: "24"
-
-      # 画质区间。**别把 MAX_HEIGHT 写成 1080**：有些源只给 2160 一路，
-      # 卡住上限就把唯一能用的地址整条丢掉，退回 1Mbps 的中转空壳。
-      HDIPTV_MIN_HEIGHT: "720"
-      HDIPTV_MAX_HEIGHT: "2160"
-
-      # direct = 清单本机下发、分片由播放器直连 CDN（最流畅，默认）
-      # proxy  = 分片也经本机转发（只有直连放不出来时才用，吃本机带宽）
-      HDIPTV_PLAY_MODE: "direct"
-
-      # 分片缓存上限（MB），只对 proxy 模式生效
-      HDIPTV_RELAY_CACHE_MB: "96"
-
-      # 订阅里每个台写几行。1 = 不会出现「重复台」；
-      # 想手动切备用线路再调 2~4（VLC 会把每行都显示成一个台）
-      HDIPTV_LINES_PER_CHANNEL: "1"
-
-      # 对外地址。留空 = 按访问时的域名端口自动判断，套了反代也不用填。
-      # 只有「反代挂在子路径下、又没透传 X-Forwarded-Host」时才需要写死，
-      # 例如 https://tv.example.com:8443 。**不要自己加密码段**，程序会接。
-      PUBLIC_URL: ""
-
-      # 访问密码（URL 里的一段路径）。设了之后所有地址都要带 /<密码>/，
-      # 不带就回「身份认证失败」，局域网也一样。
-      # 只能用字母、数字和 - _ . ~ ；留空 = 不设密码。
-      # 也可以在面板「运行设置」里改，改完立刻生效、不用重启。
-      HDIPTV_SECRET: ""
-
-      # 自动按省取源：默认开，按本机宽带去取本省公开的运营商单播清单。
-      # 面板「宽带与省份」页里的开关优先；这里写 "0" 可以关掉。
-      HDIPTV_AUTO_REGION: "1"
+      TZ: ${TZ:-Asia/Shanghai}
+      # 两份文件唯一的差别就是这一行，原样保留
+      HDIPTV_SKIP_SOURCES: "${HDIPTV_SKIP_SOURCES-运营商官方源}"
+      HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-24}
+      HDIPTV_MIN_HEIGHT: ${HDIPTV_MIN_HEIGHT:-720}
+      HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-2160}
+      HDIPTV_PLAY_MODE: ${HDIPTV_PLAY_MODE:-direct}
+      HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
+      HDIPTV_YSP_IPV4: "${HDIPTV_YSP_IPV4:-0}"
+      HDIPTV_YSP_IP_MODE: "${HDIPTV_YSP_IP_MODE:-auto}"
+      HDIPTV_MIGU_IP_MODE: "${HDIPTV_MIGU_IP_MODE:-auto}"
+      HDIPTV_OFFICIAL_IP_MODE: "${HDIPTV_OFFICIAL_IP_MODE:-auto}"
+      HDIPTV_AGG_IP_MODE: "${HDIPTV_AGG_IP_MODE:-auto}"
+      HDIPTV_KIDS_IP_MODE: "${HDIPTV_KIDS_IP_MODE:-auto}"
+      HDIPTV_YSP_PLAIN: "${HDIPTV_YSP_PLAIN:-1}"
+      HDIPTV_WARM_NEXT: "${HDIPTV_WARM_NEXT:-1}"
+      PUBLIC_URL: "${PUBLIC_URL:-}"
+      HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
+      HDIPTV_AUTO_REGION: "${HDIPTV_AUTO_REGION:-1}"
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"]
@@ -124,297 +94,136 @@ services:
       retries: 3
 
     logging:
-      # 不限制的话，长期运行的日志会把盘吃满
       driver: json-file
       options:
         max-size: "5m"
         max-file: "2"
 ```
 
-存好之后启动：
+#### 湖北版 · `docker-compose.hubei.yml`
+
+```yaml
+services:
+  hd-iptv:
+    image: ghcr.io/lzp1314/hd-iptv:${HDIPTV_IMAGE_TAG:-latest}
+    container_name: ${CONTAINER_NAME:-hd-iptv}
+    restart: unless-stopped
+
+    ports:
+      - "${HOST_PORT:-9797}:9797"
+
+    volumes:
+      - ${CONFIG_DIR:-./config}:/app/config
+      - ${OUTPUT_DIR:-./output}:/app/output
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 两份文件唯一的差别就是这一行，原样保留
+      HDIPTV_SKIP_SOURCES: "聚合源-公开转播,聚合源-精简线路"
+      HDIPTV_INTERVAL_HOURS: ${HDIPTV_INTERVAL_HOURS:-24}
+      HDIPTV_MIN_HEIGHT: ${HDIPTV_MIN_HEIGHT:-720}
+      HDIPTV_MAX_HEIGHT: ${HDIPTV_MAX_HEIGHT:-2160}
+      HDIPTV_PLAY_MODE: ${HDIPTV_PLAY_MODE:-direct}
+      HDIPTV_RELAY_CACHE_MB: ${HDIPTV_RELAY_CACHE_MB:-96}
+      HDIPTV_YSP_IPV4: "${HDIPTV_YSP_IPV4:-0}"
+      HDIPTV_YSP_IP_MODE: "${HDIPTV_YSP_IP_MODE:-auto}"
+      HDIPTV_MIGU_IP_MODE: "${HDIPTV_MIGU_IP_MODE:-auto}"
+      HDIPTV_OFFICIAL_IP_MODE: "${HDIPTV_OFFICIAL_IP_MODE:-auto}"
+      HDIPTV_AGG_IP_MODE: "${HDIPTV_AGG_IP_MODE:-auto}"
+      HDIPTV_KIDS_IP_MODE: "${HDIPTV_KIDS_IP_MODE:-auto}"
+      HDIPTV_YSP_PLAIN: "${HDIPTV_YSP_PLAIN:-1}"
+      HDIPTV_WARM_NEXT: "${HDIPTV_WARM_NEXT:-1}"
+      PUBLIC_URL: "${PUBLIC_URL:-}"
+      HDIPTV_SECRET: "${HDIPTV_SECRET:-}"
+      HDIPTV_AUTO_REGION: "${HDIPTV_AUTO_REGION:-1}"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9797/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+```
+
+### 3. 启动
+
+其他所有网络：
 
 ```bash
 docker compose up -d
 ```
 
-#### 湖北省内移动宽带：换一份 YAML
-
-仓库里的 `docker-compose.hubei.yml` 同样是预构建镜像版，直接用就行：
+湖北省内移动宽带：
 
 ```bash
 docker compose -f docker-compose.hubei.yml up -d
 ```
 
-或者在 Docker 面板里贴它的内容。也可以只把上面那份里的这一行改成：
+`config/`、`output/` 会自动创建，不用手工建。
 
-```yaml
-      HDIPTV_SKIP_SOURCES: "聚合源-公开转播,聚合源-精简线路"
-```
+### 4. 打开面板
 
-其余一个字都不用改。这样「运营商官方源」保持启用，两条全国聚合源不参与探测
-（本省已有稳定的自有线路，不需要第三方清单再来一轮）。湖北版刻意不读 `.env`
-里的同名变量，免得通用版的设置把它要启用的源跳掉；`HDIPTV_SKIP_SOURCES` 留空
-虽然也能启用官方源，但会把两条全国聚合源一起放进来，和湖北版的效果并不一样。
+浏览器访问 `http://你的NAS地址:9797`。
 
-浏览器打开 `http://你的IP:9797` 就是面板。第一次进去列表是空的，点「立即更新」，
-等一两分钟出结果。`config/`、`output/` 空着没关系，容器会自己建并补一份默认配置。
+第一次进去列表是空的，点一次「立即更新」，等一两分钟出结果。
 
 确认真的起来了：
 
 ```bash
-docker compose ps          # STATUS 显示 Up (healthy) 即正常
-docker compose logs -f     # 看采集日志，Ctrl+C 退出
+docker compose ps
+docker compose logs -f
 ```
 
-#### 拉不动镜像怎么办
+`STATUS` 显示 `Up (healthy)` 即正常。
 
-`ghcr.io` 在国内部分网络下会超时，表现为 `pull access denied` 或卡在
-`Waiting`。三个办法，按省事程度排：
+## 三、配置
 
-1. **换个网络重试**：手机热点、给路由器换 DNS，往往一次就过；
-2. **给 Docker 配代理**：设置 `HTTP_PROXY` / `HTTPS_PROXY` 后重新 `pull`；
-3. **改用源码构建**：见下面「方式二」，用 `docker-compose.build.yml` 不依赖 GHCR，
-   代价是要 clone 完整源码、多花几分钟。
+能改的东西分两处：compose 里的环境变量，和面板里的「运行设置」。**面板优先**，改完立刻生效，不用重启容器。
 
-源码构建要拉 Python 基础镜像（走 Docker Hub），若 Docker Hub 也慢，先配镜像加速器。
+### 面板里改（推荐）
 
-#### 湖北省内移动宽带：建议改用 host 网络
+| 位置 | 可以改什么 |
+|---|---|
+| 运行设置 | 端口以外的一切：刷新间隔、播放方式、对外地址、访问密码、清单刷新、缓存大小 |
+| 宽带与省份 | 自动识别开关，或手动指定省份 / 运营商 |
+| 数据源 | 哪些源参与采集、出现在订阅里 |
 
-默认的桥接网络在部分 NAS 上拿不到 IPv6 路由，运营商官方源会用不了。改法是把端口
-映射换成 host 网络：
+### 环境变量
 
-```yaml
-    # 删掉 ports: 那三行，换成下面这行
-    network_mode: host
-```
-
-两点注意：
-
-- host 模式下容器直接用宿主机网络，`ports` 必须删掉，否则报错或端口冲突；
-- host 模式下 `127.0.0.1:9797` 仍然可用，健康检查不用改。
-
-公开源、央视频接口这类 IPv4 可达的源，桥接模式就够了，不必开 host。
-
-### 方式二：从源码构建
-
-改代码、或者不想依赖任何镜像仓库时用这一份。前提是**当前目录有完整源码**
-（`Dockerfile`、`iptvhd/`、`web/`）；只有 compose 文本会报
-`open Dockerfile: no such file or directory`。
-
-```bash
-git clone https://github.com/lzp1314/hd-iptv.git
-cd hd-iptv
-cp .env.example .env      # 按需改端口和目录，不改也能跑
-
-# 非湖北省内用户（默认，自动跳过运营商官方源）
-docker compose -f docker-compose.build.yml up -d --build
-
-# 湖北省内移动宽带（保留官方源、不探全国聚合源）
-HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compose -f docker-compose.build.yml up -d --build
-```
-
-> 从旧的 `docker compose up -d --build` 迁过来：现在根目录的 `docker-compose.yml`
-> 是预构建镜像版，`--build` 对它不起作用。要构建本地代码必须显式 `-f` 上面这份。
-
-换部署文件时**先 `docker compose down`**，否则同名容器会打架。`config/` 是挂载卷，
-换哪份都不丢配置；空着也没关系，首次启动会自动补一份默认配置。
-
-常用环境变量（写 `.env` 里，或者直接在 YAML 的 `environment` 段改）：
+写进 `docker-compose.yml` 的 `environment` 段，改完 `docker compose up -d` 生效。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HDIPTV_IMAGE_TAG` | `latest` | 预构建镜像版用的标签，想锁版本写 `0.9.25`；源码构建版不看这一项 |
 | `HOST_PORT` | `9797` | 宿主机端口，容器内始终是 9797 |
-| `CONFIG_DIR` | `./config` | 配置目录，建议写绝对路径 |
-| `OUTPUT_DIR` | `./output` | 结果目录，建议写绝对路径 |
-| `PUBLIC_URL` | 空 | 对外地址。留空则按访问时的域名端口自动判断，套反代不用填 |
-| `HDIPTV_INTERVAL_HOURS` | `24` | 自动刷新间隔（小时），0 关闭 |
-| `HDIPTV_MIN_HEIGHT` / `HDIPTV_MAX_HEIGHT` | `720` / `2160` | 画质区间 |
-| `HDIPTV_SPEED_RATIO` | `0.7` | 实测速率要打到该档画质所需带宽的几成才算可用，0.3~1.0。调低放宽（台更多、更容易卡），调高收紧 |
-| `HDIPTV_FAILOVER` | `true` | 一个台有多条线路时，订阅里只写一个固定地址，线路切换由本机完成。写 `0` 关掉，退回每台一条直连地址 |
-| `HDIPTV_AUTO_SWITCH` | `true` | **播放中**是否自动换到同台的下一条线路。写 `0` 关掉，固定用第一条，取不到就如实报错。面板「宽带与省份」页里的开关优先 |
-| `HDIPTV_OFFICIAL_TIMEOUT` | `5` | 运营商官方源单条探测时限（秒）。这类源是本省边缘，正常 0.1~0.2 秒就回；调大会让连不通的地址把更新拖成十几分钟 |
-| `HDIPTV_OFFICIAL_TRIES` | `2` | 同一个台最多探几条官方地址。探通一条就算这组可用，其余继承结论当备用线路 |
-| `HDIPTV_OFFICIAL_TIMEOUT_STREAK` | `5` | 连续几条超时就判定「这条网当前不通」，跳过剩余官方源（只认超时，403/404 不算） |
-| `HDIPTV_PLAY_MODE` | `direct` | `direct` 分片直连 CDN；`proxy` 分片经本机转发 |
+| `CONFIG_DIR` | `./config` | 配置目录，建议改成绝对路径 |
+| `OUTPUT_DIR` | `./output` | 结果目录，建议改成绝对路径 |
+| `HDIPTV_SECRET` | 空 | 访问密码（URL 路径段），见下 |
+| `PUBLIC_URL` | 空 | 对外地址。留空按访问时的域名端口自动判断，套反代不用填 |
+| `HDIPTV_INTERVAL_HOURS` | `24` | 自动刷新间隔（小时），0 关闭。外网使用建议 4~6 |
+| `HDIPTV_MIN_HEIGHT` / `HDIPTV_MAX_HEIGHT` | `720` / `2160` | 画质区间。别把上限写成 1080 |
+| `HDIPTV_PLAY_MODE` | `direct` | `direct` 分片由播放器直连；`proxy` 分片也经本机转发 |
 | `HDIPTV_RELAY_CACHE_MB` | `96` | 分片缓存（MB），仅 `proxy` 模式 |
-| `HDIPTV_LINES_PER_CHANNEL` | `1` | 订阅里每个台写几行。1 不会出现「重复台」；想手动切备用线路调 2~4（调大后不再自动换线，只能自己在播放器里换行） |
-| `HDIPTV_SECRET` | 空 | 访问密码（URL 路径段）。设了之后所有地址都要带 `/<密码>/`，见下 |
-| `HDIPTV_SKIP_SOURCES` | 空 | 按名字跳过源，逗号分隔。通用版 `docker-compose.yml` 里设成 `运营商官方源`；湖北版 `docker-compose.hubei.yml` 里设成 `聚合源-公开转播,聚合源-精简线路` |
-| `HDIPTV_REGION` | 空 | 手动指定省份（拼音如 `hubei`）；面板「省份」下拉优先于它，留空 = 自动识别 |
-| `HDIPTV_ISP` | 空 | 手动指定运营商：`mobile` / `telecom` / `unicom` / `broadnet`；面板优先于它 |
-| `HDIPTV_AUTO_REGION` | `true` | 自动按省取源开关，写 `0` 关闭。面板「宽带与省份」页里的开关优先 |
-
-端口、刷新间隔、播放方式、对外地址这些在「运行设置」里改；自动按省取源、省份 / 运营商
-在左侧「宽带与省份」页里改；只订哪些源在「数据源」页；咪咕账号、画质在「咪咕视频」页。
-每页都有各自的「保存」，开关类设置保存后在下一次更新时生效（数据源开关对订阅的显示
-即时生效），其余改完立刻生效，都不用重启容器。
-
-### 面板上那一行「本机宽带」
-
-启动几秒后，面板顶部会多一行：
-
-```
-本机宽带：湖北 · 中国移动 · IPv6 可用
-```
-
-它是程序自己查出来的（`myip.ipip.net` 为主、`ipinfo.io` 兜底，结果在
-`output/region.json` 缓存一天）。除了提示该用哪份部署文件，它还用来自动接本省的源
-（见下一节）。识别不出来就不显示，自动源也不会启用，其余频道不受影响。
-
-- 显示「湖北 · 中国移动」→ 换成 `docker-compose.hubei.yml`
-- 显示别的 → 现在这份通用版就是对的
-- 显示「没有 IPv6 出口」→ 运营商官方源那类地址用不了，其余频道不受影响
-
-判断不准的时候（跨省出口、机房 IP、CGNAT 会被判错），手动钉死。三种写法等价，
-面板最省事，按你的习惯挑一种：
-
-```yaml
-      HDIPTV_REGION: "hubei"
-      HDIPTV_ISP: "mobile"
-```
-
-或者面板左侧「宽带与省份」页里选，或者写进 `config.toml` 的 `[output]` 段：
-`region = "hubei"`、`isp = "mobile"`。三者的优先级是 **面板 > 环境变量 > `config.toml`**。
-
-### 自动按省取源（默认开）
-
-通用版除了央视频和公开聚合源，还会按识别出的省份和运营商，运行时去公开清单库取
-一份本省的运营商单播清单：过滤掉组播和内网地址后，作为一条 `trust = true` 的本地源
-串行慢探。留下来的线路**只给频道模板里已有的央视 / 卫视补候选**，本省地方台不会
-混进结果。湖北移动跳过（项目已内置完整清单），广电宽带没有公开单播清单也跳过。
-
-- **面板左侧「宽带与省份」页管这一路的全部设置**：自动取源开关、省份、运营商都收在这一页，
-  存在 `config/panel.json`，优先级高于环境变量 `HDIPTV_AUTO_REGION=0` 和 `config.toml`。
-  改动在下一次更新时生效，想立刻看效果就点一次「立即更新」。
-- 清单**运行时拉取、缓存一天**，不打包进仓库（上游清单库没有 LICENSE）。取不到、
-  或这份清单只有内网地址时，只写一行日志，其它源照常采集，不会让一轮更新失败。
-- 日志里的「本省自动源」就是这一路；不想让它参与，也可以写
-  `HDIPTV_SKIP_SOURCES=本省自动源`。
-- 想确认「本省这路到底通不通」，跑 `python -m iptvhd doctor --isp`（见下文）。
-- **面板里可以直接选省份和运营商**（「宽带与省份」页的「省份 / 运营商」两个下拉，默认「自动识别」）。
-  选好点「检测这个组合」，当场返回该省该运营商在公开清单里有没有、多少条、通不通，
-  不用等一轮采集；点「扫本省 4 家」一次列出移动 / 电信 / 联通 / 广电哪家有清单。
-  确认有再点这一页右上角的「保存」，下一轮采集就按这个组合取源。手动值存在 `config/panel.json`，
-  优先级高于 `HDIPTV_REGION` / `HDIPTV_ISP` 和 `config.toml`；选回「自动识别」即取消。
-  注意：选的组合要和实际出口宽带一致——运营商源按省隔离，选错会大面积超时 / 403，
-  那不是故障，是这条源只认本地出口；广电没有公开单播清单，选中会提示「没有可抓源」。
-
-默认采集源里还有两条 HerbertHe/iptv-sources 的公开转播清单，全国可用，给央视卫视
-多几路候选。它们是第三方站点维护的，随时可能失效或夹广告；探测阶段会按画质和速率
-筛掉坏线路。已部署过的用户升级后会自动补上这两条（只追加、不动原有配置，补一次
-就不再动），不想要可以在 `config/sources.toml` 里把对应 `enabled` 改成 `false`。
-湖北省内移动宽带用的 `docker-compose.hubei.yml` 已经按名字跳过这两条，升级后本机
-的行为和之前一致，不会多出一轮第三方清单的探测。
-
-### 订阅按数据源分组，每组只写本机地址
-
-从 v0.9.26 起，订阅**按源条目分组**（「运营商官方源」「咪咕视频」「聚合源-多线路」
-……各成一组），不再把央视 / 卫视混成一个大列表。同一个台在几个源里都有，就会在
-对应几个组里各出现一次，各走各的线路——想只订咪咕，就在面板里只留「咪咕视频」，
-订阅里就只有这一组；想看综合视图，把几个组都打开即可。
-
-每个组里，同一个台的多条线路共用一个固定的本机地址（`/live/c:…m3u8`）。这个地址
-不随更新变化，收藏过的、正在看的都一直有效，而且各组之间互不干扰：在咪咕组里点播
-失败，只会在咪咕的线路里换，不会串到运营商源。真正用哪条线路由服务端现场决定：
-第一条取不到就换下一条，转完一圈再从第一条重来，播放器那边看不出变化；正在播的台
-清单冻住了，也会换一条继续。旧版收藏的地址（不带模块名的 `c:` 开头那种）仍然有效。
-
-想自己手动切线路的，把 `HDIPTV_LINES_PER_CHANNEL` 调到 2 以上——那时不再自动换线，
-每个台会写出多行，由你在播放器里挑。排查「到底哪条线路有问题」时，可以用
-`HDIPTV_FAILOVER=0` 关掉自动换线，让每台退回一条直连地址。
-
-### 只订想要的源（面板：数据源）
-
-左侧「数据源」页列出当前所有源模块：运营商官方源、官方直连、聚合源-多线路、
-聚合源-公开转播、综合频道、本省自动源、咪咕视频……每个一个开关。模块清单由程序
-按配置实时生成，你在 `config/sources.toml` 里新增的源也会自动出现在这里，无需改页面。
-
-开关一处管两件事：**关掉的源下一轮不再采集，同时也立刻从订阅里消失**（服务端拼
-订阅时按开关过滤，不用等更新，播放器重新拉一次订阅就生效）。开着的全都照常采集。
-设置存在本机 `config/panel.json` 的 `disabled_modules` 里，按源的名字记录，以后
-增删源不会错位。
-
-几个常见组合：
-
-- **外省只想看官方源**：只留「咪咕视频」「综合频道」（央视频），把聚合源关掉。
-- **湖北本省**：留着「运营商官方源」就是最快的本省线路，其它按需要开。
-- **临时排查某个源**：单独关掉它，订阅里立刻少一组，日志里也不再有它的请求。
-
-关掉一个源不影响其它源，也不会删掉它的配置——随时可以再打开。
-
-### 咪咕视频（面板：咪咕视频）
-
-咪咕是官方源，外省用通常比第三方聚合源流畅。左侧「咪咕视频」页管这一路：
-
-- **启用**：关掉后订阅里的「咪咕视频」组消失，也不再换票。
-- **账号 ID / 访问令牌**：都留空就是游客模式，最高 540P；填上你自己的咪咕账号
-  ID 和访问令牌，换票时按账号权益给 720P / 1080P。令牌不会回显到页面上，留空
-  表示「不修改」，只有清空账号 ID 才会解除绑定。
-- **画质档位**：游客选 540P 即可；有账号可选 720P / 1080P 等。平台若不给所选档位，
-  会自动降到它能给的画质，不会直接播不了。
-- **H.265**：默认开。老播放器只有声音没画面时，把它关掉。
-- **客户端就近取流**：默认开。服务端只换票，把咪咕的调度地址交给播放器，由咪咕
-  按播放器所在网络就近分配边缘节点——外省用户不会绕到 NAS 的网络节点，这是外省
-  流畅的关键，建议保持开启。
-- **频道表刷新间隔**：默认 6 小时，咪咕频道表变动不频繁，不必调太短。
-
-账号和令牌只存在本机的 `config/panel.json`，**不会写进订阅链接、播放地址或日志**，
-别人拿到你的订阅链接也看不到。令牌属于个人敏感信息，请妥善保管，不要填到公开的地方。
-
-### 关掉「自动换源」（面板：宽带与省份）
-
-线路自动切换是抗封的关键，但有一条代价：**两条线路都有问题时，它会在两者之间来回
-跳**。表现是画面一卡一卡、日志里每隔半分钟一条 `[换线]`。
-
-面板「宽带与省份」页里的**自动换源**开关就是给这种情况用的。关掉之后：
-
-- 固定用排序第一的那条线路，取不到就如实报错，不再自己跳；
-- 「同一个地址重新取票重试」照常保留，只是不再换到别的地址；
-- 想看清到底是哪条在坏，关掉它最直接——哪条报错就是哪条。
-
-开关即时生效，不用重启容器。配置文件里对应 `[relay] auto_switch`，环境变量
-`HDIPTV_AUTO_SWITCH`，面板优先。
-
-### 清单由本机取，播放器只连分片
-
-订阅里每个台的地址都是本机地址（`/live/…m3u8`），分三种前缀：
-
-| 前缀 | 是什么 | 取清单用的 UA |
-|---|---|---|
-| `o:` | 运营商 IPTV 边缘（移动/电信/联通的单播源） | 机顶盒同款 `okhttp` |
-| `u:` | 聚合源、公开转播 | 采集阶段验证过的浏览器 UA |
-| `m:` | 咪咕视频官方源 | 服务端只换票、不取流，302 给播放器由咪咕就近调度 |
-
-**为什么不让播放器直连。** 直连写进订阅的是采集那一刻从上游拿到的地址，之后不再
-变化。聚合源普遍认 UA、按 IP 限流，地址里还带 `time=` 这类时间戳；播放器自己拼出来
-的请求撞上校验就回 403，表现就是「列表能刷出来，点进去源服务器返回错误」。列表里的
-`#EXTVLCOPT:http-user-agent` 只有 VLC 认，ExoPlayer 系（观屿、影视仓等）直接当注释
-跳过，所以那行等于没写。
-
-改由本机取清单之后，用的是探测阶段就验证过的那套请求头；分片仍然由播放器直连 CDN
-（`HDIPTV_PLAY_MODE=direct`），多一跳内网转发，出口 IP 不变。若某个源连分片都校验
-来源，把它切成 `proxy`，分片也经本机转发。
-
-`m:` 是个例外：咪咕的调度地址会按**取票方的网络**分配边缘节点，若由 NAS 取完再下发，
-外省用户就会被带到 NAS 所在的节点、跨网卡顿。所以服务端只负责换票，把未跳转的调度
-地址 302 给播放器，由咪咕按播放器自己的网络就近分配。这一路不经过清单改写，也不受
-`HDIPTV_PLAY_MODE` 影响。
-
-**带了签名的地址容易过期。** 同档画质里会优先选不带 `time=`/`sign=`/`token=` 的长期
-地址，签名地址退到备用。但备用也只是「过期前能用」，所以外网使用建议把「自动更新
-间隔」调到 **4~6 小时**（面板里就能改），别设成 24 小时——那等于让订阅里躺着一批早就
-过期的地址。
+| `HDIPTV_*_IP_MODE` | `auto` | 各模块走哪个地址族：`auto` / `ipv4` / `ipv6`。面板里改更方便，这里只是兜底 |
+| `HDIPTV_YSP_IPV4` / `HDIPTV_YSP_PLAIN` | `0` / `1` | 兼容开关，正常别动。某类频道整片 403 时再逐个试 |
+| `HDIPTV_WARM_NEXT` | `1` | 起播时顺手预热下一个台，关掉写 `0` |
+| `HDIPTV_LINES_PER_CHANNEL` | `1` | 订阅里每个台写几行。1 不重复；想要手动切线路写 2~4 |
+| `HDIPTV_AUTO_REGION` | `1` | 自动按省取源，写 `0` 关闭 |
+| `HDIPTV_REGION` | 空 | 手动指定省份（如 `hubei`），留空自动识别 |
+| `HDIPTV_ISP` | 空 | 手动指定运营商：`mobile` / `telecom` / `unicom` / `broadnet` |
 
 ### 访问密码
 
-给「反代到公网」的场景准备的：设一个密码，所有地址都要带它，不带就只显示
-「身份认证失败」——局域网也一样。
-
-把上面 `docker-compose.yml` 里这一行改成你的密码（或者留着空，启动后在面板里设）：
+设了之后所有地址都要带密码段，不带就回「身份认证失败」，局域网也一样。
 
 ```yaml
-      HDIPTV_SECRET: "tv7Kd2x"
+environment:
+  HDIPTV_SECRET: "tv7Kd2x"
 ```
 
 设完之后地址变成：
@@ -426,108 +235,35 @@ HDIPTV_SKIP_SOURCES='聚合源-公开转播,聚合源-精简线路' docker compo
 | 单台 | `http://NAS:9797/tv7Kd2x/live/<slug>.m3u8` |
 | 台标 | `http://NAS:9797/tv7Kd2x/logo/CCTV1.png` |
 
-几点要知道：
+只能用字母、数字和 `- _ . ~`。它不是加密，密码在 URL 里会进浏览器历史和反代日志——走 HTTPS，别把订阅链接发给不相干的人。
 
-- **清单里的地址会自动带上密码段**，播放器拿到订阅就能直接播，不用二次配置。
-  台标、节目单同理——它们都从同一个对外地址派生。
-- **`PUBLIC_URL` 不用自己加密码段**，程序会接上；已经写了也不会重复接。
-- **只能用字母、数字和 `- _ . ~`**，别带斜杠和空格（带了会直接报错，不会被悄悄改掉）。
-- **它不是加密**：密码在 URL 里，会进浏览器历史、反代日志。走 HTTPS，
-  并且别把订阅链接发给不相干的人。
+忘了密码：删掉 `config/panel.json` 里的 `"secret"` 那一行，重启容器。
 
-### 在面板里改密码
+## 四、湖北省内移动宽带
 
-「运行设置 → 访问密码」直接改，存盘后立刻生效，**不用重启容器**，改完页面会自动
-跳到新地址。留空并保存 = 关掉密码，回到根地址。
+用 `docker-compose.hubei.yml`。除此之外建议把网络改成 host 模式：默认的桥接网络在部分 NAS 上拿不到 IPv6 路由，会导致一部分频道出不来。
 
-优先级是 **面板 > `HDIPTV_SECRET` > `config.toml`**。面板改的值存在
-`config/panel.json`——这个文件在 `.gitignore` 里，**不会跟着仓库走**，也不会被
-镜像更新覆盖（它在挂载卷里）。所以别把密码写进 `config.toml`：那份是要提交、
-要分享的，密码会一起流出去。
-
-忘了密码，两种救法：
-
-1. 进 NAS 删掉 `config/panel.json` 里的 `"secret"` 这一行，重启容器；
-2. 或者把 `HDIPTV_SECRET` 从 compose 里去掉——但面板里的值优先级更高，第 1 种更直接。
-
-## 运营商官方源（仅限湖北省内移动宽带）
-
-> ⚠️ **这一节只对湖北省内移动宽带有意义。** 别的地方开着它不会报错，只是那部分
-> 频道出不来，白等一阵、面板上多一片灰。通用版 `docker-compose.yml` 已经默认
-> 把它跳过了，不用你操心。
-
-公开聚合源的通病是「能用但随时会坏」：转发站会夹广告、会限速、会突然改成购物
-频道。真正稳的是自家宽带的 IPTV 直播边缘——不换票、不夹广告、1080P、余量也够。
-
-项目自带一份湖北省内移动的清单（全省都算，不只武汉），**在湖北版里默认启用**，
-排在所有公开源前面：
-
-```
-config/sources.toml -> [[source]] name = "运营商官方源"  type = "local"
-                       path = "iptvhd/defaults/hubei-mobile.m3u"  trust = true
+```yaml
+services:
+  hd-iptv:
+    network_mode: host
 ```
 
-用别的省份 / 别的运营商：项目会按识别结果自动取一份本省清单（见「自动按省取源」）。
-想换成自己抓到的清单，把 `path` 指过去就行，`trust = true` 保留；两路同时存在时
-会一起进探测排序，不是互相覆盖。
+改的时候删掉原来的 `ports` 段，两者不能并存。host 模式下 `127.0.0.1:9797` 仍然可用，健康检查不用改。
 
-下面三件事项目已经自动处理，不用改配置：
+其他省份和网络类型不需要开 host。
 
-- **只下发 IPv6 边缘。** 这类源一律由本机中转（清单和分片都过 NAS），播放器有没有
-  IPv6 都无所谓，`mode = "direct"` 也不用改。
-- **不能并发探测。** 一口气几十条请求会被 CDN 打进「302 无限循环」，之后连单条都
-  取不到。带 `trust` 的源走独立的串行慢探，三道闸控制耗时：**同一个台最多探
-  `probe.official_tries_per_channel` 条**（默认 2，探通一条就算这组可用，其余直接
-  继承结论当备用线路）、**单条时限 `probe.official_timeout`**（默认 5 秒，正常回包
-  只要 0.1~0.2 秒）、**连续 `probe.official_timeout_streak` 条超时就熔断**（默认 5，
-  只认超时，403/404 不算）。日志里每条一行「台名 用时 结果」，卡住时能直接看出是
-  哪个台、什么错。
-- **账号是共享的。** 清单里的账号来自公开列表，别人也在用；对方跑批量任务时这路会
-  一起抖。真要紧的话换成自己机顶盒里的账号串。
+## 五、飞牛 fnOS
 
-另外 0.9.13 起会自动剔除「一址多台」的广告源：探测时记录每条流**跟随跳转后的
-最终地址**，凡是三个以上的不同频道落到同一个地址（央视那批 720P 全都 302 到
-`/applive/mkt.m3u8`，同一路购物直播），整批丢弃。
-
-### 本省有没有运营商源？一条命令自测
-
-换个省、换家宽带，最想知道的是「我这儿能不能也接本地源」。跑这个：
-
-```bash
-docker compose exec hd-iptv python -m iptvhd doctor --isp
-# 源码跑：python -m iptvhd doctor --isp
-```
-
-只读诊断，不改配置、不采集。输出长这样：
-
-```
-本机宽带   湖北 · 中国移动 · IPv6 可用    来源 ipip
-入口自测
-  ztecdn.hb.chinamobile.com:6060            通 · 10ms
-公开清单      取到 5 条可直连入口（抽样）
-结论：湖北 · 中国移动能连上运营商入口，这条路值得接。
-```
-
-判断依据就三样：本机出口是哪省哪家、这一类入口通不通、社区有没有整理出本省那份
-清单。显示「通」时，自动按省取源那一节会自己把清单接进来，这条命令主要用于确认和
-排障；**只有组播**得先用 udpxy 转成 HTTP；**连清单都没有**基本就是没有对外单播
-地址，别白折腾。
-
-## 飞牛 fnOS
-
-**A. 面板里贴 compose（不用 SSH）**
+**面板里贴 compose（不用 SSH）**
 
 1. 文件管理建目录 `/vol2/1000/docker/hd-iptv/`，里面再建 `config`、`output`
 2. Docker → Compose → 新建项目，项目目录选 `/vol2/1000/docker/hd-iptv`
-3. compose 内容用上面「方式一」那份完整 YAML，或直接用仓库根目录的
-   `docker-compose.yml` —— 两份都是预构建镜像版，面板里没有源码也能跑。
-   **湖北省内移动宽带请直接贴 `docker-compose.hubei.yml` 的内容**（或把
-   `HDIPTV_SKIP_SOURCES` 那一行改成 `聚合源-公开转播,聚合源-精简线路`），
-   否则官方源那批频道不会出现。
+3. compose 内容贴第二部分里对应那一份的全文（湖北省内移动宽带贴「湖北版」）
 4. 卷映射写**绝对路径**：`/vol2/1000/docker/hd-iptv/config:/app/config`
 5. 启动，浏览器开 `http://飞牛IP:9797`
 
-**B. SSH 拉源码构建（能改配置、升级方便）**
+**SSH 拉源码构建**
 
 ```bash
 cd /vol2/1000/docker
@@ -537,57 +273,56 @@ docker compose -f docker-compose.build.yml up -d --build
 ```
 
 > **两个坑**
-> 1. `docker restart` **不会**重新读卷映射，改过挂载路径必须删容器重建：
->    `docker compose up -d --force-recreate`。
-> 2. 挂载目录如果不是你改的那个，配置根本不进容器。核对一下：
->    `docker inspect hd-iptv --format '{{json .Mounts}}'`。
+> 1. `docker restart` 不会重新读卷映射，改过挂载路径必须删容器重建：`docker compose up -d --force-recreate`
+> 2. 挂载目录如果不是你改的那个，配置根本不进容器。核对：`docker inspect hd-iptv --format '{{json .Mounts}}'`
 
-## ARM 板 / Armbian
+## 六、ARM 板 / Armbian
 
-支持。镜像有 `amd64`、`arm64`、`armv7` 三种，Armbian 上装好 Docker 直接拉就行。
-把上面「方式一」的 `docker-compose.yml` 存到板子上任意目录，然后：
+支持。镜像有 `amd64`、`arm64`、`armv7` 三种。
 
 ```bash
-curl -fsSL https://get.docker.com | sh     # 已经装了可跳过
-uname -m                                   # aarch64 → arm64；armv7l → 32 位
+curl -fsSL https://get.docker.com | sh
+uname -m
 docker compose up -d
 ```
 
-绝大多数 Armbian 板子（RK3399 / RK3588 / 晶晨 S905 系列）是 **arm64**，直接可用；
-玩客云、部分老盒子是 **armv7（32 位）**，镜像同样带了 armv7。程序是纯 Python
-标准库、单进程，常驻内存约 50~80 MB，1 GB 内存的板子够用。
+绝大多数 Armbian 板子（RK3399 / RK3588 / 晶晨 S905 系列）是 `arm64`；玩客云、部分老盒子是 `armv7`。常驻内存约 50~80 MB，1 GB 内存的板子够用。
 
-路径别照抄飞牛那套 `/vol2`，换成你自己的盘，比如 `/mnt/sda1/docker/hd-iptv`。
-ARM 板 CPU 弱一点不影响播放：清单由本机整理、分片由播放器直连 CDN，本机这边
-基本只做字符串改写。
+路径别照抄飞牛的 `/vol2`，换成自己的盘，例如 `/mnt/sda1/docker/hd-iptv`。
 
-## 镜像从哪来
-
-| 位置 | 说明 |
-|---|---|
-| `ghcr.io/lzp1314/hd-iptv` | 多架构（`amd64` / `arm64` / `armv7`）。`latest` 跟主干；`0.9.25` / `0.9` 是打标签时的固定版本，想锁死或回滚用这个；`main` 每次推主干都会更新 |
-| 本地构建 | `docker compose -f docker-compose.build.yml up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库，但必须有完整源码 |
-
-GitHub Actions 在推 `main` 或打 `v*` 标签时自动构建。拉了 `latest` 想升级就重新
-`docker compose pull && docker compose up -d`；想停在某个版本，在 `.env` 里写
-`HDIPTV_IMAGE_TAG=0.9.25`（或直接把 `image` 的 `latest` 改成 `0.9.25`），之后 pull
-也不会动。拉不动 `ghcr.io` 时用「方式二」的源码构建版，效果一样，但要先 clone 源码。
-
-## 命令行
+## 七、升级与回滚
 
 ```bash
-python -m iptvhd update          # 跑一次完整更新
-python -m iptvhd update --quiet   # 只打印汇总
+docker compose pull
+docker compose up -d
+```
+
+想锁死在某个版本，把 compose 里的 `:latest` 改成具体版本号，之后 `pull` 也不会动。
+
+从源码构建的用 `docker compose -f docker-compose.build.yml up -d --build`，产出 `hd-iptv:local`，不依赖任何镜像仓库。
+
+### 拉不动镜像
+
+`ghcr.io` 在国内部分网络下会超时，表现为 `pull access denied` 或卡在 `Waiting`。三个办法：
+
+1. 换个网络重试：手机热点、给路由器换 DNS，往往一次就过；
+2. 给 Docker 配代理：设置 `HTTP_PROXY` / `HTTPS_PROXY` 后重新 `pull`；
+3. 改用源码构建：`docker-compose.build.yml`，不依赖 GHCR，代价是要 clone 完整源码。
+
+## 八、命令行
+
+```bash
+python -m iptvhd update
+python -m iptvhd update --quiet
 python -m iptvhd serve --port 9797
-python -m iptvhd doctor           # 配置自检
-python -m iptvhd doctor --isp     # 本省运营商的 IPTV 入口通不通（只读诊断）
-python -m iptvhd probe <地址...>   # 单条验证：能不能播、多少 P、多快
+python -m iptvhd doctor
+python -m iptvhd probe <地址...>
 python -m iptvhd --version
 ```
 
-通用参数 `--root <目录>` 可以指向任意项目目录，用来跑多套配置。
+`--root <目录>` 可以指向任意项目目录，用来跑多套配置。
 
-## HTTP 接口
+## 九、HTTP 接口
 
 | 路径 | 说明 |
 |---|---|
@@ -596,21 +331,19 @@ python -m iptvhd --version
 | `/txt` `/json` | TXT 订阅 / 频道明细 |
 | `/epg.xml` | 节目单（只含自己的频道） |
 | `/logo/<频道名>.png` | 台标，服务端取一次存本地 |
-| `/live/<slug>.m3u8` | 单频道播放列表，服务端现换地址下发。一个台有多条线路时这里就是它的唯一地址，换线在服务端内部完成；响应头 `X-HD-Seq` 标出当前分片序号 |
-| `/relay/<slug>/p/<token>` | 仅 `proxy` 模式下使用，播放器自动请求，不用手填 |
+| `/live/<slug>.m3u8` | 单频道播放列表，服务端现换地址下发 |
+| `/relay/<slug>/p/<token>` | 仅 `proxy` 模式下使用，播放器自动请求 |
 | `/api/live` | 可用频道 slug 清单 |
-| `/api/status` | 运行状态、统计、设置、最近日志，以及本机宽带识别结果（`region`） |
-| `/api/channels` | 频道与源明细（含 `hidden` 标记） |
+| `/api/status` | 运行状态、统计、设置、最近日志 |
+| `/api/channels` | 频道与源明细 |
 | `/api/settings` | 读写面板设置（`POST` 生效） |
-| `POST /api/hidden` | 隐藏 / 恢复频道，`{"names":["CCTV-2"],"hidden":true}` |
+| `POST /api/hidden` | 隐藏 / 恢复频道 |
 | `/api/version?check=1` | 当前版本，顺便跟仓库比一下 |
 | `/api/relay` | 中转缓存与最近错误，排查播放问题用 |
 | `POST /api/update` | 手动触发一次更新 |
 | `/health` | 健康检查（给 Docker HEALTHCHECK 用） |
 
-设了 `HDIPTV_SECRET` 之后，除 `/health` 外的每条路径前面都要加 `/<密码>`，
-例如 `/tv7Kd2x/playlist.m3u`。`/health` 保持公开，否则容器的健康检查会把自己
-判成不健康。
+设了 `HDIPTV_SECRET` 之后，除 `/health` 外每条路径前面都要加 `/<密码>`。
 
 ## 免责声明
 
@@ -646,7 +379,7 @@ hd-iptv 是为个人学习、研究和家庭内网自用而做的**非营利项�
 3. 权利归属或授权范围的必要证明；
 4. 希望采取的处理方式，以及你确认通知内容真实准确的声明。
 
-项目维护者收到信息完整、能够明确定位的通知后，会在合理时间内核验，并视情况移除地址、停用相关模块或采取其他必要措施。请勿在公开 Issue 中提交身份证件、账号密码、Cookie、Token 等敏感信息；需要补充非公开材料时，可先在 Issue 中留下不含敏感信息的联系方式。
+项目维护者收到信息完整、能够明确定位的通知后，会在合理时间内核验，并视情况移除地址、停用相关模块或采取其他必要措施。请勿在公开 Issue 中提交身份证件、账号密码、Cookie、Token 等敏感信息。
 
 ## License
 
