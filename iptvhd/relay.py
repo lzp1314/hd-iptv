@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import inspect
 import math
 import re
@@ -46,7 +47,7 @@ import urllib.parse
 import urllib.request
 from collections import OrderedDict, deque
 
-from .net import dns_stats
+from .net import HttpClient, dns_stats
 
 # 允许中转的域名后缀。只放行上游自己的 CDN，不做通用代理。
 # miguvideo.com：咪咕最终节点的清单不带 CORS 头、且是 http，浏览器面板直连
@@ -85,18 +86,36 @@ _REFERER = "https://live.cctv.cn/"
 # 不经过 NAS，因此不会把本机出口打成高频请求（转发正是因此被平台回 403）。
 _PLAIN_SUFFIX = (".ysp.cctv.cn",)
 
-# 一张清单票据最多能用几次。**实测（2026-11-25，NAS 出口）：央视频 CDN 的同一个
-# 媒体清单地址，第 1、2 次 200，第 3 次就 403**；换一张新票立刻恢复。
+# 央视频的票据与入口寿命。**2026-11-26 只取一次票、每 5 秒拉一次清单 + 真下一片，
+# 实测（NAS 出口）**：
 #
-# 以前只按 ``addr_ttl``（默认 300 秒）复用地址，等于一张票要用到被拒为止：后台
-# 每 5 秒取一次清单，第 10 秒必然撞 403，撞完还要退避 1~5 秒。几次叠加就是 20~30
-# 秒断档，而窗口总共只有 6 片（约 30 秒）内容——刚好在这段断档里被耗干。于是
-# 「播一分多钟卡住、不自恢复」，换台时没有旧窗口可顶就是「黑屏」。
+# * 主入口 ``live-dtocnc-cdn``：0~60 秒 13 轮、26 次请求全部 200，第 65 秒分片才
+#   开始 403 —— 票据**不是**「用 2 次就废」，之前那个结论是把「入口到期」看成了
+#   「票用旧了」；
+# * 同一个 token 切到备份入口 ``bklive-dtocnc-cdn``：立刻 200，又续了 50 秒，
+#   序号连续（同一套 MEDIA-SEQUENCE），播放器无感；
+# * 另一族 ``hlsliveali-cdn`` 更短命，35 秒就废。所以每次重新取票都是在**抽签**
+#   落到哪个节点，抽到差的那个 35 秒后就卡。
 #
-# 所以用满 2 次就主动换新票，把「被拒」换成「主动换」：换票次数不变（反正第 3 次
-# 一定废），但 403 和不必要的退避都消失了。只对央视频 CDN 生效——运营商源的一张
-# 票能拉很多次，跟着换会白白烧掉换票预算。
-_TICKET_REUSE = 2
+# 也就是说：一张票能撑 110 秒（两个入口各用 55 秒），而接口自报 vkey 有效期 4 小时。
+# 以前「用满 2 次就换票」等于每 10 秒打一次 ``play_info``——每分钟 6 张票，而
+# ``play_info`` 恰恰是按出口 IP 风控的接口。这既是请求量的真正来源，也解释了为什么
+# 一个人看也会被限流：不是人多，是自己换得太勤。
+#
+# 55 秒在 60 秒的入口寿命之内留 5 秒余量；两个入口用满（110 秒）才重新取票。
+_ENTRY_TTL = 55.0
+_TICKET_TTL = 110.0
+# 某个入口刚被 403：这么久之内不再选它。
+_ENTRY_COOLDOWN = 60.0
+# 主、备入口**都**回 403 = 本机出口正在被官方限流。此后这么久一枪不打上游。
+#
+# 为什么是 30 秒而不是「退避 1 秒再试」：播放器失败后的重试是毫秒级的，我们
+# 每试一次就要打两枪（主 + 备），只会把惩罚期一轮轮续着。实测被限后连续 145
+# 秒请求全是 403，中间一次没成功——那 145 秒里有 100 多次是我们自己敲出来的。
+# 30 秒是 aki 用两天 1487 次 403 日志回放出来的拐点：冷却 5/15/30/60/120 秒
+# 分别挡掉 54/59/65/65/66% 的上游请求，30 秒之后再加长几乎不再多挡，
+# 只会让官方恢复后观众白等。
+_FORBIDDEN_COOLDOWN = 30.0
 
 
 def _is_ysp_url(url: str) -> bool:
@@ -106,6 +125,40 @@ def _is_ysp_url(url: str) -> bool:
     except ValueError:
         return False
     return host.endswith(_PLAIN_SUFFIX)
+
+
+def _mirror_entries(url: str) -> list[str]:
+    """同一个 token 的主/备入口，主在前。
+
+    央视频的一次 ``play_info`` 会给两条地址，主机名只差 ``bk`` 前缀、路径完全
+    一样（实测 ``live-dtocnc-cdn.ysp.cctv.cn`` ↔ ``bklive-dtocnc-cdn.ysp.cctv.cn``，
+    ``hlsliveali-cdn`` 同理）。主入口约 60 秒后开始对分片回 403，备入口立刻就能
+    接上，序号还是连续的——等于白捡一倍寿命，不用重新取票。
+
+    只有央视频域名这么推导。别的源主备命名没有规律，硬拼只会多打一枪 404。
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return [url]
+    host = (parts.hostname or "").lower()
+    if not host.endswith(_PLAIN_SUFFIX):
+        return [url]
+    if host.startswith("bk"):
+        order = [host[2:], host]
+    else:
+        order = [host, "bk" + host]
+    netloc_port = f":{parts.port}" if parts.port else ""
+    out: list[str] = []
+    for name in order:
+        if not name:
+            continue
+        out.append(
+            urllib.parse.urlunsplit(
+                (parts.scheme, name + netloc_port, parts.path, parts.query, parts.fragment)
+            )
+        )
+    return out or [url]
 
 
 def _ipv6_host(url: str) -> str:
@@ -374,6 +427,11 @@ _WINDOW_SEGMENTS = 9       # 最多保留几片。上游 CDN 实测留存 11 片
                            # 3 个 target duration（一片 5~8 秒 → 落后 15~24 秒），
                            # 6 片窗口只剩 6 秒余量，清单断档十几秒就吃干净，画面
                            # 卡死不恢复。9 片把余量抬到 20 秒上下。
+# 断流恢复后最多把几个缺口片接回窗口。上限 10 片（约 50 秒）：实测被限流
+# 30 秒冷却后会跳 8~10 片，正好覆盖。再多说明断得太久，接回来只会让播放器
+# 落后直播一大截，不如让它跳过去。真正的护栏是 _segment_range：CDN 上已经
+# 回收的片不会被编造出来。
+_BRIDGE_MAX = 10
 _FRESH_AGE = 6.0           # 窗口超过这么久没更新，就不再当它是新鲜的（会去上游要一份新的）
                            # 实际取值 = max(这个, 预取间隔 + 2)，见 _fresh_age
 _STALE_MAX = 45.0          # 再旧也还能发给播放器：上游一时取不到时先顶着，别让画面断。
@@ -585,6 +643,17 @@ def _parse_media(text: str, base: str):
     return head, seq, segs
 
 
+def _segment_range(head) -> int:
+    """清单头里「CDN 上还留着的最小序号」；没有这个标签（非央视频）返回 0。"""
+    for line in head or ():
+        if line.startswith("#EXT-QQHLS-SEGMENT_RANGE:"):
+            try:
+                return int(line.split(":", 1)[1].split("-", 1)[0])
+            except ValueError:
+                return 0
+    return 0
+
+
 class _Window:
     """一个频道的分片滑动窗口。
 
@@ -650,16 +719,24 @@ class _Window:
 
         have = self.seq0 + len(self.segs)   # 已经有到（不含）
         if seq > have:
-            # 中间缺了好几片，接不上：直接以新清单为准。序号跳变本身就意味着
-            # 内容不连续（预告片切回正片、上游序号重置都走这里），给新窗口第一
-            # 片补一个断点标记，让播放器重置解码器，而不是拿旧缓冲里的画面回跳。
-            self._rebase(segs)
-            if self.segs:
-                duration, uri, stamp, _disc = self.segs[0]
-                self.segs[0] = (duration, uri, stamp, True)
-            self.seq0 = seq
-            self.moved_at = now
-            return True
+            # 断流十几秒再取到时，上游窗口已经滚过去，中间缺一两片。缺的片官方
+            # 还留着（清单头的 EXT-QQHLS-SEGMENT_RANGE 是 CDN 上现存的序号范围），
+            # 同一主机同一令牌只换文件名里的序号就能取到。补回来播放器才接得上；
+            # 不补的话它手里最后一片和新清单第一片之间是断的，VLC / 观屿会跳一段，
+            # ExoPlayer 会把它当成序号跳变、重缓冲一次。
+            if self._bridge(have, seq, head or self.head):
+                # 已经补齐到 seq，下面按正常合并接着走
+                pass
+            else:
+                # 补不上（缺太多、或已超出 CDN 留存范围）：以新清单为准，给第一片
+                # 补断点标记，让播放器重置解码器，而不是拿旧缓冲里的画面回跳。
+                self._rebase(segs)
+                if self.segs:
+                    duration, uri, stamp, _disc = self.segs[0]
+                    self.segs[0] = (duration, uri, stamp, True)
+                self.seq0 = seq
+                self.moved_at = now
+                return True
 
         # 序号**回退**（``seq < seq0``）不再当成错误：央视频换票会在两个 CDN 域名
         # 之间跳，两边的序号基准差 1~2 片。这时窗口里的内容其实比新清单更靠后，
@@ -687,6 +764,40 @@ class _Window:
             self.out.pop(0)
             self.seq0 += 1
         return added
+
+    def _bridge(self, have: int, seq: int, head) -> bool:
+        """把 1~_BRIDGE_MAX 个缺口片接回窗口尾部；接不上返回 False。
+
+        能接的前提，缺一不可：
+        * 上游给了 ``EXT-QQHLS-SEGMENT_RANGE``（央视频 TS 清单有，其它源没有）；
+        * 缺的片还在 CDN 留存范围里（``kept <= have``），否则取也是 404；
+        * 窗口最后一片的地址形如 ``…-<序号>.ts``，且序号正好等于 ``have-1``。
+
+        补出来的片沿用同一主机、同一令牌，只换文件名里的序号——实测同一 token
+        下这么做能取到，CDN 不会因为文件名不同而拒。
+
+        时长用上一片的时长估（清单里没有这些片的 EXTINF）。差一两秒没关系：
+        播放器按 EXTINF 排时间轴，实际 PTS 由 TS 自己带。
+        """
+        missing = seq - have
+        if not (1 <= missing <= _BRIDGE_MAX) or not self.segs:
+            return False
+        kept = _segment_range(head)
+        if kept <= 0 or kept > have:
+            return False
+        duration, uri, _stamp, _disc = self.segs[-1]
+        match = re.search(r"-(\d+)\.ts(?:\?|$)", uri)
+        if not match or int(match.group(1)) != have - 1:
+            return False
+        each = duration if duration > 0 else self.target
+        if not (1.0 <= each <= 15.0):
+            return False
+        stem = f"-{have - 1}.ts"
+        for number in range(have, seq):
+            self.segs.append((each, uri.replace(stem, f"-{number}.ts", 1), "", False))
+            self.out.append(self.next_out)
+            self.next_out += 1
+        return True
 
     def _rebase(self, segs) -> None:
         """整窗重建：内容换成这一份，对外序号从 ``next_out`` 起继续递增。
@@ -966,14 +1077,19 @@ class Relay:
         self._addr_ttl = addr_ttl
         self._stale_max = stale_max
         self._lock = threading.Lock()
-        self._cache: dict[str, tuple[float, str, str]] = {}   # slug -> (时间, 地址, UA)
-        # 这张票已经被用了几次。央视频一张票只能用 2 次，用满就主动换，见 _TICKET_REUSE。
-        self._ticket_uses: dict[str, int] = {}
+        self._cache: dict[str, tuple[float, str, str]] = {}   # slug -> (票出生时间, 当前入口地址, UA)
+        # 央视频的主/备入口轮换表：slug -> {urls, idx, at, born}。
+        # ``at`` 是当前入口开始用的时刻，``born`` 是这张票的出生时刻。
+        # 运营商的源不进来（它们没有备用域名，一张票能一直拉）。
+        self._entries: dict[str, dict] = {}
+        # 入口 -> 冷却到期时刻。刚被 403 的入口在这一分钟内不再选。
+        self._entry_bad: dict[str, float] = {}
         # 最近发生的「异常事件」（环形缓冲，新的在后）。面板和日志都读它。
         # 在这之前服务端一条运行日志都没有：用户说「卡了」，手上只有三个累计
         # 计数，分不清是上游拒、本地退避还是窗口没推进，只能靠猜。
         self._events: deque[tuple[float, str, str]] = deque(maxlen=40)
-        self.ticket_rotations = 0   # 主动换票次数（票据用满 2 次就换，不等 403）
+        self.ticket_rotations = 0   # 重新取票次数（两个入口都用满才换，见 _TICKET_TTL）
+        self.entry_switches = 0     # 主 → 备入口切换次数（不重新取票）
         # 最近一次失败的时刻。**只做诊断**，调度看的是下面的 _next_try：
         # 「失败过」不代表「现在不能试」，这行区别是这一版的核心。
         self._failed: dict[str, float] = {}
@@ -1206,6 +1322,75 @@ class Relay:
             return self._resolver(slug, rotate=True)  # type: ignore[call-arg]
         return self._resolver(slug)
 
+    def _serve_entry(self, slug: str, now: float) -> tuple[str, str]:
+        """按入口寿命挑一条能用的地址。**调用方必须已持 self._lock。**
+
+        返回 ``(地址, 切换说明)``：没切换时说明为空串；没有可用入口时地址为空。
+
+        为什么不是「票用满几次就换」：2026-11-26 实测一张票在同一个入口上被拉了
+        26 次仍然全 200，真正到期的是**入口**（约 60 秒后开始对分片回 403），
+        不是票。所以按时间切入口，两个入口用满才换票——换票从每分钟 6 张降到
+        每两分钟 1 张。
+        """
+        ent = self._entries.get(slug)
+        hit = self._cache.get(slug)
+        if not ent or not hit:
+            return "", ""
+        if now - ent["born"] > _TICKET_TTL:
+            return "", ""
+        urls = ent["urls"]
+        idx = ent["idx"]
+        current = urls[idx] if 0 <= idx < len(urls) else ""
+        if (
+            current
+            and now - ent["at"] <= _ENTRY_TTL
+            and self._entry_bad.get(current, 0.0) <= now
+        ):
+            return current, ""
+        for nxt in range(idx + 1, len(urls)):
+            if self._entry_bad.get(urls[nxt], 0.0) > now:
+                continue
+            ent["idx"] = nxt
+            ent["at"] = now
+            self._cache[slug] = (ent["born"], urls[nxt], hit[2])
+            self.entry_switches += 1
+            age = int(now - ent["born"])
+            return urls[nxt], f"入口到点（票龄 {age} 秒），切到备用入口"
+        return "", ""
+
+    def _rotate_entry(self, slug: str) -> bool:
+        """当前入口刚被上游拒：标坏它并立刻切到下一个，返回是否切成功。
+
+        和「到点换入口」不同，这里不等 55 秒——播放器正等着这一份清单，
+        换到备份入口往往是立刻恢复（实测主入口 403 时备份入口还是 200）。
+        没有下一个可用入口就返回 False，由上层进入退避。
+        """
+        now = time.time()
+        note = ""
+        with self._lock:
+            ent = self._entries.get(slug)
+            hit = self._cache.get(slug)
+            if not ent or not hit:
+                return False
+            urls = ent["urls"]
+            idx = ent["idx"]
+            if 0 <= idx < len(urls):
+                self._entry_bad[urls[idx]] = now + _ENTRY_COOLDOWN
+            for nxt in range(idx + 1, len(urls)):
+                if self._entry_bad.get(urls[nxt], 0.0) > now:
+                    continue
+                ent["idx"] = nxt
+                ent["at"] = now
+                self._cache[slug] = (ent["born"], urls[nxt], hit[2])
+                self.entry_switches += 1
+                note = f"入口被拒，换到备用入口（第 {nxt + 1}/{len(urls)} 个）"
+                break
+            else:
+                return False
+        if note:
+            self._event(slug, note)
+        return True
+
     def upstream(
         self, slug: str, *, fresh: bool = False, rotate: bool = False, soft: bool = False
     ) -> tuple[str, str]:
@@ -1264,21 +1449,26 @@ class Relay:
             # 都是这句话，播一次问一次没有任何意义，只会一次张票往外打。
             raise RelayError(self._errors.get(slug, "该频道应版权方要求暂停直播"))
 
+        entry_note = ""
+        keep = ""
         if hit and not fresh:
-            # 地址用久了要主动换票。CDN 对同一张票据上的重复请求会越来越容易
-            # 回 403（换一个 token 就正常），所以别一直抱着同一张用。
-            #
-            # 央视频这类源还有更硬的限制：一张票只能用 2 次。只按 TTL 复用会
-            # 在第 3 次必撞 403，所以要按「用了几次」主动换，见 _TICKET_REUSE。
             with self._lock:
-                uses = self._ticket_uses.get(slug, 0)
-                limited = _is_ysp_url(hit[1])
-                if now - hit[0] <= self._addr_ttl and (not limited or uses < _TICKET_REUSE):
-                    self._ticket_uses[slug] = uses + 1
-                    return hit[1], hit[2]
-                if limited and uses >= _TICKET_REUSE:
-                    self.ticket_rotations += 1
-            fresh = True
+                if not _is_ysp_url(hit[1]):
+                    # 运营商 / 聚合源：一张票能拉很多次，只按地址 TTL 复用。
+                    if now - hit[0] <= self._addr_ttl:
+                        return hit[1], hit[2]
+                    fresh = True
+                else:
+                    # 央视频：优先在当前入口上继续，到 55 秒换备份入口，
+                    # 两个都用满（110 秒）才重新取票。见 _ENTRY_TTL / _TICKET_TTL。
+                    keep, entry_note = self._serve_entry(slug, now)
+                    if not keep:
+                        self.ticket_rotations += 1
+                        fresh = True
+            if keep:
+                if entry_note:
+                    self._event(slug, entry_note)
+                return keep, hit[2]
 
         if retry_at > now and not fresh:
             # 刚被上游拒过，退避期还没到点：手里有旧地址就继续用（播放器那边
@@ -1354,17 +1544,30 @@ class Relay:
 
         with self._lock:
             self._cache[slug] = (now, url, ua)
-            # 新票已经算用掉一次（马上要拿它去取清单）。
-            self._ticket_uses[slug] = 1
+            if _is_ysp_url(url):
+                # 记录这张票的主/备入口，之后 110 秒内不再向接口要票，
+                # 只在两个入口之间切（见 _ENTRY_TTL / _TICKET_TTL）。
+                urls = _mirror_entries(url)
+                self._entries[slug] = {"urls": urls, "idx": 0, "at": now, "born": now}
+                # 上一张票留下的入口冷却还在生效：新票可能又抽到那个坏节点，
+                # 直接跳到没在冷却的入口，别拿它去撞一次 403。
+                for nxt, item in enumerate(urls):
+                    if self._entry_bad.get(item, 0.0) > now:
+                        continue
+                    self._entries[slug]["idx"] = nxt
+                    self._cache[slug] = (now, item, ua)
+                    break
+            else:
+                self._entries.pop(slug, None)
             self._failed.pop(slug, None)
             self._errors.pop(slug, None)
-        return url, ua
+        return self._cache[slug][1], ua
 
     def forget(self, slug: str) -> None:
         """丢掉地址与清单缓存，下次请求时换新地址。"""
         with self._lock:
             self._cache.pop(slug, None)
-            self._ticket_uses.pop(slug, None)
+            self._entries.pop(slug, None)
             self._windows.pop(slug, None)
             self._raw.pop(slug, None)
             self._active.pop(slug, None)
@@ -1464,6 +1667,19 @@ class Relay:
             else:
                 self._retry_hits.pop(slug, None)
 
+    def _cool_all_forbidden(self, slug: str) -> None:
+        """主备入口同时 403：本机出口被限流，这个台 30 秒内一枪不打。
+
+        和 ``_mark_failed`` 的几秒退避是两种事：那种退避是「这一枪没打中，
+        过两秒再试」；这个是「出口正在被惩罚，再试只会把惩罚续下去」。实测
+        被限之后连续 145 秒全是 403，中间一次没成功——继续每 5 秒敲一次，等于
+        自己把 30 秒的冷却拖成两分钟。
+        """
+        with self._lock:
+            until = time.time() + _FORBIDDEN_COOLDOWN
+            self._next_try[slug] = max(self._next_try.get(slug, 0.0), until)
+            self._forbidden_until = max(self._forbidden_until, until)
+
     def stats(self) -> dict:
         """给面板看的简况。"""
         now = time.time()
@@ -1502,9 +1718,12 @@ class Relay:
             # 这一分钟已经用掉的换票额度（上限 _TICKET_BUDGET）
             "tickets": tickets,
             "ticket_budget": _TICKET_BUDGET,
-            # 主动换票次数：票据用满 2 次就换，不等 403。正常播放每分钟 6~12 次
-            # （一个台每十秒换一张）；这个数远大于 12 说明有台在反复重取。
+            # 重新取票次数：一张票两个入口、每个 55 秒，正常一个台约 0.5 次/分钟。
+            # 这个数远大于 1 说明有台在反复重取（或者在批量扫台）。
             "ticket_rotations": self.ticket_rotations,
+            # 主/备入口切换次数：到点换（55 秒）或被拒换，都不重新取票。
+            # 有它才能分清「换票多」还是「换入口多」——后者是正常开销。
+            "entry_switches": self.entry_switches,
             # 换台预热：实际发起的次数，以及当前知道多少个「下一个台」。
             # 预热失败不计入 failures，也不写 recent——它只是提前试试。
             "warm_runs": self.warm_runs,
@@ -1520,6 +1739,16 @@ class Relay:
             "dns": dns_stats(),
         }
 
+    def _ysp_client(self) -> HttpClient:
+        """取央视频清单用的客户端：带地址族记忆，403 时自动换族再试。"""
+        client = getattr(self, "_http_client", None)
+        if client is None:
+            client = HttpClient(
+                user_agent="qqlive", timeout=self._timeout, retries=1, ip_mode="auto"
+            )
+            self._http_client = client
+        return client
+
     def _fetch(
         self, url: str, ua: str, *, timeout: float | None = None
     ) -> tuple[int, dict, bytes, str]:
@@ -1533,13 +1762,30 @@ class Relay:
         """
         # Referer 不能省：官方 CDN 对缺 Referer 的请求更容易回 403
         headers = {"User-Agent": ua or "qqlive", "Referer": _REFERER}
+        if _is_ysp_url(url):
+            # 央视频必须走带「地址族记忆」的客户端，不能裸 urllib。
+            #
+            # 票据是按**取票时的出口族**分配节点的（v4 → dtocnc，v6 → hlsliveali）。
+            # 裸 urllib 每次建连都让系统重新挑，挑到另一族就是 403，而且它不会
+            # 换族重试——这就是「IPv4 看一会限流、换 IPv6 又能看一会」的真正机制：
+            # 不是被限流，是票和请求不在同一条出口上。HttpClient 记住能通的族、
+            # 403 时换另一族再试，正好把这一层补上。
+            resp = self._ysp_client().get(
+                url,
+                headers=headers,
+                deadline=time.monotonic() + (timeout or self._timeout),
+            )
+            return resp.status, dict(resp.headers or {}), resp.body, resp.url or url
         request = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=timeout or self._timeout) as resp:
                 return resp.status, dict(resp.headers), resp.read(), resp.geturl()
         except urllib.error.HTTPError as exc:
             return exc.code, dict(exc.headers or {}), exc.read() or b"", exc.geturl() or url
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            # IncompleteRead / BadStatusLine 属于 HTTPException，不是 OSError：
+            # 上游把连接掐了（清单读到一半）就会抛它。不接住的话异常会冒出
+            # _prefetch 的 except RelayError，整条后台刷新线程当场死掉。
             raise RelayError(f"上游不可达：{exc}") from exc
 
     # ---------------- 改写 ----------------
@@ -1863,6 +2109,10 @@ class Relay:
         with self._lock:
             for slug in [s for s, t in self._active.items() if now - t > _ACTIVE_FOR]:
                 self._active.pop(slug, None)
+            # 入口冷却到期就删。不清的话这张表会跟着换过的票一直长。
+            for url, until in list(self._entry_bad.items()):
+                if until <= now:
+                    self._entry_bad.pop(url, None)
             due = []
             for slug in self._active:
                 window = self._windows.get(slug)
@@ -1990,35 +2240,38 @@ class Relay:
 
         url, ua = self.upstream(slug, fresh=fresh, rotate=rotate, soft=soft)
         status, _, body, final = self._fetch(url, ua)
+        ysp_url = _is_ysp_url(url)
         if status in _GONE and not soft:
-            # 同一个清单地址连取几次就会被 CDN 拒（实测 2~5 次后开始 403，
-            # 换张新票立刻恢复）。这里先安静 1 秒再换票重取——1 秒是实测能
-            # 把「刚被拒」的窗口熬过去的最短时间，再短只会被拒得一样干脆。
-            #
-            # 这里顺手 rotate：一个台挂着好几条源时，「这条 403 了」最常见的
-            # 原因就是这条线路本身不行，换条路比死磕同一个域名划算得多。
-            # 只有一条线路时 resolver 会原地返回同一个地址，退化成原来的行为。
-            #
-            # **但连续被拒时不再重试。** 换票只对「同一张票据用旧了」有效；
-            # 一旦是出口 IP 被惩罚性限流，换票也是 100% 403。这时重试的代价是
-            # 三份：403 计数翻倍（面板上那个数字直接误导判断）、多烧一张换票
-            # 预算、以及我们自己把惩罚期一轮轮续着。多线路的源（``_resolver_rotates``）
-            # 多给一次机会，因为换线路确实可能绕开某一个域的限流。
-            with self._lock:
-                streak = self._retry_hits.get(slug, 0)
-            # 央视频的解析器内部已经做过「本族换两张票 + 换族再试」，
-            # 它回来还带 403，就是这条链路此刻真不行了，在这里再重试一轮
-            # 等于把请求翻倍（3 轮 × 2），只会把出口敲得更死。
-            ysp_url = _is_ysp_url(url)
-            if not ysp_url and (
-                streak < 1 or (self._resolver_rotates and streak < 2)
-            ):
-                time.sleep(1.0)
-                url, ua = self.upstream(slug, fresh=True, rotate=True)
-                status, _, body, final = self._fetch(url, ua)
+            # 同一个清单地址连取几次就会被 CDN 拒。**先换入口，不要急着重新取票**：
+            # 央视频的主入口到期时备份入口还是 200（实测），换过去是同一个 token、
+            # 不消耗取票预算、也不重新抽节点，一次就能接上。两个入口都被拒才往下走。
+            if ysp_url:
+                if self._rotate_entry(slug):
+                    url, ua = self.upstream(slug)
+                    status, _, body, final = self._fetch(url, ua)
+            else:
+                # 非央视频源：换一张票重取一次。一个台挂着好几条源时，「这条 403
+                # 了」最常见的原因就是这条线路本身不行，换条路比死磕划算。
+                #
+                # **但连续被拒时不再重试。** 换票只对「同一张票据用旧了」有效；
+                # 一旦是出口 IP 被惩罚性限流，换票也是 100% 403。这时重试的代价
+                # 是三份：403 计数翻倍（面板上那个数字直接误导判断）、多烧一张换票
+                # 预算、以及我们自己把惩罚期一轮轮续着。多线路的源
+                # （``_resolver_rotates``）多给一次机会，因为换线路确实可能绕开
+                # 某一个域名的限流。
+                with self._lock:
+                    streak = self._retry_hits.get(slug, 0)
+                if streak < 1 or (self._resolver_rotates and streak < 2):
+                    time.sleep(1.0)
+                    url, ua = self.upstream(slug, fresh=True, rotate=True)
+                    status, _, body, final = self._fetch(url, ua)
         if status != 200 or not body:
             if not soft:
                 self._mark_failed(slug, f"上游返回 {status}")
+                if ysp_url and status in _GONE:
+                    # 主备入口都回 403：不是这张票的问题，是本机出口正被限流。
+                    # 覆盖掉 _mark_failed 给的几秒退避，改成 30 秒一枪不打。
+                    self._cool_all_forbidden(slug)
                 # 这一条是「播不出来」的直接证据：面板上看到它密集出现，就是出口
                 # 真的在被拒；只有零星几条则属于正常换票开销。
                 self._event(slug, f"取清单失败：上游返回 {status}")

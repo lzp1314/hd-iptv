@@ -25,7 +25,8 @@ from iptvhd.relay import (
     _RETRY_DELAYS_DEAD,
     _STALE_MAX,
     _TICKET_BUDGET,
-    _TICKET_REUSE,
+    _ENTRY_TTL,
+    _TICKET_TTL,
     _WINDOW_SEGMENTS,
 )
 
@@ -471,16 +472,21 @@ class PlaylistContractTest(unittest.TestCase):
         self.assertNotIn("#EXT-X-START", text)
 
 
-class TicketReuseTest(unittest.TestCase):
-    """央视频的票据只能用 2 次，第 3 次必 403。
+class EntryRotationTest(unittest.TestCase):
+    """央视频：一张票两个入口，按**时间**切，不按次数换票。
 
-    所以要在**用满之前**主动换票，而不是抱着同一张一直用、等它被拒。只按
-    ``addr_ttl``（300 秒）复用的话，后台每 5 秒取一次清单，第 10 秒就必然撞
-    403，撞完还要退避 1~5 秒，几次叠加就是 20~30 秒断档——窗口总共就 30 秒
-    内容，正好被耗干，于是「播一分多钟卡住、不自恢复」。
+    2026-11-26 实测（NAS 出口，全程只取一次票、每 5 秒拉清单并真下一片）：
+
+    * 主入口 ``live-dtocnc-cdn``：0~60 秒 13 轮 26 次请求全部 200，第 65 秒
+      分片才开始 403 —— 票据**不是**「用 2 次就废」，之前把「入口到期」看成了
+      「票用旧了」；
+    * 同一个 token 切到 ``bklive-dtocnc-cdn``：立刻 200，又续了 50 秒，序号连续。
+
+    所以一张票能撑约 110 秒。以前按「用满 2 次」换票，等于每 10 秒打一次
+    ``play_info``（每分钟 6 张），而它是按出口 IP 风控的接口——一个人看也会被限流。
     """
 
-    def _relay_with(self, host):
+    def _relay_with(self, host="live-dtocnc-cdn.ysp.cctv.cn"):
         calls = []
 
         def resolver(slug):
@@ -489,12 +495,55 @@ class TicketReuseTest(unittest.TestCase):
 
         return Relay(resolver, warm=False), calls
 
-    def test_ysp_ticket_rotates_after_two_uses(self):
-        relay, calls = self._relay_with("live-dtocnc-cdn.ysp.cctv.cn")
-        relay.upstream("cctv1")   # 冷启动，向接口要第一张票
-        relay.upstream("cctv1")   # 第二次，复用同一张
-        relay.upstream("cctv1")   # 已经用满 2 次：主动换票，不等它 403
-        self.assertEqual(len(calls), 2, "第 3 次必须换票，否则这里就是一次 403")
+    def _expire_entry(self, relay, slug="cctv1"):
+        relay._entries[slug]["at"] -= _ENTRY_TTL + 0.1
+
+    def test_same_ticket_reused_within_entry_ttl(self):
+        relay, calls = self._relay_with()
+        for _ in range(5):
+            relay.upstream("cctv1")
+        self.assertEqual(len(calls), 1, "55 秒内反复取清单不该重新要票")
+
+    def test_switches_to_backup_entry_without_new_ticket(self):
+        relay, calls = self._relay_with()
+        relay.upstream("cctv1")
+        self._expire_entry(relay)
+        url = relay.upstream("cctv1")[0]
+        self.assertEqual(len(calls), 1, "换入口是同一个 token，不用重新取票")
+        self.assertIn("bklive-dtocnc-cdn.ysp.cctv.cn", url, "主入口用满后必须切备份")
+        self.assertEqual(relay.entry_switches, 1)
+
+    def test_retickets_only_after_both_entries_spent(self):
+        relay, calls = self._relay_with()
+        relay.upstream("cctv1")          # 主入口
+        self._expire_entry(relay)
+        relay.upstream("cctv1")          # → 备入口，仍用同一张票
+        self._expire_entry(relay)
+        relay.upstream("cctv1")          # 两个都用满 → 重新取票
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(relay.ticket_rotations, 1)
+
+    def test_ticket_expires_after_total_ttl(self):
+        """两个入口都没用满，但票龄超过 110 秒也要换票。"""
+        relay, calls = self._relay_with()
+        relay.upstream("cctv1")
+        relay._entries["cctv1"]["born"] -= _TICKET_TTL + 1
+        relay.upstream("cctv1")
+        self.assertEqual(len(calls), 2)
+
+    def test_forbidden_switches_entry_immediately(self):
+        relay, calls = self._relay_with()
+        relay.upstream("cctv1")
+        self.assertTrue(relay._rotate_entry("cctv1"))
+        self.assertEqual(len(calls), 1, "被拒时先换入口，不要急着换票")
+        self.assertIn("bklive", relay._cache["cctv1"][1])
+        self.assertEqual(relay.entry_switches, 1)
+
+    def test_no_entry_left_after_backup_rejected(self):
+        relay, _ = self._relay_with()
+        relay.upstream("cctv1")
+        self.assertTrue(relay._rotate_entry("cctv1"))
+        self.assertFalse(relay._rotate_entry("cctv1"), "只有两个入口，备的也拒了就没得切")
 
     def test_other_hosts_keep_reusing(self):
         """运营商源的一张票能拉很多次，不能跟着央视频的节奏换，那会烧光换票预算。"""
@@ -503,38 +552,22 @@ class TicketReuseTest(unittest.TestCase):
             relay.upstream("cctv1")
         self.assertEqual(len(calls), 1)
 
-    def test_no_403_when_tickets_rotate(self):
-        """按「用满 2 次就换」跑 20 轮，一次 403 都不该撞上。
+    def test_both_entries_forbidden_enters_30s_cooldown(self):
+        """主备都 403 = 出口被限流，必须静默 30 秒，而不是每 5 秒再敲一次。
 
-        假的 CDN 严格复现实测规则：同一个地址第 1、2 次 200，第 3 次起 403。
-        改之前（只按 300 秒 TTL 复用）这里会稳定撞出一串 403，每次还要退避
-        1~5 秒——那正是 20~30 秒断档的来源。
+        实测被限后连续 145 秒全是 403；那 145 秒里有一大半是我们自己敲出来的。
         """
-        counter = {"n": 0}
-        seen = {}
+        relay, _ = self._relay_with()
 
-        def resolver(slug):
-            counter["n"] += 1
-            return f"https://live-dtocnc-cdn.ysp.cctv.cn/live/index.m3u8?t={counter['n']}", "qqlive"
+        def forbidden(url, ua, *, timeout=None):
+            return 403, {}, b"", url
 
-        relay = Relay(resolver, warm=False)
-        fetch = _Fetch(_playlist(100))
-        relay._fetch = fetch
-
-        def fake_fetch(url, ua, *, timeout=None):
-            n = seen[url] = seen.get(url, 0) + 1
-            if n > _TICKET_REUSE:
-                return 403, {}, b"", url
-            return fetch(url, ua, timeout=timeout)
-
-        relay._fetch = fake_fetch
-        # 取票预算（burst 10）在这里不补，跑 8 轮足够覆盖「同一张票被复用 2 次」
-        # 和「用满就换」两个分支，又不至于被预算拦住。
-        for _ in range(8):
-            relay._prefetch("cctv1")
-
-        self.assertEqual(relay.failures, 0, "主动换票之后不该再撞 403")
-        self.assertEqual(relay.stale_served, 0, "清单一直在推进，不需要拿旧清单顶")
+        relay._fetch = forbidden  # type: ignore[method-assign]
+        with self.assertRaises(RelayError):
+            relay._fetch_raw("cctv1")
+        left = relay._next_try["cctv1"] - time.time()
+        self.assertGreater(left, 20.0, "主备都被拒之后不该只退避几秒")
+        self.assertEqual(relay.entry_switches, 1, "第一次 403 应该先切备份入口")
 
 
 class LocalDnsFailTest(unittest.TestCase):
@@ -579,6 +612,76 @@ class DnsFailCacheTest(unittest.TestCase):
             "失败缓存过长 = 一次 DNS 抖动让这个域名几十秒到两分钟不可用",
         )
         self.assertEqual(net._DNS_TTL, 600.0, "成功缓存不该跟着缩短")
+
+
+class BridgeSkippedTest(unittest.TestCase):
+    """断流恢复后把缺口片接回来，播放器才不会跳一段或重缓冲。
+
+    央视频清单头带 ``EXT-QQHLS-SEGMENT_RANGE:kept-last``，说明 CDN 上还留着
+    哪些序号；同一主机同一令牌只换文件名里的序号就能取到。
+    """
+
+    HEAD = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        "#EXT-X-TARGETDURATION:5",
+        "#EXT-QQHLS-SEGMENT_RANGE:{}-{}",
+    ]
+
+    def _window(self):
+        from iptvhd.relay import _Window
+
+        return _Window()
+
+    @staticmethod
+    def _segs(first, count=3, host="https://h.example/t"):
+        # 地址形如真实清单里的「流 ID-序号.ts」，接片靠的就是文件名里的序号
+        return [(5.0, f"{host}/stream-{n}.ts", "", False) for n in range(first, first + count)]
+
+    def test_fills_gap_when_cdn_still_has_it(self):
+        from iptvhd.relay import _Window
+
+        window = _Window()
+        window.feed([h.format(100, 110) for h in self.HEAD], 99, self._segs(99), 1.0)
+        # 断了 2 片（102、103），CDN 从 100 起都还在
+        moved = window.feed([h.format(100, 112) for h in self.HEAD], 104, self._segs(104), 2.0)
+        self.assertTrue(moved)
+        self.assertEqual(len(window.segs), 8, "3 片 + 补回 2 片 + 新 3 片")
+        uris = [seg[1] for seg in window.segs]
+        self.assertIn("https://h.example/t/stream-102.ts", uris)
+        self.assertIn("https://h.example/t/stream-103.ts", uris)
+        self.assertEqual([seg[0] for seg in window.segs[3:5]], [5.0, 5.0])
+        self.assertFalse(window.segs[3][3], "补回来的片不该带断点标记")
+
+    def test_gives_up_when_gap_is_too_large(self):
+        from iptvhd.relay import _BRIDGE_MAX, _Window
+
+        window = _Window()
+        window.feed([h.format(100, 110) for h in self.HEAD], 99, self._segs(99), 1.0)
+        far = 99 + 3 + _BRIDGE_MAX + 2
+        window.feed([h.format(100, 200) for h in self.HEAD], far, self._segs(far), 2.0)
+        self.assertEqual(len(window.segs), 3, "缺口太大就重建窗口，不硬补")
+        self.assertTrue(window.segs[0][3], "重建后第一片要带断点标记")
+
+    def test_gives_up_when_cdn_already_dropped_it(self):
+        from iptvhd.relay import _Window
+
+        window = _Window()
+        window.feed([h.format(100, 110) for h in self.HEAD], 99, self._segs(99), 1.0)
+        # CDN 只从 103 起还有：缺的 102 已经没了
+        window.feed([h.format(103, 112) for h in self.HEAD], 104, self._segs(104), 2.0)
+        self.assertEqual(len(window.segs), 3)
+        self.assertTrue(window.segs[0][3])
+
+    def test_no_range_tag_means_no_bridging(self):
+        """没有 RANGE 标签（运营商、聚合源）就照旧重建，别拿序号瞎拼地址。"""
+        from iptvhd.relay import _Window
+
+        window = _Window()
+        plain = ["#EXTM3U", "#EXT-X-TARGETDURATION:5"]
+        window.feed(plain, 99, self._segs(99), 1.0)
+        window.feed(plain, 104, self._segs(104), 2.0)
+        self.assertEqual(len(window.segs), 3)
 
 
 if __name__ == "__main__":

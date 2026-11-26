@@ -188,13 +188,15 @@ class RelayTest(unittest.TestCase):
             relay.playlist("cctv1")
         self.assertEqual(len(relay.asked), 2)  # 首次 + 换地址后重试
 
-    def test_ysp_403_is_not_retried_here(self):
-        # 央视频的地址：解析器内部已经换过族、换过票，这里再重试只会把
-        # 请求翻倍（3 轮 × 2），所以只打一次就退避。
+    def test_ysp_403_switches_to_backup_entry_once(self):
+        # 央视频主入口被拒时，备份入口通常还是 200（实测），所以这里换入口
+        # 再打一枪是值得的：同一个 token、不消耗取票预算、不重新抽节点。
+        # 备份也被拒才进退避，不会无限重试。
         relay = FakeRelay({"1.m3u8": (403, "")})
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
-        self.assertEqual(len(relay.asked), 1)
+        self.assertEqual(len(relay.asked), 2)  # 主入口 + 备份入口各一次
+        self.assertIn("bkhlsliveali", relay.asked[1])
 
     def test_playlist_rejects_non_m3u8(self):
         relay = FakeRelay({"1.m3u8": (200, "<html>403</html>")})
@@ -250,17 +252,37 @@ class RelayPolicyTest(unittest.TestCase):
         relay.playlist("cctv1")
         self.assertEqual(relay.calls, 1)
 
-    def test_address_is_renewed_after_ttl(self):
-        """同一张票据用太久会被 CDN 拒（403），到期要主动换一张。"""
-        import time
+    def test_ticket_is_renewed_after_total_ttl(self):
+        """一张票能用 110 秒（主备入口各 55 秒），到点才换。
 
+        以前这里是「地址 TTL 0.05 秒到期就换票」，而央视频的地址每 10 秒就被
+        换掉一次——那是按出口 IP 限流的真正来源。入口轮换的细节见
+        tests/test_relay_discipline.py 的 EntryRotationTest。
+        """
         relay = CountingRelay()
-        relay._addr_ttl = 0.05
         relay.upstream("cctv1")
         self.assertEqual(relay.calls, 1)
-        time.sleep(0.08)
+        relay._entries["cctv1"]["born"] -= 3600  # 假装这张票已经很老了
         relay.upstream("cctv1")
         self.assertEqual(relay.calls, 2)
+
+    def test_operator_source_still_uses_addr_ttl(self):
+        """运营商的源没有备用域名，仍按地址 TTL 复用/到期换票。"""
+        import time
+
+        calls = []
+
+        def resolver(slug):
+            calls.append(slug)
+            return "https://cdn.example.com/TOKEN/index.m3u8", "qqlive"
+
+        relay = Relay(resolver, warm=False)
+        relay._addr_ttl = 0.05
+        relay.upstream("cctv1")
+        self.assertEqual(len(calls), 1)
+        time.sleep(0.08)
+        relay.upstream("cctv1")
+        self.assertEqual(len(calls), 2)
 
     def test_failed_resolve_enters_cooldown(self):
         relay = FlakyResolver()
