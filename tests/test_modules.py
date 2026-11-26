@@ -60,6 +60,27 @@ class TestModuleSettings(unittest.TestCase):
         # 关掉的仍在清单里，面板才能列出并重新打开
         self.assertEqual({x["name"] for x in sources}, {"源A", "源B"})
 
+    def test_custom_sources_are_not_listed_again_in_more_sources(self):
+        """自定义源有专属卡片，不能再在「更多源」里重复出现同一个开关。
+
+        以前两处都有：卡片上关掉它，折叠区里那个勾还亮着，用户以为没生效。
+        总数仍要算上这张卡，否则加一条源「共 N 个模块」反而不动。
+        """
+        from iptvhd import custom as custom_store
+        from iptvhd.service import _module_catalog
+
+        s = project()
+        custom_store.save(s, [
+            custom_store.CustomSource(name="本地组播", url="http://192.168.1.10:7080/x.m3u"),
+            custom_store.CustomSource(name="停用的", url="http://192.168.1.10:7080/y.m3u",
+                                      enabled=False),
+        ])
+        catalog = _module_catalog(s)
+        names = {o["name"] for o in catalog["others"]}
+        self.assertNotIn("本地组播", names)
+        self.assertNotIn("停用的", names)
+        self.assertEqual(catalog["custom"], {"count": 2, "enabled": 1})
+
     def test_catalog_lists_disabled_module_as_off(self):
         from iptvhd.service import _module_catalog
 

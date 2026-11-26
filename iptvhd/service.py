@@ -300,12 +300,28 @@ def _module_catalog(settings: Settings, result: dict | None = None) -> dict:
     for name, item in by_name.items():
         if name in covered:
             continue
+        # 自定义源有专属卡片（面板里在少儿频道后面），不再列进「更多源」，
+        # 否则同一个源在两处各有一个开关，面板上关一个、另一处还显示开着。
+        if str(item.get("type") or "") == "custom":
+            continue
         others.append({
             "name": name,
             "type": str(item.get("type") or ""),
             "enabled": bool(item.get("enabled", True)),
         })
-    return {"builtins": builtins, "others": others, "kids": kids}
+    # 自定义源不进「更多源」，但它那张卡片同样是网格里的一个模块。状态行的
+    # 「共 N 个模块」要把它算上，否则用户加一条自定义源，这个总数反而不动。
+    try:
+        from .custom import load as _load_custom
+
+        custom_items = _load_custom(settings)
+    except Exception:  # noqa: BLE001 - 坏了就当没有，不能连累整页
+        custom_items = []
+    custom = {
+        "count": len(custom_items),
+        "enabled": sum(1 for x in custom_items if x.enabled),
+    }
+    return {"builtins": builtins, "others": others, "kids": kids, "custom": custom}
 
 
 def _module_disabled_names(settings: Settings) -> set[str]:
@@ -520,6 +536,7 @@ class State:
             auto_switch=settings.auto_switch,
             upstream_denied=_ysp_cooling,
             plain_http=settings.ysp_plain,
+            ysp_ip_mode=settings.module_ip_mode("央视频"),
         )
         self.epg = Epg(settings.data_dir, settings.epg_source, settings.epg_ttl_hours)
         self.logos = Logos(settings.data_dir / "logos")
@@ -772,6 +789,7 @@ class State:
                 mode=self.settings.play_mode,
                 auto_switch=self.settings.auto_switch,
                 plain_http=self.settings.ysp_plain,
+                ysp_ip_mode=self.settings.module_ip_mode("央视频"),
             )
             if "epg_source" in clean:
                 # 换了节目单源就把旧的清掉，免得播放器拿到对不上的节目单

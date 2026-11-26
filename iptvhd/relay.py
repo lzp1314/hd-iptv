@@ -1044,6 +1044,7 @@ class Relay:
         warm: bool = True,
         upstream_denied=None,
         plain_http: bool = True,
+        ysp_ip_mode: str = "auto",
     ):
         self._resolver = resolver
         # 上游自己的出口级冷却回调（央视频 8 次拒绝后停 30 秒）。只挡「手里没有
@@ -1060,6 +1061,11 @@ class Relay:
         # 央视频分片直连时是否降成 http（见 _PLAIN_SUFFIX）。默认开：不占本机
         # 带宽、不增加本机对上游的请求，只影响「播放器自己怎么连 CDN」。
         self._plain_http = bool(plain_http)
+        # 央视频取清单用哪条地址族：跟面板上「央视频 → 地址族」那个下拉一致。
+        # 以前这里写死 auto，面板选「仅 IPv4」只管住了换票，取清单仍旧先试 IPv6
+        # ——设置和实际行为对不上，出故障时连用它排除都做不到。
+        self._ysp_ip_mode = ysp_ip_mode if ysp_ip_mode in ("auto", "ipv4", "ipv6") else "auto"
+        self._ysp_http: HttpClient | None = None
         # 播放中是否允许换到同台的下一条线路。关掉之后只「换票重取同一个地址」，
         # 不再换线路——线路之间来回跳的时候用面板上那个开关先稳住画面。
         self._auto_switch = bool(auto_switch)
@@ -1590,6 +1596,7 @@ class Relay:
         mode: str | None = None,
         auto_switch: bool | None = None,
         plain_http: bool | None = None,
+        ysp_ip_mode: str | None = None,
     ) -> None:
         """面板上改了参数后立刻生效，不用重启容器。
 
@@ -1604,6 +1611,14 @@ class Relay:
             self._fresh_age = max(_FRESH_AGE, self._prefetch_every + 2.0)
         if cache_bytes is not None:
             self._segments.resize(int(cache_bytes))
+        if ysp_ip_mode is not None and str(ysp_ip_mode).strip().lower() in (
+            "auto", "ipv4", "ipv6"
+        ):
+            wanted = str(ysp_ip_mode).strip().lower()
+            if wanted != self._ysp_ip_mode:
+                # 换族要换客户端：族记忆是按主机记的，留着旧的会把新设置顶回去。
+                self._ysp_ip_mode = wanted
+                self._ysp_http = None
         if auto_switch is not None and bool(auto_switch) != self._auto_switch:
             self._auto_switch = bool(auto_switch)
             with self._lock:
@@ -1740,13 +1755,20 @@ class Relay:
         }
 
     def _ysp_client(self) -> HttpClient:
-        """取央视频清单用的客户端：带地址族记忆，403 时自动换族再试。"""
-        client = getattr(self, "_http_client", None)
-        if client is None:
+        """取央视频清单用的客户端：地址族跟面板设置一致，403 时自动换族再试。
+
+        ``auto`` 下由 HttpClient 自己挑族并记住哪条能通；面板上明确选了
+        仅 IPv4 / 仅 IPv6 时就用那一族，被拒时才让客户端换族兜底。
+        """
+        client = self._ysp_http
+        if client is None or client.ip_mode != self._ysp_ip_mode:
             client = HttpClient(
-                user_agent="qqlive", timeout=self._timeout, retries=1, ip_mode="auto"
+                user_agent="qqlive",
+                timeout=self._timeout,
+                retries=1,
+                ip_mode=self._ysp_ip_mode,
             )
-            self._http_client = client
+            self._ysp_http = client
         return client
 
     def _fetch(

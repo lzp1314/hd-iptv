@@ -285,6 +285,10 @@ async function loadStatus() {
   }
 }
 
+// 自定义源卡片节点。模块网格每次轮询都整块重建，卡片会被摘出 DOM，按 id 也查不到了，
+// 所以这里常驻一份引用：重建后靠它把卡片（连同表单里没提交的内容和已绑事件）放回去。
+let customCardEl = null;
+
 function fillSettings(s) {
   if (settingsDirty) return;
   if ($("setPlayMode")) $("setPlayMode").value = s.play_mode || "direct";
@@ -417,6 +421,16 @@ function fillSettings(s) {
       + `</div>`
       + `</div>`);
   }
+  // 自定义源卡片排到少儿频道后面。它写在 index.html 里（不是字符串拼的，表单很长），
+  // 这里把那个节点挪进网格容器末尾。
+  //
+  // **必须缓存节点引用**：模块卡片是每次轮询都整块 innerHTML 重建的，重建会把
+  // 上次挪进去的卡片一起摘掉；那时再按 id 查询已经是 null，卡片就此消失。
+  // 拿着引用重新 append，节点连同里面已填的表单内容和绑定的事件一起回来。
+  if (!customCardEl) customCardEl = $("customSourcesBox");
+  if (customCardEl && $("builtinModules")) {
+    $("builtinModules").appendChild(customCardEl);
+  }
   if ($("moduleList")) {
     $("moduleList").innerHTML = others.map((m) => {
       const name = String(m.name || "");
@@ -427,11 +441,20 @@ function fillSettings(s) {
         + "</label>";
     }).join("") || '<p class="hint">没有其它源。</p>';
   }
+  // 一条「其它源」都没有时，这个折叠区点开只能看到「没有其它源」，纯噪音，直接收起。
+  if ($("moreSourcesBox")) $("moreSourcesBox").hidden = others.length === 0;
   if ($("moduleStatus")) {
     $("moduleStatus").hidden = false;
     const all = builtins.concat(others);
-    const on = all.filter((m) => m.enabled).length + ($("kidsEnabled")?.checked ? 1 : 0);
-    $("moduleStatus").textContent = `共 ${all.length + 1} 个模块，已启用 ${on} 个。`;
+    // 自定义源不在 others 里（它有自己的卡片、自己那张卡上写着自己的状态），
+    // 但它确实占了网格里一张卡，所以总数要算上，否则加一条源这个数不动。
+    const custom = catalog.custom || {};
+    const customCount = Number(custom.count) || 0;
+    const on = all.filter((m) => m.enabled).length
+      + ($("kidsEnabled")?.checked ? 1 : 0)
+      + (Number(custom.enabled) > 0 ? 1 : 0);
+    const total = all.length + 1 + (customCount > 0 ? 1 : 0);
+    $("moduleStatus").textContent = `共 ${total} 个模块，已启用 ${on} 个。`;
   }
   // 咪咕启用以内置卡片开关为准，回填到配置块里的下拉，两者保持同步
   const miguBuiltin = builtins.find((m) => m.name === "咪咕视频");
@@ -1459,6 +1482,7 @@ function renderCustomSources() {
   const box = $("customList");
   if (!box) return;
   box.innerHTML = "";
+  updateCustomSummary();
   if (!customSources.length) {
     const empty = document.createElement("p");
     empty.className = "hint";
@@ -1515,6 +1539,28 @@ function renderCustomSources() {
     row.append(main, actions);
     box.appendChild(row);
   });
+}
+
+// 卡片头部的状态行和标签：和上面几张模块卡一个样子，不打开表单也能看出有几个源。
+function updateCustomSummary() {
+  const line = $("customStatusLine");
+  const chips = $("customChips");
+  const total = customSources.length;
+  const on = customSources.filter((x) => x.enabled !== false).length;
+  if (line) {
+    if (!total) line.textContent = "○ 还没有自定义源 · 展开填一条地址就能加";
+    else if (!on) line.textContent = `○ 共 ${total} 个，全部已停用`;
+    else line.textContent = `● 已添加 ${total} 个 · 启用 ${on} 个 · 订阅里各成一个分组`;
+    line.className = `builtin-status ${on ? "on" : "off"}`;
+  }
+  if (chips) {
+    chips.hidden = !on;
+    chips.innerHTML = customSources
+      .filter((x) => x.enabled !== false)
+      .slice(0, 8)
+      .map((x) => `<span class="builtin-chip">${esc(x.name)}</span>`)
+      .join("");
+  }
 }
 
 async function saveCustomSources(list, okText) {

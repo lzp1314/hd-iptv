@@ -1,10 +1,15 @@
-"""央视频换票的地址族轮换：清单 403 时必须换一条链路重换票。
+"""央视频换票的地址族轮换：清单取不到时必须换一条链路重换票。
 
-背景（2026-11-25 实测）：play_info 按换票时的出口地址族分配 CDN 节点。
-用 IPv4 换票会分到 live-dtocnc-cdn，该节点对这一批票整体 403（用 IPv6 去取
-同一个地址照样 403）；用 IPv6 换票分到 hlsliveali-cdn，正常 200。
-所以「清单 403」很多时候不是出口被限流，而是票落在一个坏节点上——
-同族重试一百次也还是同一个节点，只有换族重换票才能绕开。
+背景（2026-11-26 实测修正）：CDN 节点**不是**按取票时的出口族分配的——用 IPv4
+取票分到过 hlsliveali，用 IPv6 取票拿到过 dtocnc，分配是随机的。所以这里验证的
+不是「族 → 节点」的对应关系，而是一条更朴素的性质：
+
+    某条地址族在 NAS 这条线路上取不到东西时（超时 / 403 / 清单读一半断），
+    同族重来多少次都是同样结果，唯一出路是换另一族重取一张票。
+
+历史 bug：``("auto", "ipv6", "ipv6", "ipv4")`` 四级台阶配 ``attempts=3``，
+后两轮重复同一族，IPv4 永远轮不到。面板选「自适应」时一旦 IPv6 不通就必然全灭，
+选「仅 IPv4」反而能用。
 
 不联网，全部 mock。
 """
@@ -23,7 +28,7 @@ def _manifest() -> bytes:
 
 
 class RoundModeTest(unittest.TestCase):
-    """轮换顺序：本族先换两张票，再换族。"""
+    """轮换顺序：本族先换两张票，再换族；auto 必须在 attempts 内摸到两族。"""
 
     def test_ipv6_tries_same_family_then_falls_back(self):
         seq = [ysp._round_mode("ipv6", i) for i in range(4)]
@@ -35,7 +40,21 @@ class RoundModeTest(unittest.TestCase):
 
     def test_auto_gives_bottom_layer_first_chance(self):
         self.assertEqual(ysp._round_mode("auto", 0), "auto")
-        self.assertIn("ipv4", [ysp._round_mode("auto", i) for i in range(4)])
+
+    def test_auto_reaches_ipv4_within_three_attempts(self):
+        """auto 的三轮必须覆盖到 IPv4。
+
+        线上调用是 ``attempts=3``（service._ysp_resolver），所以「第 4 轮才换族」
+        等于永远不换。这条断言就是那个 bug 的围栏。
+        """
+        seq = [ysp._round_mode("auto", i) for i in range(3)]
+        self.assertEqual(seq, ["auto", "ipv4", "ipv6"])
+        self.assertIn("ipv4", seq)
+        self.assertIn("ipv6", seq)
+
+    def test_auto_does_not_repeat_a_family(self):
+        seq = [ysp._round_mode("auto", i) for i in range(3)]
+        self.assertEqual(len(set(seq[1:])), 2, "后两轮不该是同一个族")
 
 
 class RotateTest(unittest.TestCase):
@@ -90,6 +109,52 @@ class RotateTest(unittest.TestCase):
     def test_first_segment_follows_resolved_token(self):
         url, _calls, first = self._run(base="ipv6", bad_rounds=0)
         self.assertTrue(first.startswith("https://good-node.example/tok/"), first)
+
+    def test_auto_falls_to_ipv4_on_second_round(self):
+        """auto 第一轮失败后，第二轮必须换成 IPv4 而不是再来一次 IPv6。"""
+        url, calls, _ = self._run(base="auto", bad_rounds=1)
+        self.assertIn("good-node", url)
+        self.assertEqual(calls, ["auto", "ipv4"])
+
+
+class YspClientModeTest(unittest.TestCase):
+    """面板设的地址族要真的作用到「取清单」这一步。
+
+    以前 ``Relay._ysp_client`` 写死 auto：选「仅 IPv4」只管住了换票，后台每 12 秒
+    取清单仍旧先试 IPv6 再回落。设置和实际行为不一致，出故障时连拿它排除都做不到。
+    """
+
+    def _relay(self, **kw):
+        from iptvhd.relay import Relay
+
+        return Relay(
+            lambda slug: ("https://live-dtocnc-cdn.ysp.cctv.cn/x.m3u8", "qqlive"),
+            warm=False,
+            **kw,
+        )
+
+    def test_initial_mode_is_used(self):
+        relay = self._relay(ysp_ip_mode="ipv4")
+        self.assertEqual(relay._ysp_client().ip_mode, "ipv4")
+
+    def test_configure_switches_and_drops_cached_client(self):
+        relay = self._relay(ysp_ip_mode="auto")
+        before = relay._ysp_client()
+        relay.configure(ysp_ip_mode="ipv6")
+        after = relay._ysp_client()
+        self.assertIsNot(before, after, "换族必须换客户端，否则族记忆把新设置顶回去")
+        self.assertEqual(after.ip_mode, "ipv6")
+
+    def test_same_mode_keeps_client(self):
+        relay = self._relay(ysp_ip_mode="ipv4")
+        before = relay._ysp_client()
+        relay.configure(ysp_ip_mode="ipv4")
+        self.assertIs(before, relay._ysp_client(), "没变就别重建，族记忆要留住")
+
+    def test_unknown_value_is_ignored(self):
+        relay = self._relay(ysp_ip_mode="ipv4")
+        relay.configure(ysp_ip_mode="bogus")
+        self.assertEqual(relay._ysp_client().ip_mode, "ipv4")
 
 
 if __name__ == "__main__":

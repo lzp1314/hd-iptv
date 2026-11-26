@@ -147,13 +147,22 @@
         <p class="hint result" id="moduleStatus" hidden></p>
         <p class="hint result" id="moduleUpdateNote" hidden></p>
         <div id="builtinModules" class="builtin-modules"></div>
-        <details class="more-sources" id="moreSourcesBox">
-          <summary>更多源 <span class="hint">（sources.toml 里的其它条目，各自独立开关）</span></summary>
-          <div id="moduleList" class="module-list"></div>
-        </details>
-        <details class="more-sources" id="customSourcesBox">
-          <summary>自定义源 <span class="hint">（rtp2http / 自建源，自己填地址；源名就是订阅里的分组名）</span></summary>
-          <div class="custom-sources">
+        <!-- 自定义源：渲染模块时由脚本挪进 builtinModules 末尾（排在少儿频道后面），
+             所以它的边框、内边距、标题行跟上面几张模块卡是同一套样式。
+             写成 details 是为了默认收起——表单占地方，不打开时只露一行状态。 -->
+        <details class="builtin-module custom-card" id="customSourcesBox">
+          <summary class="builtin-head custom-head">
+            <span class="custom-head-row">
+              <span class="builtin-name">自定义源</span>
+              <span class="module-type">rtp2http / 自建源</span>
+              <span class="builtin-arrow">›</span>
+            </span>
+            <!-- 状态行放在 summary 里：details 收起时只有 summary 可见，
+                 放到里面就永远看不到「有几个源」这句了 -->
+            <span class="builtin-status" id="customStatusLine">○ 正在读取…</span>
+          </summary>
+          <div class="builtin-chips" id="customChips" hidden></div>
+          <div class="builtin-detail">
             <p class="hint">
               三种都能填：<b>列表地址</b>（M3U / TXT，程序自己识别）、<b>一条裸流地址</b>
               （rtp2http 的 <code>/udp/239.x.x.x:端口</code>）、或<b>逐行「频道名,地址」</b>。
@@ -187,6 +196,10 @@
             </div>
             <p class="hint result" id="customStatus" hidden></p>
           </div>
+        </details>
+        <details class="more-sources" id="moreSourcesBox">
+          <summary>更多源 <span class="hint">（sources.toml 里的其它条目，各自独立开关）</span></summary>
+          <div id="moduleList" class="module-list"></div>
         </details>
         <p class="hint" id="moduleNote">
           模块把 sources.toml 里相关的源归到一组管理：官方直连已并入「运营商官方源」，

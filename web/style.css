@@ -474,6 +474,16 @@ code {
 
 /* 自定义源：一行一条（名称 + 地址 + 操作），沿用两列网格会挤成一团 */
 .custom-sources { margin-top: 12px; }
+/* 自定义源卡片：跟内置模块同一套外观，占满整行（表单是宽的），标题行可点开收起 */
+.custom-card { grid-column: 1 / -1; }
+.custom-card > summary.custom-head { display: block; list-style: none; cursor: pointer; }
+.custom-card > summary.custom-head::-webkit-details-marker { display: none; }
+.custom-head-row { display: flex; align-items: center; gap: 9px; }
+.custom-card .custom-head .builtin-status { display: block; margin: 6px 0 0; }
+.custom-card .builtin-arrow { transition: transform .12s ease; }
+.custom-card[open] .builtin-arrow { transform: rotate(90deg); }
+.custom-card .builtin-chips[hidden] { display: none; }
+.custom-card .builtin-detail > .hint:first-child { margin-top: 4px; }
 .custom-list { grid-template-columns: 1fr; }
 .custom-list .module-row { cursor: default; align-items: flex-start; }
 .custom-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
