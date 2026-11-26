@@ -94,13 +94,14 @@
     </div>
     <p class="hint">
       保存后立刻生效，不用重启容器。上游按出口 IP 限频，别把「自动更新间隔」调太勤，
-      也别对着一堆台连点重试。「播放方式」平时用直连（分片由播放器自己去 CDN 取，最流畅），
-      播放器报跨域或 403 时再换成经本机转发。
+      也别对着一堆台连点重试。「播放方式」只决定其余源：央视频、咪咕、以及落在 IPv6 上的
+      源会自动走本机转发，跟这里选什么无关。某一类源在播放器上普遍报 403 / 黑屏时，
+      再整站切成经本机转发。
     </p>
     <div class="form">
       <label>播放方式
         <select id="setPlayMode">
-          <option value="direct">直连 CDN（推荐）</option>
+          <option value="direct">直连 CDN（省本机带宽）</option>
           <option value="proxy">经本机转发</option>
         </select>
       </label>
