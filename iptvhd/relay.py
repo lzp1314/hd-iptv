@@ -67,8 +67,16 @@ _URI_ATTR = re.compile(r'URI="([^"]+)"')
 # 清单滚到第几片了。同一个地址反复取却一直是这个数，就说明清单冻住了
 _SEQ_LINE = re.compile(r"#EXT-X-MEDIA-SEQUENCE:\s*(\d+)")
 
-# 视为「地址已失效」的状态码
-_GONE = (401, 403, 404, 410)
+# 视为「地址已失效」的状态码。
+# 417（Expectation Failed）也算：央视频的 mobilelive 节点对同一个清单地址
+# 请求几次之后就回 417，换个入口或换票立刻恢复（2026-11-27 实测）。以前它
+# 不在表里，落到「非 200」分支只做几秒退避，不换入口——只能等退避完再撞同一个
+# 坏地址，CCTV-6 因此反复断流。
+_GONE = (401, 403, 404, 410, 417)
+
+# 真的「本机出口被上游拒绝」。417 不在此列：它是签名/请求层面的拒绝，换个入口
+# 就能过，不该当成出口限流去整台冷却 30 秒。
+_FORBIDDEN = (401, 403, 410)
 
 # 分片被拒时，重试前的等待
 _RETRY_PAUSE = 0.25
@@ -2000,6 +2008,25 @@ class Relay:
         """返回改写后的 m3u8 文本（只要正文）。"""
         return self.playlist_info(slug, prefix)[0]
 
+    def _window_ttl(self, window: "_Window") -> float:
+        """这份窗口算「新鲜」的最长年龄（秒）。
+
+        ``_fresh_age`` 是按「预取间隔 + 2」定的（默认 5 → 7 秒；面板调到 10 就
+        是 12 秒），它假设窗口里的内容至少能播这么久。这个假设对多数台成立
+        （一片 4~5 秒、清单 3 片 = 14~15 秒），但对**片长只有 3 秒的台**不成立：
+        清单 3 片只有 9 秒，12 秒的「新鲜期」比内容本身还长——播放器 9 秒就播完，
+        再请求时拿到的还是同一份，``MEDIA-SEQUENCE`` 不动，于是把同 3 片反复播。
+
+        所以新鲜期不能超过「窗口能播多久」的 80%：剩下的 20% 留给刷新往返与上游偶发跳片。
+        CCTV-6 9 秒 → 7.2 秒就该去要新的；普通台 15 秒 → 12 秒，行为与以前一致
+        ``_fresh_age``，行为与以前完全一致。窗口攒到 9 片（27 秒）后同样回到
+        ``_fresh_age``。
+        """
+        cover = sum(seg[0] for seg in window.segs if seg[0] > 0)
+        if cover <= 0:
+            return self._fresh_age
+        return min(self._fresh_age, cover * 0.8)
+
     def playlist_info(self, slug: str, prefix: str = "") -> tuple[str, bool, int]:
         """返回 ``(清单正文, 是不是旧的那份, 首个分片序号)``。
 
@@ -2031,7 +2058,11 @@ class Relay:
         self._ensure_ticker()
 
         # 新鲜的：直接发。
-        if window is not None and window.segs and now - window.at <= self._fresh_age:
+        # 「新鲜」不能只看多久之前取的，还要看**窗口里还剩多少能播**。
+        # CCTV-6 一片 3 秒、清单只给 3 片（9 秒），而 fresh_age 是 12 秒：
+        # 播完 9 秒后代码仍判定新鲜，继续下发同一份，MEDIA-SEQUENCE 一动不动，
+        # 播放器就把同 3 片反复播。按覆盖时长收一次：留 30% 余量给刷新往返。
+        if window is not None and window.segs and now - window.at <= self._window_ttl(window):
             return self._rewrite(window.text(), "", slug, prefix), False, window.first_out
         if raw is not None and now - raw[0] <= self._fresh_age:
             return self._rewrite(raw[1], raw[2], slug, prefix), False, raw[3]
@@ -2253,7 +2284,18 @@ class Relay:
                     last = raw[0]
                 else:
                     last = 0.0
-                if now - last >= self._prefetch_every:
+                # 刷新间隔要保证「这次刷新滚过的片数 ≤ 窗口现有片数 - 1」，
+                # 否则新清单的起始序号会越过窗口末尾，中间缺的那片补不回来
+                # （CCTV-6 没有 SEGMENT_RANGE 标签，_bridge 直接失效），只能整窗
+                # 重建、序号跳一段。一片 3 秒、清单 3 片的 CCTV-6 因此只能约
+                # 6 秒刷一次；普通台一片 5 秒、3 片 → 10 秒，与配置一致，不受影响。
+                # 窗口攒到 9 片后回到 ``_prefetch_every``。
+                gap = self._prefetch_every
+                if window is not None and window.segs:
+                    step = window.target if window.target > 0 else 0.0
+                    if step > 0:
+                        gap = min(gap, max(1.0, step * (len(window.segs) - 1)))
+                if now - last >= gap:
                     due.append(slug)
         for slug in due:
             self._prefetch(slug)
@@ -2379,6 +2421,18 @@ class Relay:
                 if self._rotate_entry(slug):
                     url, ua = self.upstream(slug)
                     status, _, body, final = self._fetch(url, ua)
+                # 主备都拒：**先换一张新票重试一次**，别急着认定出口被封。
+                # 2026-11-27 实测 CCTV-6（mobilelive 节点）：主备同时 403 时，
+                # 换新票拿到的地址立刻 200——那是这张票的两个入口都用旧了，不是
+                # 本机被限流。以前这里直接 30 秒静默，正好把窗口里那 9 秒耗干，
+                # 用户看到的就是断流 + 限流横幅反复出现。连续两次被拒（streak≥1）
+                # 才认为真是出口级限流，交给下面 _cool_all_forbidden。
+                if status in _GONE:
+                    with self._lock:
+                        streak = self._retry_hits.get(slug, 0)
+                    if streak < 1:
+                        url, ua = self.upstream(slug, fresh=True)
+                        status, _, body, final = self._fetch(url, ua)
             else:
                 # 非央视频源：换一张票重取一次。一个台挂着好几条源时，「这条 403
                 # 了」最常见的原因就是这条线路本身不行，换条路比死磕划算。
@@ -2398,9 +2452,10 @@ class Relay:
         if status != 200 or not body:
             if not soft:
                 self._mark_failed(slug, f"上游返回 {status}")
-                if ysp_url and status in _GONE:
+                if ysp_url and status in _FORBIDDEN:
                     # 主备入口都回 403：不是这张票的问题，是本机出口正被限流。
                     # 覆盖掉 _mark_failed 给的几秒退避，改成 30 秒一枪不打。
+                    # 417 不算：换个入口就能过，整台冷却是过度惩罚。
                     self._cool_all_forbidden(slug)
                 # 这一条是「播不出来」的直接证据：面板上看到它密集出现，就是出口
                 # 真的在被拒；只有零星几条则属于正常换票开销。

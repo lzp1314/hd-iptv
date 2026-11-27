@@ -916,5 +916,124 @@ class SegmentEntryFailoverTest(unittest.TestCase):
         self.assertTrue(all("bklive" not in u for u in relay.seg_calls), "非央视频不该换入口")
 
 
+class ShortSegmentWindowTest(unittest.TestCase):
+    """CCTV-6 片长 3 秒：清单 3 片只有 9 秒，新鲜期不能按 12 秒算。
+
+    2026-11-27 现场：所有台流畅，唯独 CCTV-6 卡顿、断流、片段重复。实测该台
+    恒为 3 秒一片（其他台 4~5 秒），清单同样只给 3 片 = 9 秒；而面板的
+    playlist_ttl=10 让 ``_fresh_age`` 变成 12 秒。窗口 9 秒播完后代码仍判定
+    「新鲜」，继续下发同一份，``MEDIA-SEQUENCE`` 一动不动，播放器反复播同 3 片。
+    """
+
+    def _relay(self, duration: float, ttl: float = 10.0):
+        relay = Relay(
+            lambda slug: ("https://live-dtocnc-cdn.ysp.cctv.cn/TOK/i.m3u8", "qqlive"),
+            warm=False,
+            prefetch_every=ttl,
+        )
+        relay._absorb(
+            "cctv6", _playlist(100, duration=duration).decode(), "https://live-dtocnc-cdn.ysp.cctv.cn/TOK/"
+        )
+        return relay
+
+    def test_short_segments_shrink_freshness(self):
+        relay = self._relay(3.0)
+        window = relay._windows["cctv6"]
+        self.assertAlmostEqual(sum(s[0] for s in window.segs), 9.0)
+        self.assertLess(relay._window_ttl(window), relay._fresh_age)
+        self.assertLessEqual(relay._window_ttl(window), 7.21)
+
+    def test_normal_segments_keep_fresh_age(self):
+        relay = self._relay(5.0)  # 3 片 = 15 秒，够 12 秒的新鲜期
+        window = relay._windows["cctv6"]
+        self.assertAlmostEqual(relay._window_ttl(window), relay._fresh_age)
+
+    def test_short_window_goes_stale_before_content_runs_out(self):
+        """播完 9 秒内容之后不能再当新鲜清单原样下发——这正是重复播放的成因。"""
+        relay = self._relay(3.0)
+        window = relay._windows["cctv6"]
+        window.at -= 8.0
+        self.assertGreater(8.0, relay._window_ttl(window), "8 秒时应已判定不新鲜")
+        self.assertLess(8.0, relay._fresh_age, "按旧的 12 秒判定会被误认为新鲜")
+
+
+class Forbidden417Test(unittest.TestCase):
+    """417 也是「地址失效」，要换入口；但不算出口被限流，不该整台冷却 30 秒。
+
+    央视频 mobilelive 节点对同一清单地址请求几次就回 417，换 bk 镜像立刻 200
+    （2026-11-27 实测）。以前 417 不在 _GONE 里，只做几秒退避、不换入口，只能
+    等退避完再撞同一个坏地址——CCTV-6 因此反复断流、横幅反复出现。
+    """
+
+    MAIN = "https://mobilelive-cnc-cdn.ysp.cctv.cn/TOK/i.m3u8"
+    BACKUP = "https://bkmobilelive-cnc-cdn.ysp.cctv.cn/TOK/i.m3u8"
+
+    def _relay(self, status: int, backup_ok: bool):
+        class _R(Relay):
+            def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001 - 测试替身
+                if url.endswith(".m3u8"):
+                    if "bkmobilelive" in url and backup_ok:
+                        return 200, {}, _playlist(100), url
+                    return status, {}, b"", url
+                return 200, {"Content-Type": "video/mp2t"}, b"x" * 1024, url
+
+        return _R(lambda slug: (self.MAIN, "qqlive"), warm=False)
+
+    def test_417_switches_to_backup_entry(self):
+        relay = self._relay(417, backup_ok=True)
+        text, _base = relay._fetch_raw("cctv6")
+        self.assertIn("#EXTM3U", text)
+        self.assertEqual(relay.entry_switches, 1, "417 应触发换入口")
+        self.assertEqual(relay._forbidden_until, 0.0, "417 不该触发整台 30 秒冷却")
+
+    def test_417_without_backup_does_not_cool_channel(self):
+        relay = self._relay(417, backup_ok=False)
+        with self.assertRaises(RelayError):
+            relay._fetch_raw("cctv6")
+        self.assertEqual(relay._forbidden_until, 0.0, "417 不是出口限流，不该冷却")
+
+
+class BothEntriesRejectedTest(unittest.TestCase):
+    """主备入口都 403 时先换一张新票，而不是直接 30 秒静默。
+
+    2026-11-27 实测 CCTV-6（mobilelive 节点）：主备同时 403 时换新票立刻 200。
+    以前这里直接 ``_cool_all_forbidden`` 静默 30 秒，正好把窗口里那 9 秒耗干，
+    用户看到的是断流 + 限流横幅反复出现。
+    """
+
+    def _relay(self, ticket_ok: bool):
+        calls: list[str] = []
+
+        def resolver(slug):  # noqa: ANN001
+            calls.append(slug)
+            return f"https://live-dtocnc-cdn.ysp.cctv.cn/T{len(calls)}/i.m3u8", "qqlive"
+
+        class _R(Relay):
+            def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001 - 测试替身
+                if url.endswith(".m3u8"):
+                    if "bklive" in url:
+                        return 403, {}, b"", url
+                    if ticket_ok and "/T2/" in url:
+                        return 200, {}, _playlist(100), url
+                    return 403, {}, b"", url
+                return 200, {"Content-Type": "video/mp2t"}, b"x", url
+
+        return _R(resolver, warm=False), calls
+
+    def test_new_ticket_rescues_both_entries_rejected(self):
+        relay, calls = self._relay(ticket_ok=True)
+        text, _base = relay._fetch_raw("cctv6")
+        self.assertIn("#EXTM3U", text)
+        self.assertEqual(len(calls), 2, "主备都拒后应换一张新票")
+        self.assertEqual(relay._forbidden_until, 0.0, "换票救回就不该整台冷却 30 秒")
+
+    def test_still_rejected_after_new_ticket_cools(self):
+        relay, calls = self._relay(ticket_ok=False)
+        with self.assertRaises(RelayError):
+            relay._fetch_raw("cctv6")
+        self.assertEqual(len(calls), 2, "只换一次票，不要反复抽")
+        self.assertGreater(relay._forbidden_until, time.time(), "换票仍被拒才认定出口限流")
+
+
 if __name__ == "__main__":
     unittest.main()

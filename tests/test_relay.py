@@ -190,11 +190,13 @@ class RelayTest(unittest.TestCase):
     def test_ysp_403_switches_to_backup_entry_once(self):
         # 央视频主入口被拒时，备份入口通常还是 200（实测），所以这里换入口
         # 再打一枪是值得的：同一个 token、不消耗取票预算、不重新抽节点。
-        # 备份也被拒才进退避，不会无限重试。
+        # 主备都被拒后再换**一张新票**试一次——实测 CCTV-6 的节点上，主备同时
+        # 403 往往就是这张票用旧了，换票立刻 200（2026-11-27）。两次都被拒才
+        # 进退避，不会无限重试。
         relay = FakeRelay({"1.m3u8": (403, "")})
         with self.assertRaises(RelayError):
             relay.playlist("cctv1")
-        self.assertEqual(len(relay.asked), 2)  # 主入口 + 备份入口各一次
+        self.assertEqual(len(relay.asked), 3)  # 主入口 + 备份入口 + 换新票
         self.assertIn("bkhlsliveali", relay.asked[1])
 
     def test_playlist_rejects_non_m3u8(self):
