@@ -99,13 +99,14 @@ _PLAIN_SUFFIX = (".ysp.cctv.cn",)
 # * 另一族 ``hlsliveali-cdn`` 更短命，35 秒就废。所以每次重新取票都是在**抽签**
 #   落到哪个节点，抽到差的那个 35 秒后就卡。
 #
-# 也就是说：一张票能撑 110 秒（两个入口各用 55 秒），而接口自报 vkey 有效期 4 小时。
+# 也就是说：一张票能撑 110 秒（两个入口各约 60 秒），而接口自报 vkey 有效期 4 小时。
 # 以前「用满 2 次就换票」等于每 10 秒打一次 ``play_info``——每分钟 6 张票，而
 # ``play_info`` 恰恰是按出口 IP 风控的接口。这既是请求量的真正来源，也解释了为什么
 # 一个人看也会被限流：不是人多，是自己换得太勤。
 #
-# 55 秒在 60 秒的入口寿命之内留 5 秒余量；两个入口用满（110 秒）才重新取票。
-_ENTRY_TTL = 55.0
+# 入口寿命不固定（实测 60/110/258 秒都有），不按固定时间切。入口什么时候坏，
+# 只有上游的 403 说得准：被拒就换备用入口（``_rotate_entry``），两个都坏才换票。
+# 票本身给一个总寿命上限，防止一张票被无限续用。
 _TICKET_TTL = 110.0
 # 某个入口刚被 403：这么久之内不再选它。
 _ENTRY_COOLDOWN = 60.0
@@ -1115,6 +1116,10 @@ class Relay:
         self._events: deque[tuple[float, str, str]] = deque(maxlen=40)
         self.ticket_rotations = 0   # 重新取票次数（两个入口都用满才换，见 _TICKET_TTL）
         self.entry_switches = 0     # 主 → 备入口切换次数（不重新取票）
+        # 分片被拒后换备用入口救回的次数。和 entry_switches 分开记：前者是
+        # 清单侧，后者曾经完全不存在，分片被拒只能干等——这个数能直接看出
+        # 「分片救援」到底有没有在工作。
+        self.segment_entry_switches = 0
         # 最近一次失败的时刻。**只做诊断**，调度看的是下面的 _next_try：
         # 「失败过」不代表「现在不能试」，这行区别是这一版的核心。
         self._failed: dict[str, float] = {}
@@ -1377,14 +1382,15 @@ class Relay:
         return self._resolver(slug)
 
     def _serve_entry(self, slug: str, now: float) -> tuple[str, str]:
-        """按入口寿命挑一条能用的地址。**调用方必须已持 self._lock。**
+        """挑当前没被标坏的地址。**调用方必须已持 self._lock。**
 
         返回 ``(地址, 切换说明)``：没切换时说明为空串；没有可用入口时地址为空。
 
-        为什么不是「票用满几次就换」：2026-11-26 实测一张票在同一个入口上被拉了
-        26 次仍然全 200，真正到期的是**入口**（约 60 秒后开始对分片回 403），
-        不是票。所以按时间切入口，两个入口用满才换票——换票从每分钟 6 张降到
-        每两分钟 1 张。
+        只按 403 切，不按时间切。2026-11-26 实测票寿命有 60/110/258 秒三种，
+        写死 55 秒切入口是过度拟合：对 258 秒的长寿票浪费一次切换，对提前失效
+        的票又太晚。入口什么时候坏，只有上游的 403 说了算——所以切入口的触发
+        统一收到 403 那条链（``_rotate_entry`` / ``_fetch_with_entry_failover``），
+        这里只负责把「还没被标坏的当前入口」原样交出去。
         """
         ent = self._entries.get(slug)
         hit = self._cache.get(slug)
@@ -1395,29 +1401,16 @@ class Relay:
         urls = ent["urls"]
         idx = ent["idx"]
         current = urls[idx] if 0 <= idx < len(urls) else ""
-        if (
-            current
-            and now - ent["at"] <= _ENTRY_TTL
-            and self._entry_bad.get(current, 0.0) <= now
-        ):
+        if current and self._entry_bad.get(current, 0.0) <= now:
             return current, ""
-        for nxt in range(idx + 1, len(urls)):
-            if self._entry_bad.get(urls[nxt], 0.0) > now:
-                continue
-            ent["idx"] = nxt
-            ent["at"] = now
-            self._cache[slug] = (ent["born"], urls[nxt], hit[2])
-            self.entry_switches += 1
-            age = int(now - ent["born"])
-            return urls[nxt], f"入口到点（票龄 {age} 秒），切到备用入口"
         return "", ""
 
     def _rotate_entry(self, slug: str) -> bool:
         """当前入口刚被上游拒：标坏它并立刻切到下一个，返回是否切成功。
 
-        和「到点换入口」不同，这里不等 55 秒——播放器正等着这一份清单，
-        换到备份入口往往是立刻恢复（实测主入口 403 时备份入口还是 200）。
-        没有下一个可用入口就返回 False，由上层进入退避。
+        这是现在唯一的换入口触发点——不再按固定时间切。播放器正等着这一份
+        清单/分片，换到备份入口往往是立刻恢复（实测主入口 403 时备份入口
+        还是 200）。没有下一个可用入口就返回 False，由上层进入退避。
         """
         now = time.time()
         note = ""
@@ -1513,8 +1506,8 @@ class Relay:
                         return hit[1], hit[2]
                     fresh = True
                 else:
-                    # 央视频：优先在当前入口上继续，到 55 秒换备份入口，
-                    # 两个都用满（110 秒）才重新取票。见 _ENTRY_TTL / _TICKET_TTL。
+                    # 央视频：优先在当前入口上继续，只有被 403 标坏才换备份；
+                    # 两个都坏了、或票龄超过 _TICKET_TTL 才重新取票。
                     keep, entry_note = self._serve_entry(slug, now)
                     if not keep:
                         self.ticket_rotations += 1
@@ -1600,7 +1593,7 @@ class Relay:
             self._cache[slug] = (now, url, ua)
             if _is_ysp_url(url):
                 # 记录这张票的主/备入口，之后 110 秒内不再向接口要票，
-                # 只在两个入口之间切（见 _ENTRY_TTL / _TICKET_TTL）。
+                # 只在两个入口之间切，按 403 触发（见 _rotate_entry / _TICKET_TTL）。
                 urls = _mirror_entries(url)
                 self._entries[slug] = {"urls": urls, "idx": 0, "at": now, "born": now}
                 # 上一张票留下的入口冷却还在生效：新票可能又抽到那个坏节点，
@@ -1800,12 +1793,16 @@ class Relay:
             # 这一分钟已经用掉的换票额度（上限 _TICKET_BUDGET）
             "tickets": tickets,
             "ticket_budget": _TICKET_BUDGET,
-            # 重新取票次数：一张票两个入口、每个 55 秒，正常一个台约 0.5 次/分钟。
+            # 重新取票次数：一张票两个入口，只有票龄超过 _TICKET_TTL 或两个
+            # 入口都被拒才换，正常一个台远低于 1 次/分钟。
             # 这个数远大于 1 说明有台在反复重取（或者在批量扫台）。
             "ticket_rotations": self.ticket_rotations,
-            # 主/备入口切换次数：到点换（55 秒）或被拒换，都不重新取票。
+            # 主/备入口切换次数：全部由 403 触发，不重新取票。
             # 有它才能分清「换票多」还是「换入口多」——后者是正常开销。
             "entry_switches": self.entry_switches,
+            # 分片被拒后换备用入口救回的次数（清单侧的切换记在 entry_switches）。
+            # 三台同看时这个数在涨，说明分片救援在干活而不是干等 403。
+            "segment_entry_switches": self.segment_entry_switches,
             # 换台预热：实际发起的次数，以及当前知道多少个「下一个台」。
             # 预热失败不计入 failures，也不写 recent——它只是提前试试。
             "warm_runs": self.warm_runs,
@@ -1876,6 +1873,38 @@ class Relay:
             # 上游把连接掐了（清单读到一半）就会抛它。不接住的话异常会冒出
             # _prefetch 的 except RelayError，整条后台刷新线程当场死掉。
             raise RelayError(f"上游不可达：{exc}") from exc
+
+    def _fetch_with_entry_failover(
+        self, slug: str, url: str, ua: str
+    ) -> tuple[int, dict, bytes, str]:
+        """取一片；央视频被拒时换同一张票的备用入口重取一次。
+
+        清单路径 403 有 ``_rotate_entry`` 换备用入口（同一 token、实测立刻
+        200），但分片以前只原址等 0.25 秒重试——入口到期后原址还是 403，
+        播放器拿到错误就卡住。这里让分片走同一条救援链：先用原址取，被拒
+        就把 host 换成 ``_mirror_entries`` 推导的备用入口重取一次。
+
+        同时把清单入口也切走（``_rotate_entry``），否则这台设备的下一片
+        还挂在原入口上，一片一救、片片都撞。只换一次：备用也拒说明是出口
+        IP 级限流，继续重试只会把惩罚期续长。非央视频地址保持原行为。
+        """
+        status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
+        if status not in _GONE or not _is_ysp_url(url):
+            return status, headers, body, final
+
+        rotated = self._rotate_entry(slug)
+        alt = next((m for m in _mirror_entries(url) if m != url), "")
+        if alt:
+            status, headers, body, final = self._fetch(alt, ua, timeout=self._seg_timeout)
+            if status == 200 and body:
+                with self._lock:
+                    self.segment_entry_switches += 1
+                if not rotated:
+                    self._event(slug, "分片被拒，换备用入口取回")
+                return status, headers, body, final
+        # 备用也救不回：保留原来的偶发重试（入口刚刷新时会撞一次）
+        time.sleep(_RETRY_PAUSE)
+        return self._fetch(url, ua, timeout=self._seg_timeout)
 
     # ---------------- 改写 ----------------
     def wrap(self, slug: str, url: str, prefix: str = "") -> str:
@@ -2442,11 +2471,7 @@ class Relay:
 
         try:
             self._up_times.append(time.time())
-            status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
-            if status in _GONE:
-                # 上游偶发拒绝很常见，稍等一下再试一次，通常就过了
-                time.sleep(_RETRY_PAUSE)
-                status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
+            status, headers, body, final = self._fetch_with_entry_failover(slug, url, ua)
         finally:
             if waiter is not None:
                 with self._inflight_lock:
@@ -2550,12 +2575,15 @@ class Relay:
             except RelayError:
                 ua = "qqlive"
             self._up_times.append(time.time())
-            status, headers, body, _final = self._fetch(url, ua, timeout=self._seg_timeout)
+            # 和前台分片走同一条链：被拒先换备用入口救一次。以前预取直接
+            # 调裸 _fetch，撞 403 就全局停 30 秒 + 清空队列，结果三台实测
+            # 预取全程 0 次——等于白开。
+            status, headers, body, _final = self._fetch_with_entry_failover(slug, url, ua)
             if status in _GONE:
+                # 备用入口也拒了：只跳过这一片，不牵连别的台、不清空队列。
+                # 出口级 30 秒冷却仍由清单侧的 _cool_all_forbidden 统一管，
+                # 这里再停一次只会让预取形同虚设。
                 self.prefetch_failed += 1
-                # 出口被拒：立刻停一轮，别把正在播的人一起拖下水
-                self._prefetch_pause_until = time.time() + _FORBIDDEN_COOLDOWN
-                self._drain_prefetch()
                 return
             if status != 200 or not body:
                 self.prefetch_failed += 1

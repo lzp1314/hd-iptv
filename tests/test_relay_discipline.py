@@ -25,7 +25,6 @@ from iptvhd.relay import (
     _RETRY_DELAYS_DEAD,
     _STALE_MAX,
     _TICKET_BUDGET,
-    _ENTRY_TTL,
     _TICKET_TTL,
     _WINDOW_SEGMENTS,
 )
@@ -473,17 +472,11 @@ class PlaylistContractTest(unittest.TestCase):
 
 
 class EntryRotationTest(unittest.TestCase):
-    """央视频：一张票两个入口，按**时间**切，不按次数换票。
+    """央视频：一张票两个入口，按 **403** 切，不按固定时间切。
 
-    2026-11-26 实测（NAS 出口，全程只取一次票、每 5 秒拉清单并真下一片）：
-
-    * 主入口 ``live-dtocnc-cdn``：0~60 秒 13 轮 26 次请求全部 200，第 65 秒
-      分片才开始 403 —— 票据**不是**「用 2 次就废」，之前把「入口到期」看成了
-      「票用旧了」；
-    * 同一个 token 切到 ``bklive-dtocnc-cdn``：立刻 200，又续了 50 秒，序号连续。
-
-    所以一张票能撑约 110 秒。以前按「用满 2 次」换票，等于每 10 秒打一次
-    ``play_info``（每分钟 6 张），而它是按出口 IP 风控的接口——一个人看也会被限流。
+    2026-11-26 实测（NAS 出口）票寿命有 60/110/258 秒三种，写死 55 秒切入口
+    是过度拟合。入口什么时候坏只有上游 403 说得准，所以切入口的触发统一收到
+    403 那条链（``_rotate_entry`` / ``_fetch_with_entry_failover``）。
     """
 
     def _relay_with(self, host="live-dtocnc-cdn.ysp.cctv.cn"):
@@ -495,36 +488,45 @@ class EntryRotationTest(unittest.TestCase):
 
         return Relay(resolver, warm=False), calls
 
-    def _expire_entry(self, relay, slug="cctv1"):
-        relay._entries[slug]["at"] -= _ENTRY_TTL + 0.1
-
-    def test_same_ticket_reused_within_entry_ttl(self):
+    def test_same_entry_reused_without_403(self):
         relay, calls = self._relay_with()
         for _ in range(5):
             relay.upstream("cctv1")
-        self.assertEqual(len(calls), 1, "55 秒内反复取清单不该重新要票")
+        self.assertEqual(len(calls), 1, "没被 403 之前不该换票")
+        self.assertEqual(relay.entry_switches, 0, "没被 403 之前不该切入口")
+
+    def test_time_alone_does_not_switch_entry(self):
+        """入口 ages 很久也不能仅因时间就切——这是撤掉 _ENTRY_TTL 的关键断言。"""
+        relay, calls = self._relay_with()
+        relay.upstream("cctv1")
+        original = relay._cache["cctv1"][1]
+        relay._entries["cctv1"]["at"] -= 3600
+        url = relay.upstream("cctv1")[0]
+        self.assertEqual(url, original, "过了 1 小时也不该只因时间切走")
+        self.assertEqual(relay.entry_switches, 0)
+        self.assertEqual(len(calls), 1)
 
     def test_switches_to_backup_entry_without_new_ticket(self):
         relay, calls = self._relay_with()
         relay.upstream("cctv1")
-        self._expire_entry(relay)
+        self.assertTrue(relay._rotate_entry("cctv1"))
         url = relay.upstream("cctv1")[0]
         self.assertEqual(len(calls), 1, "换入口是同一个 token，不用重新取票")
-        self.assertIn("bklive-dtocnc-cdn.ysp.cctv.cn", url, "主入口用满后必须切备份")
+        self.assertIn("bklive-dtocnc-cdn.ysp.cctv.cn", url, "被拒后必须切备份")
         self.assertEqual(relay.entry_switches, 1)
 
-    def test_retickets_only_after_both_entries_spent(self):
+    def test_retickets_only_after_both_entries_rejected(self):
         relay, calls = self._relay_with()
         relay.upstream("cctv1")          # 主入口
-        self._expire_entry(relay)
-        relay.upstream("cctv1")          # → 备入口，仍用同一张票
-        self._expire_entry(relay)
-        relay.upstream("cctv1")          # 两个都用满 → 重新取票
+        self.assertTrue(relay._rotate_entry("cctv1"))   # 主被拒 → 备
+        relay.upstream("cctv1")
+        self.assertFalse(relay._rotate_entry("cctv1"))  # 备也被拒 → 没得切
+        relay.upstream("cctv1")          # 两个都被拒 → 重新取票
         self.assertEqual(len(calls), 2)
         self.assertEqual(relay.ticket_rotations, 1)
 
     def test_ticket_expires_after_total_ttl(self):
-        """两个入口都没用满，但票龄超过 110 秒也要换票。"""
+        """两个入口都没被拒，但票龄超过上限也要换票。"""
         relay, calls = self._relay_with()
         relay.upstream("cctv1")
         relay._entries["cctv1"]["born"] -= _TICKET_TTL + 1
@@ -811,8 +813,11 @@ class SegmentPrefetchTest(unittest.TestCase):
         self.assertTrue(relay._segments.peek(second))
         self.assertFalse(relay._segments.peek(third), "只预取一片，再往后就是浪费")
 
-    def test_forbidden_pauses_prefetch(self):
-        """预取撞 403 就先停一轮，别把正在播的人一起拖下水。"""
+    def test_forbidden_only_skips_one_segment(self):
+        """换入口也救不回时只跳过这一片，不再全局停 30 秒 + 清空队列。
+
+        以前这里一撞 403 就停 30 秒，三台实测预取全程 0 次——等于白开。
+        """
         relay, encode = self._prepared(block_next=True)
         window = relay._windows["cctv1"]
         first = window.segs[0][1]
@@ -821,7 +826,72 @@ class SegmentPrefetchTest(unittest.TestCase):
         while time.time() < deadline and relay.prefetch_failed == 0:
             time.sleep(0.02)
         self.assertGreaterEqual(relay.prefetch_failed, 1)
-        self.assertGreater(relay._prefetch_pause_until, time.time())
+        self.assertLessEqual(relay._prefetch_pause_until, time.time(), "不该全局暂停预取")
+
+
+class SegmentEntryFailoverTest(unittest.TestCase):
+    """分片 403 时换同一张票的备用入口重取，而不是干等。
+
+    现场（2026-11-27）：三台同看央视频 180 秒出现分片 403 ×2，前台分片
+    以前只原址重试一次就抛错——清单侧有换入口救援、分片侧没有，这是缺口。
+    """
+
+    MAIN = "https://live-dtocnc-cdn.ysp.cctv.cn/TOK/i.m3u8"
+    BACKUP = "https://bklive-dtocnc-cdn.ysp.cctv.cn/TOK/i.m3u8"
+
+    class _Relay(Relay):
+        def __init__(self, backup_ok: bool):
+            super().__init__(lambda slug: (self.MAIN, "qqlive"), warm=False)
+            self.backup_ok = backup_ok
+            self.seg_calls: list[str] = []
+
+        def _fetch(self, url, ua, *, timeout=None):  # noqa: ANN001 - 测试替身
+            if url.endswith(".m3u8"):
+                return 200, {}, b"#EXTM3U\n", url
+            self.seg_calls.append(url)
+            if "bklive" in url and self.backup_ok:
+                return 200, {"Content-Type": "video/mp2t"}, b"y" * 2048, url
+            return 403, {}, b"", url
+
+    def _prepared(self, backup_ok: bool):
+        from iptvhd.relay import encode
+
+        relay = self._Relay(backup_ok)
+        relay._absorb("cctv1", _playlist(100).decode(), "https://live-dtocnc-cdn.ysp.cctv.cn/TOK/")
+        now = time.time()
+        relay._cache["cctv1"] = (now, self.MAIN, "qqlive")
+        relay._entries["cctv1"] = {
+            "urls": [self.MAIN, self.BACKUP], "idx": 0, "at": now, "born": now
+        }
+        return relay, encode
+
+    def test_main_segment_403_falls_back_to_backup(self):
+        relay, encode = self._prepared(backup_ok=True)
+        window = relay._windows["cctv1"]
+        first = window.segs[0][1]
+        status, ctype, body, _ = relay.resource("cctv1", encode(first))
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"y" * 2048)
+        self.assertTrue(any("bklive" in u for u in relay.seg_calls), "应尝试备用入口")
+        self.assertGreaterEqual(relay.segment_entry_switches, 1, "前台分片应被救回")
+        self.assertIn("bklive", relay._cache["cctv1"][1], "清单入口也应切走，免得下一片再撞")
+
+    def test_both_entries_rejected_still_raises(self):
+        relay, encode = self._prepared(backup_ok=False)
+        first = relay._windows["cctv1"].segs[0][1]
+        with self.assertRaises(RelayError):
+            relay.resource("cctv1", encode(first))
+        self.assertEqual(relay.segment_entry_switches, 0, "备用也拒时不应记成救回")
+
+    def test_non_ysp_segment_keeps_original_retry(self):
+        relay, encode = self._prepared(backup_ok=True)
+        relay._cache["cctv1"] = (time.time(), "https://cdn.example.com/i.m3u8", "qqlive")
+        relay._entries.pop("cctv1", None)
+        url = "https://cdn.example.com/seg.ts"
+        relay.seg_calls.clear()
+        with self.assertRaises(RelayError):
+            relay.resource("cctv1", encode(url))
+        self.assertTrue(all("bklive" not in u for u in relay.seg_calls), "非央视频不该换入口")
 
 
 if __name__ == "__main__":
