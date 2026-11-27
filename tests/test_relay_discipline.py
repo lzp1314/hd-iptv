@@ -872,9 +872,31 @@ class SegmentEntryFailoverTest(unittest.TestCase):
         status, ctype, body, _ = relay.resource("cctv1", encode(first))
         self.assertEqual(status, 200)
         self.assertEqual(body, b"y" * 2048)
-        self.assertTrue(any("bklive" in u for u in relay.seg_calls), "应尝试备用入口")
+        self.assertTrue(any("bklive" in u for u in relay.seg_calls), "应尝试镜像入口")
         self.assertGreaterEqual(relay.segment_entry_switches, 1, "前台分片应被救回")
-        self.assertIn("bklive", relay._cache["cctv1"][1], "清单入口也应切走，免得下一片再撞")
+        self.assertIn("live-dtocnc-cdn", relay._cache["cctv1"][1], "分片救援不该改清单入口")
+        self.assertEqual(relay.entry_switches, 0, "分片救援不该触发清单侧入口轮换")
+
+    def test_rescue_never_poisons_entry_state(self):
+        """回归：入口已在备用时，连续多片救援不能再把主备都标坏、逼出换票。
+
+        2026-11-27 现场：26 秒内「换到备用入口（第 2/2）」出现 3 次，窗口反复
+        重建，播放器卡在同一片。根因是分片救援调了 ``_rotate_entry``：它在
+        idx=1（已是最后一片）时会先标坏当前入口，再发现没有下一个而失败。
+        """
+        relay, encode = self._prepared(backup_ok=True)
+        relay._entries["cctv1"]["idx"] = 1
+        relay._cache["cctv1"] = (time.time(), self.BACKUP, "qqlive")
+        relay._entries["cctv1"]["at"] = time.time() - 200  # 远超旧 _ENTRY_TTL
+        segs = relay._windows["cctv1"].segs[:3]
+        for seg in segs:
+            status, _ctype, _body, _ = relay.resource("cctv1", encode(seg[1]))
+            self.assertEqual(status, 200)
+        self.assertEqual(relay.entry_switches, 0, "分片救援不该动清单入口索引")
+        self.assertEqual(relay._entries["cctv1"]["idx"], 1, "入口索引不该被救援改掉")
+        self.assertFalse(relay._entry_bad, "救援不该把任何入口标坏")
+        url = relay.upstream("cctv1")[0]
+        self.assertEqual(url, self.BACKUP, "清单仍应停在原备用入口，不该被迫换票")
 
     def test_both_entries_rejected_still_raises(self):
         relay, encode = self._prepared(backup_ok=False)

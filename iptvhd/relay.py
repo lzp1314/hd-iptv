@@ -25,8 +25,8 @@
   没往前滚，就不是「刚好没滚」，而是那张带 token 的地址卡住了——这类卡死不报
   错，播放器播完手里的十几秒就定在那儿，只能靠比对序号抓出来
 - 分片按内容缓存（同一片不会变），重复请求、拖动、多客户端都不再打上游（仅 proxy 模式）
-- 分片被拒时先等 250ms 重试一次，仍失败才报错——分片失败播放器只会重试这一片，
-  不会跳到下一个台，所以这里可以如实报错
+- 分片被拒时换同一张票的镜像入口重取（不碰清单入口状态），镜像也拒才报错。
+  分片失败播放器只会重试这一片，不会跳到下一个台
 - 地址拿到后一直用，只有上游真的拒绝（401/403/404/410）才换新的，且换地址有
   45 秒冷却，避免失败时把接口敲爆
 
@@ -1877,30 +1877,32 @@ class Relay:
     def _fetch_with_entry_failover(
         self, slug: str, url: str, ua: str
     ) -> tuple[int, dict, bytes, str]:
-        """取一片；央视频被拒时换同一张票的备用入口重取一次。
+        """取一片；央视频被拒时换同一张票的镜像入口重取一次。
 
         清单路径 403 有 ``_rotate_entry`` 换备用入口（同一 token、实测立刻
         200），但分片以前只原址等 0.25 秒重试——入口到期后原址还是 403，
-        播放器拿到错误就卡住。这里让分片走同一条救援链：先用原址取，被拒
-        就把 host 换成 ``_mirror_entries`` 推导的备用入口重取一次。
+        播放器拿到错误就卡住。这里把 host 换成 ``_mirror_entries`` 推导的
+        镜像入口重取一次，**只救当前这一片**。
 
-        同时把清单入口也切走（``_rotate_entry``），否则这台设备的下一片
-        还挂在原入口上，一片一救、片片都撞。只换一次：备用也拒说明是出口
-        IP 级限流，继续重试只会把惩罚期续长。非央视频地址保持原行为。
+        **绝不碰全局入口状态**（2026-11-27 回归）：早先这里顺手调用了
+        ``_rotate_entry``，想「把清单入口也切走免得下一片再撞」。但入口已在
+        备用（最后一个）时，``_rotate_entry`` 会先把它标坏 60 秒、再发现没有
+        下一个可选而返回 False——主备同时进冷却，清单侧只能换票，新票重演
+        一遍，实测 26 秒内换了 3 次票、窗口反复重建，播放器卡在同一片循环。
+        镜像重取实测成功率 100%，不碰入口状态就能断掉这条换票风暴链。
+        清单侧自己的 403 轮换照常走，和分片互不干扰。非央视频保持原行为。
         """
         status, headers, body, final = self._fetch(url, ua, timeout=self._seg_timeout)
         if status not in _GONE or not _is_ysp_url(url):
             return status, headers, body, final
 
-        rotated = self._rotate_entry(slug)
         alt = next((m for m in _mirror_entries(url) if m != url), "")
         if alt:
             status, headers, body, final = self._fetch(alt, ua, timeout=self._seg_timeout)
             if status == 200 and body:
                 with self._lock:
                     self.segment_entry_switches += 1
-                if not rotated:
-                    self._event(slug, "分片被拒，换备用入口取回")
+                self._event(slug, "分片被拒，换备用入口取回")
                 return status, headers, body, final
         # 备用也救不回：保留原来的偶发重试（入口刚刷新时会撞一次）
         time.sleep(_RETRY_PAUSE)
