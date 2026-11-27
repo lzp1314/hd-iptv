@@ -6,10 +6,15 @@
 
 from __future__ import annotations
 
+import tempfile
+import time
 import unittest
+from pathlib import Path
 
 from iptvhd import videoinfo
-from iptvhd.models import height_grade
+from iptvhd.models import Channel, Stream, height_grade
+from iptvhd.probe import probe_one
+from iptvhd.writers import write_m3u
 
 # 来自一路 1080P 直播分片，NAL 头 0x67 之后的 SPS 负载
 REAL_1080P_SPS = bytes.fromhex(
@@ -98,6 +103,89 @@ class RobustnessTest(unittest.TestCase):
         """竖屏（宽 < 高）不会是直播信号，判为解析失败。"""
         found = videoinfo.probe(wrap_ts(make_sps(45, 80)))
         self.assertFalse(found.ok)
+
+
+class _Resp:
+    status = 200
+    url = ""
+    ttfb_ms = 12
+    error = ""
+    truncated = False
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    @property
+    def text(self) -> str:
+        return self.body.decode("utf-8", "ignore")
+
+    @property
+    def speed_mbps(self) -> float:
+        return 8.0 if self.body else 0.0
+
+
+class _Client:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def get(self, url: str, **kwargs) -> _Resp:  # noqa: ANN003 - 测试替身
+        return _Resp(self.body)
+
+
+class RawStreamResolutionTest(unittest.TestCase):
+    """裸 TS 走 probe_one 也能读到真实分辨率，面板不再显示「未知」。"""
+
+    def test_raw_ts_gets_real_resolution(self):
+        body = wrap_ts(REAL_1080P_SPS[1:], head=b"\x47" * 188, tail=b"\x47" * 500)
+        stream = Stream(
+            url="http://192.168.1.5:8080/udp/239.1.1.1:5000",
+            raw_name="本地组播", custom=True, direct=True,
+        )
+        out = probe_one(stream, _Client(body), 262144, time.monotonic() + 5)
+
+        self.assertTrue(out.ok)
+        self.assertEqual((out.width, out.height), (1920, 1080))
+        self.assertEqual(out.grade, "1080P")
+        self.assertEqual(out.codec, "h264")
+
+    def test_unreadable_body_falls_back_to_hint(self):
+        stream = Stream(url="http://192.168.1.5:8080/udp/1", hint_height=720)
+        out = probe_one(stream, _Client(b"\x47" * 2048), 262144, time.monotonic() + 5)
+
+        self.assertTrue(out.ok)
+        self.assertEqual(out.height, 720)
+        self.assertEqual(out.grade, "720P")
+
+    def test_m3u_multi_line_mark_uses_probed_resolution(self):
+        """裸流解析出的分辨率要进 M3U 的多线路画质后缀（·1080P）。"""
+        body = wrap_ts(REAL_1080P_SPS[1:], head=b"\x47" * 188, tail=b"\x47" * 500)
+        raw = Stream(
+            url="http://192.168.1.5:8080/udp/239.1.1.1:5000",
+            raw_name="本地组播", custom=True, direct=True,
+        )
+        probed = probe_one(raw, _Client(body), 262144, time.monotonic() + 5)
+        self.assertEqual(probed.height, 1080)
+
+        other = Stream(url="http://192.168.1.6:8080/udp/239.1.1.2:5000",
+                       raw_name="本地组播", custom=True, direct=True, hint_height=720)
+        other_probed = probe_one(other, _Client(b"\x47" * 2048), 262144, time.monotonic() + 5)
+        ch = Channel(name="本地组播", group="自定义", streams=[probed, other_probed])
+        ch.accept(4)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.m3u"
+            write_m3u([ch], path, lines_per_channel=2)
+            text = path.read_text(encoding="utf-8")
+
+        self.assertIn("本地组播·1080P", text)
+        self.assertIn("本地组播·720P", text)
+
+        # 同一台只写一行时换成方括号，跟多线路区分开
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.m3u"
+            write_m3u([ch], path, lines_per_channel=1)
+            text = path.read_text(encoding="utf-8")
+        self.assertNotIn("·1080P", text)
+        self.assertIn("本地组播 [1080P]", text)
 
 
 if __name__ == "__main__":

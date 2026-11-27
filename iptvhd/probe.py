@@ -234,7 +234,12 @@ def _probe_one(
     # 非播放列表：直连 ts/flv/mp4，能下到字节即可认为可用
     stream.ok = bool(resp.body)
     stream.speed_mbps = resp.speed_mbps
-    stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name)
+    # 本地自定义源（rtp2http / udpxy）多数是裸 TS，里面同样带 SPS。
+    # 以前只有 HLS 分片会读码流，裸流的 height 永远是 0，面板只能显示「未知」，
+    # 那些台在有画质门槛的视图里也跟着没标签。这里复用同一套解析，读不到再兜底。
+    _read_resolution(stream, resp.body)
+    if not stream.height:
+        stream.height = stream.hint_height or hls.guess_height(stream.url, stream.raw_name)
     if not stream.ok:
         stream.error = "响应体为空"
     return stream

@@ -151,20 +151,26 @@ def render_m3u(
         if not ch.streams:
             continue
         logo = _logo(ch, logo_base)
-        seen: set[str] = set()
         key = failover_key(ch, lines_per_channel) if failover else ""
         picked = ch.streams[: max(1, lines_per_channel)]
+        # 走转发时，同一个台的多个源会塌缩成同一个地址；重复条目会让
+        # 播放器在两条一模一样的记录之间来回跳，先去掉。去重后再决定
+        # 标注形式——播放器实际看到几行，就按几行算单/多线路。
+        visible: list[tuple[Stream, str]] = []
+        seen: set[str] = set()
         for stream in picked:
-            # 走转发时，同一个台的多个源会塌缩成同一个地址；重复条目会让
-            # 播放器在两条一模一样的记录之间来回跳，先去掉
             target = _play_url(stream, relay_base, key)
             if target in seen:
                 continue
             seen.add(target)
-            # 一个频道多个源时，在名字后面标注画质，方便播放器里区分
+            visible.append((stream, target))
+        multi = len(visible) > 1
+        for stream, target in visible:
+            # 两种形式刻意区分：多线路用「·1080P」标注每条线路，
+            # 单线路用「 [1080P]」，看台名就知道这台有没有得切。
             suffix = ""
-            if multi_source_mark and len(picked) > 1 and stream.height:
-                suffix = f"·{stream.grade}"
+            if multi_source_mark and stream.height:
+                suffix = f"·{stream.grade}" if multi else f" [{stream.grade}]"
             tvg_id = ids.get(ch.name) or ch.streams[0].tvg_id or ch.name
             attrs = [
                 f'tvg-id="{_attr(tvg_id)}"',

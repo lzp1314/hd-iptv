@@ -178,8 +178,9 @@ class TestRenderM3u(unittest.TestCase):
         self.assertEqual(text.count("#EXTINF"), 1)
         from iptvhd.relay import channel_slug
         self.assertIn(f"/live/{channel_slug('CCTV-1', '央视')}.m3u8", text)
-        # 只剩一行时不该再带「·1080P」这种区分后缀
+        # 只剩一行时用 [1080P] 标明画质，跟多线路的 ·1080P 区分开
         self.assertNotIn("·1080P", text)
+        self.assertIn("CCTV-1 [1080P]", text)
 
     def test_lines_per_channel_can_be_raised(self):
         channel = Channel(
